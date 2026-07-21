@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DEAL ผู้ช่วยบัญชี · แดชบอร์ด</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #eef1ec;
+    --surface: #ffffff;
+    --ink: #17251f;
+    --muted: #647268;
+    --line: #e2e7df;
+    --green: #12674f;
+    --green-soft: #e4f0ea;
+    --orange: #dc6234;
+    --amber: #b7830f;
+    --amber-soft: #fbf0d6;
+    --side: #14201b;
+    --radius: 16px;
+    --shadow: 0 1px 2px rgba(23,37,31,.04), 0 6px 20px rgba(23,37,31,.05);
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    font-family: "IBM Plex Sans Thai", system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--ink); line-height: 1.5; font-size: 16px;
+  }
+
+  /* ---- app shell ---- */
+  .app { display: flex; min-height: 100vh; }
+
+  /* ---- sidebar ---- */
+  .sidebar {
+    width: 232px; flex-shrink: 0; background: var(--side); color: #cdd6d0;
+    position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column;
+    padding: 18px 14px; gap: 6px;
+  }
+  .side-brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 16px; }
+  .side-brand .logo { width: 38px; height: 38px; border-radius: 11px; background: var(--green); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 19px; }
+  .side-brand b { color: #fff; font-weight: 700; font-size: 17px; letter-spacing: -.2px; }
+  .side-brand span { display: block; font-size: 12px; color: #8fa199; font-weight: 500; margin-top: -3px; }
+
+  .nav { display: flex; flex-direction: column; gap: 2px; }
+  .nav a {
+    display: flex; align-items: center; gap: 11px; padding: 10px 11px; border-radius: 10px;
+    color: #c3cec8; text-decoration: none; font-size: 14.5px; font-weight: 500;
+    border-left: 3px solid transparent;
+  }
+  .nav a svg { width: 18px; height: 18px; flex-shrink: 0; }
+  .nav a:hover { background: rgba(255,255,255,.06); color: #fff; }
+  .nav a.active { background: rgba(30,157,116,.16); color: #fff; border-left-color: #2fae83; }
+  .nav .sep { height: 1px; background: rgba(255,255,255,.08); margin: 8px 6px; }
+
+  .side-foot { margin-top: auto; }
+  .connect {
+    display: block; text-align: center; background: var(--green); color: #fff; text-decoration: none;
+    font-size: 13.5px; font-weight: 600; padding: 10px; border-radius: 11px; margin-bottom: 10px;
+  }
+  .side-acct { display: flex; align-items: center; gap: 9px; padding: 8px; border-radius: 10px; background: rgba(255,255,255,.05); }
+  .side-acct .av { width: 30px; height: 30px; border-radius: 50%; background: #2fae83; color: #06231a; display: grid; place-items: center; font-weight: 700; font-size: 13px; }
+  .side-acct b { color: #fff; font-size: 13px; font-weight: 600; display: block; line-height: 1.2; }
+  .side-acct span { font-size: 11px; color: #8fa199; }
+
+  /* ---- main ---- */
+  .main { flex: 1; min-width: 0; padding: 22px 24px 44px; }
+  .topbar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  .topbar h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -.3px; }
+  .topbar .biz { margin-left: auto; text-align: right; }
+  .topbar .biz b { font-weight: 600; font-size: 14.5px; }
+  .month { display: inline-flex; align-items: center; gap: 6px; margin-top: 2px; background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; font-size: 13px; color: var(--muted); font-weight: 500; }
+
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+  .kpi { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 16px 18px; box-shadow: var(--shadow); overflow: hidden; }
+  .kpi .label { font-size: 13px; color: var(--muted); font-weight: 500; margin-bottom: 8px; }
+  .kpi .val { font-size: 26px; font-weight: 700; letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+  .kpi .sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .kpi.spend { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .kpi.spend .label { color: #b7c4bd; }
+  .kpi.spend .val { color: #ff8a56; font-size: 30px; }
+  .kpi.spend .bar { height: 4px; background: var(--orange); border-radius: 3px; width: 46px; margin-top: 12px; }
+  .kpi .val.amber { color: var(--amber); }
+  .kpi .val.paid { color: var(--green); }
+
+  .grid { display: grid; grid-template-columns: 1.7fr 1fr; gap: 12px; align-items: start; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; }
+  .card h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  .card .hint { font-size: 12.5px; color: var(--muted); margin: 0 0 12px; }
+
+  .filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .filters input, .filters select { font-family: inherit; font-size: 14px; color: var(--ink); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; background: #fbfcfb; }
+  .filters input { flex: 1; min-width: 140px; }
+  .filters input:focus, .filters select:focus { outline: 2px solid var(--green); outline-offset: 1px; border-color: var(--green); }
+
+  .rows { display: flex; flex-direction: column; }
+  .row { display: grid; grid-template-columns: 46px 1fr auto; gap: 12px; align-items: center; padding: 12px 4px; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: 0; }
+  .date { text-align: center; font-variant-numeric: tabular-nums; }
+  .date .d { font-size: 18px; font-weight: 700; line-height: 1; }
+  .date .m { font-size: 11px; color: var(--muted); }
+  .meta .name { font-weight: 600; font-size: 15px; }
+  .meta .desc { font-size: 12.5px; color: var(--muted); }
+  .chips { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+  .chip { font-size: 11.5px; padding: 2px 9px; border-radius: 999px; background: #f0f3ef; color: #4a5a52; font-weight: 500; }
+  .badge { font-size: 11.5px; padding: 2px 9px; border-radius: 999px; font-weight: 600; }
+  .badge.pending { background: var(--amber-soft); color: var(--amber); }
+  .badge.paid { background: var(--green-soft); color: var(--green); }
+  .amt { text-align: right; }
+  .amt .n { font-weight: 700; font-size: 16px; font-variant-numeric: tabular-nums; }
+  .amt a { display: inline-block; font-size: 12px; color: var(--green); text-decoration: none; margin-top: 2px; }
+  .amt a:hover { text-decoration: underline; }
+  .empty { text-align: center; color: var(--muted); padding: 28px 0; font-size: 14px; }
+
+  .catrow { margin-bottom: 13px; }
+  .catrow .top { display: flex; justify-content: space-between; font-size: 13.5px; margin-bottom: 5px; }
+  .catrow .top .cn { font-weight: 500; }
+  .catrow .top .cv { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .track { height: 9px; background: #eef1ee; border-radius: 6px; overflow: hidden; }
+  .fill { height: 100%; background: var(--green); border-radius: 6px; transition: width .5s cubic-bezier(.2,.7,.2,1); }
+
+  .foot { margin-top: 18px; font-size: 12px; color: var(--muted); text-align: center; }
+
+  @media (max-width: 860px) {
+    .app { flex-direction: column; }
+    .sidebar { width: auto; height: auto; position: static; flex-direction: column; padding: 12px; }
+    .side-brand { padding-bottom: 10px; }
+    .nav { flex-direction: row; overflow-x: auto; gap: 6px; padding-bottom: 4px; }
+    .nav a { border-left: 0; border-bottom: 3px solid transparent; white-space: nowrap; padding: 8px 10px; }
+    .nav a.active { border-left: 0; border-bottom-color: #2fae83; }
+    .nav .sep { display: none; }
+    .side-foot { display: none; }
+    .main { padding: 16px 14px 40px; }
+    .kpis { grid-template-columns: repeat(2, 1fr); }
+    .grid { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) { .fill { transition: none; } }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <aside class="sidebar">
+    <div class="side-brand">
+      <div class="logo">D</div>
+      <div><b>DEAL</b><span>ผู้ช่วยบัญชี</span></div>
+    </div>
+    <nav class="nav">
+      <a href="#" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg> แดชบอร์ด</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg> รายจ่าย</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/></svg> รายรับ</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg> ลูกค้า / คู่ค้า</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg> หมวดหมู่</a>
+      <div class="sep"></div>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg> ทีมของฉัน</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> ตั้งค่า</a>
+    </nav>
+    <div class="side-foot">
+      <a href="#" class="connect">🔗 เชื่อม Google Drive</a>
+      <div class="side-acct">
+        <div class="av">N</div>
+        <div><b>Not</b><span>เจ้าของธุรกิจ</span></div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <h1>แดชบอร์ด</h1>
+      <div class="biz">
+        <b id="bizName">บจ.ออล เจนเนอรอล เซอร์วิส</b>
+        <div class="month">📅 <span id="monthLabel">กรกฎาคม 2026</span></div>
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi spend">
+        <div class="label">ใช้จ่ายเดือนนี้</div>
+        <div class="val" id="kSpend">฿0</div>
+        <div class="bar"></div>
+      </div>
+      <div class="kpi">
+        <div class="label">จำนวนรายการ</div>
+        <div class="val" id="kCount">0</div>
+        <div class="sub">บิลที่บันทึกแล้ว</div>
+      </div>
+      <div class="kpi">
+        <div class="label">รอเบิก</div>
+        <div class="val amber" id="kPending">฿0</div>
+        <div class="sub" id="kPendingCount">0 รายการ</div>
+      </div>
+      <div class="kpi">
+        <div class="label">จ่ายแล้ว</div>
+        <div class="val paid" id="kPaid">฿0</div>
+        <div class="sub" id="kPaidCount">0 รายการ</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>รายการค่าใช้จ่าย</h2>
+        <p class="hint">ทุกบิลที่ส่งเข้ามาในไลน์จะมาโผล่ที่นี่</p>
+        <div class="filters">
+          <input id="q" type="search" placeholder="ค้นหาร้าน หรือ รายละเอียด…" aria-label="ค้นหา" />
+          <select id="fStatus" aria-label="สถานะ">
+            <option value="">ทุกสถานะ</option>
+            <option value="รอเบิก">รอเบิก</option>
+            <option value="จ่ายแล้ว">จ่ายแล้ว</option>
+          </select>
+          <select id="fCat" aria-label="หมวด"></select>
+        </div>
+        <div class="rows" id="rows"></div>
+      </div>
+
+      <div class="card">
+        <h2>หมวดที่ใช้เยอะสุด</h2>
+        <p class="hint">เดือนนี้</p>
+        <div id="cats"></div>
+      </div>
+    </div>
+
+    <p class="foot">DEAL ผู้ช่วยบัญชี · ข้อมูลนี้เก็บอยู่ในชีทของคุณเอง</p>
+  </main>
+</div>
+
+<script>
+// ===== ต่อข้อมูลจริงตรงนี้ =====
+// ตอนนี้ใช้ข้อมูลตัวอย่าง เพื่อให้เห็นหน้าตาจริง (ใช้เดโมให้ลูกค้าดูได้เลย)
+// เชื่อมของจริง: เพิ่ม route /api/expenses ใน worker ที่อ่านแถวจาก Google Sheet ของ tenant นั้น
+// แล้วส่ง JSON กลับ จากนั้นเปลี่ยนบรรทัดล่างเป็น:
+// ที่อยู่ worker ของบอท + รหัสกลุ่ม (tenant) — ส่งผ่าน URL: dashboard.html?tenant=Uxxxx
+const API = "https://accoutingsuppor02.organization-23c.workers.dev/api/expenses";
+const TENANT = new URLSearchParams(location.search).get("tenant") || "";
+// ถ้าไม่มี tenant หรือดึงไม่ได้ จะใช้ข้อมูลตัวอย่างด้านล่าง (ใช้เดโมได้)
+let DATA = [
+  { date:"2026-07-21", amount:128,   vendor:"ShopeeFood",       category:"อาหาร & รับรอง",        note:"ค่าอาหารประชุม",        status:"รอเบิก",  img:"#" },
+  { date:"2026-07-20", amount:5000,  vendor:"ช่างแอร์ สมชาย",    category:"ค่าบริการ & จ้างงาน",   note:"ค่าล้างแอร์ออฟฟิศ",     status:"จ่ายแล้ว", img:"#" },
+  { date:"2026-07-19", amount:890,   vendor:"ปั๊ม ปตท.",         category:"เดินทาง & ขนส่ง",       note:"ค่าน้ำมันรถส่งของ",     status:"จ่ายแล้ว", img:"#" },
+  { date:"2026-07-18", amount:1590,  vendor:"Lazada",           category:"วัสดุ & อุปกรณ์สำนักงาน", note:"กระดาษ + หมึกปริ้น",   status:"รอเบิก",  img:"#" },
+  { date:"2026-07-17", amount:2400,  vendor:"Facebook Ads",     category:"การตลาด & โฆษณา",       note:"ยิงแอดโปรตู้ชกมวย",     status:"จ่ายแล้ว", img:"#" },
+  { date:"2026-07-16", amount:320,   vendor:"Grab",             category:"เดินทาง & ขนส่ง",       note:"ค่าเดินทางไปหาลูกค้า",  status:"จ่ายแล้ว", img:"#" },
+  { date:"2026-07-15", amount:780,   vendor:"ร้านกาแฟ อิน",     category:"อาหาร & รับรอง",        note:"เลี้ยงรับรองคู่ค้า",    status:"รอเบิก",  img:"#" },
+  { date:"2026-07-14", amount:450,   vendor:"การไฟฟ้า",         category:"ค่าน้ำ ค่าไฟ ค่าเน็ต",  note:"ค่าไฟออฟฟิศ",          status:"จ่ายแล้ว", img:"#" },
+  { date:"2026-07-12", amount:3200,  vendor:"บจ.รับเหมา ก่อสร้าง",category:"ค่าบริการ & จ้างงาน",  note:"ค่าติดตั้งตู้ โลเคชั่นใหม่", status:"จ่ายแล้ว", img:"#" },
+  { date:"2026-07-10", amount:199,   vendor:"Canva",            category:"การตลาด & โฆษณา",       note:"ค่าสมาชิกทำสื่อ",       status:"จ่ายแล้ว", img:"#" },
+];
+
+const baht = n => "฿" + Number(n).toLocaleString("th-TH", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+const THMON = ["ม.ค.","ก.พ.","มี.ค.","เม.ย.","พ.ค.","มิ.ย.","ก.ค.","ส.ค.","ก.ย.","ต.ค.","พ.ย.","ธ.ค."];
+const el = id => document.getElementById(id);
+
+function renderKPIs() {
+  const total = DATA.reduce((s,r)=>s+r.amount,0);
+  const pend = DATA.filter(r=>r.status==="รอเบิก");
+  const paid = DATA.filter(r=>r.status==="จ่ายแล้ว");
+  el("kSpend").textContent = baht(total);
+  el("kCount").textContent = DATA.length;
+  el("kPending").textContent = baht(pend.reduce((s,r)=>s+r.amount,0));
+  el("kPendingCount").textContent = pend.length + " รายการ";
+  el("kPaid").textContent = baht(paid.reduce((s,r)=>s+r.amount,0));
+  el("kPaidCount").textContent = paid.length + " รายการ";
+}
+
+function renderCats() {
+  const map = {};
+  DATA.forEach(r => { map[r.category] = (map[r.category]||0) + r.amount; });
+  const arr = Object.entries(map).sort((a,b)=>b[1]-a[1]);
+  const max = arr.length ? arr[0][1] : 1;
+  el("cats").innerHTML = arr.map(([name,val]) => `
+    <div class="catrow">
+      <div class="top"><span class="cn">${name}</span><span class="cv">${baht(val)}</span></div>
+      <div class="track"><div class="fill" style="width:${Math.max(6,(val/max)*100)}%"></div></div>
+    </div>`).join("");
+}
+
+function buildCatFilter() {
+  const cats = [...new Set(DATA.map(r=>r.category))];
+  el("fCat").innerHTML = '<option value="">ทุกหมวด</option>' + cats.map(c=>`<option>${c}</option>`).join("");
+}
+
+function renderRows() {
+  const q = el("q").value.trim().toLowerCase();
+  const st = el("fStatus").value;
+  const ct = el("fCat").value;
+  const list = DATA.filter(r =>
+    (!st || r.status===st) &&
+    (!ct || r.category===ct) &&
+    (!q || (r.vendor+r.note).toLowerCase().includes(q))
+  );
+  if (!list.length) { el("rows").innerHTML = '<div class="empty">ไม่พบรายการที่ค้นหา</div>'; return; }
+  el("rows").innerHTML = list.map(r => {
+    const d = new Date(r.date);
+    const badge = r.status==="จ่ายแล้ว" ? "paid" : "pending";
+    return `
+    <div class="row">
+      <div class="date"><div class="d">${d.getDate()}</div><div class="m">${THMON[d.getMonth()]}</div></div>
+      <div class="meta">
+        <div class="name">${r.vendor}</div>
+        <div class="desc">${r.note}</div>
+        <div class="chips">
+          <span class="chip">${r.category}</span>
+          <span class="badge ${badge}">${r.status}</span>
+        </div>
+      </div>
+      <div class="amt">
+        <div class="n">${baht(r.amount)}</div>
+        ${r.img ? `<a href="${r.img}" target="_blank" rel="noopener">📎 ดูบิล</a>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+}
+
+["q","fStatus","fCat"].forEach(id => el(id).addEventListener("input", renderRows));
+
+function draw() { renderKPIs(); renderCats(); buildCatFilter(); renderRows(); }
+
+async function load() {
+  if (TENANT) {
+    try {
+      const res = await fetch(`${API}?tenant=${encodeURIComponent(TENANT)}`);
+      if (res.ok) {
+        const rows = await res.json();
+        if (Array.isArray(rows) && rows.length) DATA = rows;   // ใช้ข้อมูลจริงจากชีท
+      }
+    } catch (e) { /* ดึงไม่ได้ → ใช้ข้อมูลตัวอย่างแทน */ }
+  }
+  draw();
+}
+load();
+</script>
+</body>
+</html>

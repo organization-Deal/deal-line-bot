@@ -1,0 +1,24 @@
+name = "accoutingsuppor02"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+# ชีทเริ่มต้น ใช้ตอนยังไม่ผูกกลุ่มไลน์กับชีทเฉพาะบริษัท (Phase 0/1)
+DEFAULT_SHEET_ID = ""
+# ชื่อแท็บในชีทที่จะเขียนแถวลงไป
+SHEET_TAB = "รายจ่าย"
+# โฟลเดอร์ Drive สำหรับเก็บรูปบิล (เว้นว่าง = ปิดฟีเจอร์เก็บรูป)
+DRIVE_FOLDER_ID = ""
+# รุ่นโมเดล OCR
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "19ef27ff24a044acb0bf6856ae733636"
+
+# --- secrets (ตั้งด้วย: npx wrangler secret put <NAME>) ---
+# LINE_CHANNEL_SECRET
+# LINE_ACCESS_TOKEN
+# CLAUDE_KEY
+# GOOGLE_SA_EMAIL
+# GOOGLE_SA_PRIVATE_KEY
