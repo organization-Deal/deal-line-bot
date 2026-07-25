@@ -158,7 +158,7 @@
     <!-- OVERVIEW -->
     <section class="page show" id="page-overview">
       <div class="kpis">
-        <div class="kpi hero"><div class="lb">ใช้จ่าย (ช่วงที่เลือก)</div><div class="big" id="kSpend">฿0</div><div class="bar"></div></div>
+        <div class="kpi hero"><div class="lb">ใช้จ่าย (ช่วงที่เลือก)</div><div class="big" id="kSpend">฿0</div><div class="foot" id="kSpendCmp" style="color:#8fa199"></div><div class="bar"></div></div>
         <div class="kpi"><div class="lb">จำนวนบิล</div><div class="big" id="kCount">0</div><div class="foot">บิลที่บันทึกแล้ว</div></div>
         <div class="kpi pending"><div class="lb">รอเบิก</div><div class="big" id="kPending">฿0</div><div class="foot" id="kPendingCount">0 รายการ</div></div>
         <div class="kpi paid"><div class="lb">จ่ายแล้ว</div><div class="big" id="kPaid">฿0</div><div class="foot" id="kPaidCount">0 รายการ</div></div>
@@ -168,7 +168,10 @@
           <div class="card"><h3>แนวโน้มรายจ่าย</h3><div class="cs">ยอดใช้จ่ายรายวันในช่วงที่เลือก</div><svg class="trend" id="trend" viewBox="0 0 600 150" preserveAspectRatio="none"></svg></div>
           <div class="card"><h3>รายการล่าสุด</h3><div class="cs">บิลที่เพิ่งบันทึก</div><div id="recent"></div></div>
         </div>
-        <div class="card"><h3>หมวดที่ใช้เยอะสุด</h3><div class="cs">ช่วงที่เลือก</div><div id="cats"></div></div>
+        <div>
+          <div class="card"><h3>หมวดที่ใช้เยอะสุด</h3><div class="cs">ช่วงที่เลือก</div><div id="cats"></div></div>
+          <div class="card"><h3>ร้านที่จ่ายเยอะสุด</h3><div class="cs">ท็อป 5 ร้าน/ผู้รับ</div><div id="vendors"></div></div>
+        </div>
       </div>
     </section>
 
@@ -179,6 +182,7 @@
           <input type="text" id="q" placeholder="ค้นหาร้าน / รายละเอียด…" />
           <select id="fStatus"><option value="">ทุกสถานะ</option><option>รอเบิก</option><option>จ่ายแล้ว</option></select>
           <select id="fCat"></select>
+          <select id="fSort"><option value="new">ล่าสุดก่อน</option><option value="old">เก่าสุดก่อน</option><option value="hi">ยอดมาก→น้อย</option><option value="lo">ยอดน้อย→มาก</option></select>
           <button class="btn" id="expCsv">⬇ ส่งออก CSV</button>
         </div>
         <div class="cs" id="expSum" style="margin-bottom:10px"></div>
@@ -308,6 +312,15 @@ function renderKPIs(){
   el("kCount").textContent=D.length;
   el("kPending").textContent=baht(pend.reduce((s,r)=>s+ +r.amount,0)); el("kPendingCount").textContent=pend.length+" รายการ";
   el("kPaid").textContent=baht(paid.reduce((s,r)=>s+ +r.amount,0)); el("kPaidCount").textContent=paid.length+" รายการ";
+  // เทียบเดือนนี้ vs เดือนก่อน
+  const now=new Date();
+  const sumMon=(mo,yr)=>ALL.filter(r=>{const d=pdate(r.date);return d&&d.getMonth()===mo&&d.getFullYear()===yr;}).reduce((s,r)=>s+ +r.amount,0);
+  const cur=sumMon(now.getMonth(),now.getFullYear());
+  const lm=new Date(now.getFullYear(),now.getMonth()-1,1);
+  const prev=sumMon(lm.getMonth(),lm.getFullYear());
+  const cmp=el("kSpendCmp");
+  if(prev>0){const diff=((cur-prev)/prev)*100;const up=diff>=0;cmp.textContent=(up?"▲ +":"▼ ")+diff.toFixed(0)+"% เทียบเดือนก่อน";cmp.style.color=up?"#e8a87c":"#8ee9c3";}
+  else cmp.textContent="";
 }
 function renderTrend(){
   const D=scoped().slice().sort((a,b)=>pdate(a.date)-pdate(b.date));
@@ -330,6 +343,11 @@ function renderCats(){
   const arr=Object.entries(map).sort((a,b)=>b[1]-a[1]); const max=arr.length?arr[0][1]:1;
   el("cats").innerHTML=arr.length?arr.map(([n,v])=>`<div class="catrow"><div class="top"><span>${n}</span><span class="cv">${baht(v)}</span></div><div class="track"><div class="fill" style="width:${Math.max(6,(v/max)*100)}%"></div></div></div>`).join(""):'<div class="empty">ยังไม่มีข้อมูล</div>';
 }
+function renderVendors(){
+  const map={}; scoped().forEach(r=>{const k=r.vendor||"ไม่ระบุ";map[k]=(map[k]||0)+ +r.amount;});
+  const arr=Object.entries(map).sort((a,b)=>b[1]-a[1]).slice(0,5); const max=arr.length?arr[0][1]:1;
+  el("vendors").innerHTML=arr.length?arr.map(([n,v])=>`<div class="catrow"><div class="top"><span>${n}</span><span class="cv">${baht(v)}</span></div><div class="track"><div class="fill" style="width:${Math.max(6,(v/max)*100)}%;background:var(--orange)"></div></div></div>`).join(""):'<div class="empty">ยังไม่มีข้อมูล</div>';
+}
 function renderRecent(){
   const D=scoped().slice(0,5);
   el("recent").innerHTML=D.length?D.map(rowHTML).join(""):'<div class="empty">ยังไม่มีรายการ</div>';
@@ -351,8 +369,15 @@ function buildCatFilter(){
   el("fCat").innerHTML='<option value="">ทุกหมวด</option>'+cats.map(c=>`<option>${c}</option>`).join("");
 }
 function filteredExp(){
-  const q=el("q").value.trim().toLowerCase(),st=el("fStatus").value,ct=el("fCat").value;
-  return scoped().filter(r=>(!st||r.status===st)&&(!ct||r.category===ct)&&(!q||((r.vendor||"")+(r.note||"")).toLowerCase().includes(q)));
+  const q=el("q").value.trim().toLowerCase(),st=el("fStatus").value,ct=el("fCat").value,so=el("fSort")?el("fSort").value:"new";
+  let list=scoped().filter(r=>(!st||r.status===st)&&(!ct||r.category===ct)&&(!q||((r.vendor||"")+(r.note||"")).toLowerCase().includes(q)));
+  list.sort((a,b)=>{
+    if(so==="hi")return +b.amount- +a.amount;
+    if(so==="lo")return +a.amount- +b.amount;
+    const da=pdate(a.date)||0,db=pdate(b.date)||0;
+    return so==="old"?da-db:db-da;
+  });
+  return list;
 }
 function renderExp(){
   const list=filteredExp();
@@ -442,13 +467,13 @@ document.querySelectorAll(".navlink").forEach(b=>b.addEventListener("click",()=>
 el("rangeSel").querySelectorAll("button").forEach(b=>b.addEventListener("click",()=>{
   el("rangeSel").querySelectorAll("button").forEach(x=>x.classList.remove("on"));b.classList.add("on");RANGE=b.dataset.r;drawScoped();
 }));
-["q","fStatus","fCat"].forEach(id=>el(id).addEventListener("input",renderExp));
+["q","fStatus","fCat","fSort"].forEach(id=>{const e=el(id);if(e)e.addEventListener("input",renderExp);});
 el("expCsv").onclick=()=>download("expenses.csv",toCSV(filteredExp()));
 el("repMonth").onchange=renderReport;
 el("repCsv").onclick=()=>download("report.csv",toCSV(repData()));
 el("repPrint").onclick=()=>window.print();
 
-function drawScoped(){renderKPIs();renderTrend();renderCats();renderRecent();renderExp();}
+function drawScoped(){renderKPIs();renderTrend();renderCats();renderVendors();renderRecent();renderExp();}
 function drawAll(){buildCatFilter();buildRepMonths();drawScoped();renderReim();renderReport();renderBills();renderSettings();
   el("coName").textContent=CONAME;
   el("connBtn").href=WORKER+"/oauth/connect?tenant="+encodeURIComponent(TENANT);
