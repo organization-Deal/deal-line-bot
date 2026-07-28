@@ -1,13 +1,10 @@
-// DEAL LINE Finance Bot — v1.1
+// DEAL LINE Finance Bot — v1.2
 // ถ่ายบิลลง LINE → OCR → ยืนยัน → เขียนชีท (+เก็บรูป) → dashboard
 //
-// เปลี่ยนจาก v1.0:
-//   • ทุกรายการที่บันทึก ตั้ง "ออกใบแทน" = TRUE ตั้งแต่แรก
-//     (ออกใบแทนทุกใบที่เบิก แล้วบัญชีค่อยเอาออกในแดชบอร์ดว่าใบไหนไม่ต้องใช้)
-//   • การ์ด "บันทึกแล้ว" เตือนทันทีถ้ายังตั้งค่าข้อมูลบริษัทไม่ครบ
-//     — ไม่ต้องรอไปเจอตอนจะพิมพ์ใบแทนแล้วเอกสารออกมาโล่ง
-//     เช็คผ่าน KV flag `setup:{tenant}` จะได้ไม่ต้องอ่านชีททุกครั้ง
-//     flag ถูกล้างอัตโนมัติเมื่อมีการบันทึกตั้งค่าใหม่
+// เปลี่ยนจาก v1.1:
+//   • ส่ง setupUrl ให้การ์ด — ปุ่มล่างจะกลายเป็น [⚠️ เพิ่มข้อมูลบริษัท] ลิงก์ตรงไปหน้าตั้งค่า
+//     พอตั้งค่าครบ ปุ่มกลับเป็น [📊 เปิดแดชบอร์ด] เอง
+//   • การ์ดเมนูรอง (เพิ่มเติม) มีทางเข้าแดชบอร์ดด้วย
 
 import { verifySignature, getMessageContent, reply, textMsg, confirmCard, savedCard, moreCard } from "./line.js";
 import { ocrReceipt } from "./ocr.js";
@@ -20,7 +17,7 @@ import {
 import { uploadImage, listUploadedImages } from "./drive.js";
 import { buildConnectUrl, handleCallback, getUserToken, createUserSheet } from "./oauth.js";
 
-const VERSION = "DEAL_LINE_BOT_v1.1";
+const VERSION = "DEAL_LINE_BOT_v1.2";
 
 const PENDING_ACTS = new Set(["confirm", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -52,29 +49,30 @@ function safeEqual(a, b) {
   return diff === 0;
 }
 
-/* ═══════════ เตือนเมื่อยังตั้งค่าไม่ครบ ═══════════ */
+/* ═══════════ เช็คว่าตั้งค่าข้อมูลบริษัทครบหรือยัง ═══════════ */
 
 /**
- * คืนข้อความเตือนสั้น ๆ ถ้ายังตั้งค่าข้อมูลบริษัทไม่ครบ — ไม่ครบก็คืน null
- * ใช้ KV flag กันอ่านชีทซ้ำทุกครั้งที่บันทึกรายการ
+ * คืน { warn } ถ้ายังไม่ครบ / คืน null ถ้าครบแล้ว
+ * ใช้ KV flag `setup:{tenant}` กันอ่านชีทซ้ำทุกครั้งที่บันทึกรายการ
+ * flag ถูกล้างเมื่อมีการบันทึกตั้งค่าใหม่ (POST /api/settings) หรือสั่ง migrate
  */
-async function setupWarning(env, key, sheet) {
+async function checkSetup(env, key, sheet) {
   try {
     if ((await env.KV.get(`setup:${key}`)) === "1") return null;
 
     const s = await readSettings(env, sheet.sheetId, sheet.token);
     const missing = [];
-    if (!s.company_name) missing.push("ชื่อบริษัท");
-    if (!s.tax_id) missing.push("เลขผู้เสียภาษี");
+    if (!s.company_name)  missing.push("ชื่อบริษัท");
+    if (!s.tax_id)        missing.push("เลขผู้เสียภาษี");
     if (!s.approver_name) missing.push("ชื่อผู้อนุมัติ");
 
     if (!missing.length) {
       await env.KV.put(`setup:${key}`, "1");
       return null;
     }
-    return `⚠️ ยังไม่ได้ตั้งค่า ${missing.join(" · ")} — ใบรับรองแทนใบเสร็จที่ออกจะไม่สมบูรณ์ กด "เปิดแดชบอร์ด" ด้านล่างเพื่อตั้งค่า`;
+    return { warn: `ยังขาด ${missing.join(" · ")} — ใบรับรองแทนใบเสร็จจะออกมาไม่สมบูรณ์ กดปุ่มส้มด้านล่างเพื่อกรอก (ทำครั้งเดียว)` };
   } catch (e) {
-    console.warn("setupWarning", e.message);
+    console.warn("checkSetup", e.message);
     return null;
   }
 }
@@ -112,7 +110,7 @@ export default {
             sheetUrl: `https://docs.google.com/spreadsheets/d/${sheetId}/edit`,
           });
         }
-        return json({ ok: true, count: out.length, defaultSheetId: env.DEFAULT_SHEET_ID || null, tenants: out });
+        return json({ ok: true, count: out.length, tenants: out });
       } catch (e) {
         return json({ error: String(e) }, 500);
       }
@@ -328,13 +326,19 @@ async function computeStats(env, sheet, rec, justAppended = null) {
 }
 
 async function renderSaved(env, key, sheet, rec, justAppended = null) {
-  const [stats, warn, url] = await Promise.all([
+  const [stats, setup, dash, setupPage] = await Promise.all([
     computeStats(env, sheet, rec, justAppended),
-    setupWarning(env, key, sheet),
+    checkSetup(env, key, sheet),
     dashUrl(env, key),
+    dashUrl(env, key, "/receipt"),
   ]);
-  return savedCard(rec, rec.imageUrl || null, url, {
-    id: rec.id, stats, insight: warn || undefined,
+
+  return savedCard(rec, rec.imageUrl || null, dash, {
+    id: rec.id,
+    stats,
+    // มี setupUrl = ยังตั้งค่าไม่ครบ → ปุ่มล่างกลายเป็น "เพิ่มข้อมูลบริษัท"
+    setupUrl: setup ? setupPage : null,
+    setupWarn: setup ? setup.warn : null,
   });
 }
 
@@ -440,13 +444,13 @@ async function handlePostback(event, env, key) {
 
     if (act === "cancel") {
       await env.KV.delete(`pending:${id}`);
-      return reply(env, event.replyToken, textMsg('ยกเลิกแล้วครับ ไม่ได้บันทึกลงชีท\nรูปยังอยู่ใน Drive — จับเข้ารายการอื่นได้จากแดชบอร์ด'));
+      return reply(env, event.replyToken, textMsg("ยกเลิกแล้วครับ ไม่ได้บันทึกลงชีท\nรูปยังอยู่ใน Drive — จับเข้ารายการอื่นได้จากแดชบอร์ด"));
     }
 
     const token = await getUserToken(env, key);
     const sheet = { sheetId: pending.sheetId, token };
 
-    // ⭐ ทุกรายการที่เบิก ตั้งให้ออกใบแทนไว้ก่อน — บัญชีค่อยเอาออกในแดชบอร์ด
+    // ทุกรายการที่เบิก ตั้งให้ออกใบแทนไว้ก่อน — บัญชีค่อยเอาออกในแดชบอร์ด
     const toSave = { ...pending.record, needSlip: true };
 
     const { id: rowId, row } = await appendExpense(
@@ -481,7 +485,7 @@ async function handlePostback(event, env, key) {
   if (act === "more") {
     const rec = await getExpenseById(env, sheet.sheetId, id, sheet.token);
     if (!rec) return reply(env, event.replyToken, textMsg(MSG_STALE));
-    return reply(env, event.replyToken, moreCard(rec, { id }));
+    return reply(env, event.replyToken, moreCard(rec, { id, dashboardUrl: await dashUrl(env, key) }));
   }
 
   if (act === "back") {
@@ -590,6 +594,12 @@ async function handleText(event, env, key) {
     }
   }
 
+  if (/^(ตั้งค่า|settings|ข้อมูลบริษัท)$/i.test(text)) {
+    const url = await dashUrl(env, key, "/receipt");
+    if (!url) return reply(env, event.replyToken, textMsg("ยังไม่ได้ตั้งค่าแดชบอร์ดครับ 🙏"));
+    return reply(env, event.replyToken, textMsg("กรอกข้อมูลบริษัทได้ที่นี่ ⚙️\n" + url));
+  }
+
   if (/^(รีเซ็ตลิงก์|รีเซ็ทลิงก์|reset ?link|revoke)$/i.test(text)) {
     await resetDashToken(env, key);
     const url = await dashUrl(env, key);
@@ -625,6 +635,7 @@ async function handleText(event, env, key) {
       "ปกติแค่ส่งรูปบิลก็พอครับ ที่เหลือกดจากการ์ดได้เลย 📒\n\n" +
       "คำสั่งเสริม (ถ้าอยากใช้):\n" +
       "• แดชบอร์ด — เปิดหน้ารวมทุกอย่าง\n" +
+      "• ตั้งค่า — กรอกข้อมูลบริษัท\n" +
       "• รีเซ็ตลิงก์ — ยกเลิกลิงก์เก่าทั้งหมด\n" +
       "• เชื่อม — เชื่อม Google"
     ));
