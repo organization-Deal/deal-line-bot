@@ -1,7 +1,7 @@
-// LINE Messaging API I/O helpers.
-// v1.1 — การ์ดย้ายไปเรนเดอร์ใน card.js แล้ว (index.js ไม่ต้องแก้)
+// LINE Messaging API I/O helpers — v1.2
+// การ์ดทั้งหมดเรนเดอร์ใน card.js
 
-import { buildConfirmCard, buildSavedCard } from "./card.js";
+import { buildConfirmCard, buildSavedCard, buildMoreCard } from "./card.js";
 
 export async function verifySignature(env, rawBody, signature) {
   if (!signature) return false;
@@ -48,12 +48,14 @@ export function textMsg(text) {
   return { type: "text", text };
 }
 
-// การ์ดยืนยันหลัง OCR — id คือ key ของ pending record
 export function confirmCard(id, r, opts = {}) {
   return buildConfirmCard(r, { ...opts, id });
 }
 
-// การ์ด "บันทึกแล้ว" หลังผู้ใช้กดยืนยัน
 export function savedCard(r, driveLink, dashboardUrl, opts = {}) {
   return buildSavedCard(r, { ...opts, driveLink, dashboardUrl });
+}
+
+export function moreCard(r, opts = {}) {
+  return buildMoreCard(r, opts);
 }
