@@ -199,7 +199,21 @@ export default {
             files: showAll ? files : unlinked,
           }));
         }
-
+        // อัปโลโก้ / ลายเซ็น เข้า Drive ลูกค้า แล้วคืนลิงก์ที่ฝังในเอกสารได้
+        if (url.pathname === "/api/upload-image" && request.method === "POST") {
+          const b = await request.json();
+          if (!b.base64) return cors(json({ error: "no image" }, 400));
+          const link = await uploadImage(
+            env, b.base64, b.mediaType || "image/png",
+            b.name || `asset-${Date.now()}.png`, token
+          );
+          if (!link) return cors(json({ error: "upload failed" }, 500));
+          const m = String(link).match(/\/d\/([a-zA-Z0-9_-]{20,})/);
+          return cors(json({
+            ok: true,
+            url: m ? `https://lh3.googleusercontent.com/d/${m[1]}` : link,
+          }));
+        }
         if (url.pathname === "/api/attach" && request.method === "POST") {
           const b = await request.json();
           const out = await addAttachment(env, sheetId, b.id, b.type, b.url, token);
