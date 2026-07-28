@@ -1,6 +1,8 @@
 // LINE Messaging API I/O helpers.
+// v1.1 — การ์ดย้ายไปเรนเดอร์ใน card.js แล้ว (index.js ไม่ต้องแก้)
 
-// Verify the X-Line-Signature header (HMAC-SHA256 of the raw body, base64).
+import { buildConfirmCard, buildSavedCard } from "./card.js";
+
 export async function verifySignature(env, rawBody, signature) {
   if (!signature) return false;
   const key = await crypto.subtle.importKey(
@@ -17,7 +19,6 @@ export async function verifySignature(env, rawBody, signature) {
   return btoa(bin) === signature;
 }
 
-// Download an image the user sent, return { base64, mediaType }.
 export async function getMessageContent(env, messageId) {
   const res = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
     headers: { Authorization: `Bearer ${env.LINE_ACCESS_TOKEN}` },
@@ -47,81 +48,12 @@ export function textMsg(text) {
   return { type: "text", text };
 }
 
-const money = (n) => Number(n).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-// The confirmation card shown after OCR. `id` is the pending-record key.
-export function confirmCard(id, r) {
-  const row = (label, value) => ({
-    type: "box",
-    layout: "baseline",
-    spacing: "sm",
-    contents: [
-      { type: "text", text: label, color: "#8c8c8c", size: "sm", flex: 2 },
-      { type: "text", text: String(value || "-"), wrap: true, color: "#333333", size: "sm", flex: 5 },
-    ],
-  });
-
-  return {
-    type: "flex",
-    altText: `ตรวจสอบรายจ่าย ${money(r.amount)} บาท`,
-    contents: {
-      type: "bubble",
-      body: {
-        type: "box",
-        layout: "vertical",
-        spacing: "md",
-        contents: [
-          { type: "text", text: "ตรวจสอบให้หน่อย ✅", weight: "bold", size: "md", color: "#1F6E56" },
-          { type: "text", text: `- ${money(r.amount)} บาท`, weight: "bold", size: "xxl", color: "#D85A30" },
-          { type: "separator" },
-          row("ร้าน/ผู้รับ", r.vendor),
-          row("วันที่", r.date),
-          row("หมวด", r.category),
-          row("รายละเอียด", r.note),
-        ],
-      },
-      footer: {
-        type: "box",
-        layout: "horizontal",
-        spacing: "sm",
-        contents: [
-          {
-            type: "button",
-            style: "secondary",
-            height: "sm",
-            action: { type: "postback", label: "✏️ แก้ยอด", data: `act=edit&id=${id}` },
-          },
-          {
-            type: "button",
-            style: "primary",
-            height: "sm",
-            color: "#1F6E56",
-            action: { type: "postback", label: "✅ ยืนยัน", data: `act=confirm&id=${id}` },
-          },
-        ],
-      },
-    },
-  };
+// การ์ดยืนยันหลัง OCR — id คือ key ของ pending record
+export function confirmCard(id, r, opts = {}) {
+  return buildConfirmCard(r, { ...opts, id });
 }
 
-// The "saved" card shown after the user confirms.
-export function savedCard(r, driveLink) {
-  const contents = [
-    { type: "text", text: "บันทึกแล้ว 🎉", weight: "bold", size: "md", color: "#1F6E56" },
-    { type: "text", text: `- ${money(r.amount)} บาท`, weight: "bold", size: "xl", color: "#D85A30" },
-    { type: "text", text: `${r.category} · ${r.date}`, size: "sm", color: "#8c8c8c", wrap: true },
-  ];
-  if (driveLink) {
-    contents.push({
-      type: "button",
-      style: "link",
-      height: "sm",
-      action: { type: "uri", label: "📎 ดูรูปบิล", uri: driveLink },
-    });
-  }
-  return {
-    type: "flex",
-    altText: `บันทึกแล้ว ${money(r.amount)} บาท`,
-    contents: { type: "bubble", body: { type: "box", layout: "vertical", spacing: "sm", contents } },
-  };
+// การ์ด "บันทึกแล้ว" หลังผู้ใช้กดยืนยัน
+export function savedCard(r, driveLink, dashboardUrl, opts = {}) {
+  return buildSavedCard(r, { ...opts, driveLink, dashboardUrl });
 }
