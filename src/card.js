@@ -1,20 +1,19 @@
-// src/card.js — v4.0
+// src/card.js — v4.1
 // การ์ด Flex สำหรับบอท "รับจ่ายได้หมด"
 //
-// เปลี่ยนจาก v3.2 — จัดปุ่มใหม่ให้ใช้ง่ายขึ้น:
-//   • ตัดปุ่ม "ออกใบแทน" ออกจากการ์ด — ไปติ๊กในแดชบอร์ดแทน (ทุกรายการออกได้ บัญชีเลือกเอง)
-//   • ตัดปุ่ม "เปิดชีท" ออก — ไปอยู่ในแดชบอร์ด
-//   • การ์ดบันทึกแล้ว: ปุ่มหลัก [จ่ายแล้ว] เด่นอันเดียว
-//     + แถวลิงก์เล็ก แก้ไข · ดูบิล · เพิ่มเติม
-//     + ปุ่มล่าง 📊 เปิดแดชบอร์ด
-//   • "เพิ่มเติม" (act=more) เด้งการ์ดเมนูรอง: แนบรูป · ลบ
-//   • การ์ดรอตรวจ: เหลือ บันทึก / แก้ไข / ยกเลิก เหมือนเดิม แต่ตัดลิงก์ออกใบแทนออก
+// เปลี่ยนจาก v4.0:
+//   • ปุ่มล่างเปลี่ยนตามสถานะการตั้งค่า — จำนวนปุ่มเท่าเดิม ไม่รกขึ้น
+//       ยังตั้งค่าไม่ครบ → [⚠️ เพิ่มข้อมูลบริษัท] สีส้ม ลิงก์ตรงไปหน้าตั้งค่า
+//       ครบแล้ว        → [📊 เปิดแดชบอร์ด] ตามเดิม
+//     รับผ่าน opts.setupUrl (มี = ยังไม่ครบ)
+//   • กล่องเตือนเปลี่ยนเป็นโทนส้ม เพราะเป็นเรื่องต้องลงมือทำ ไม่ใช่แค่ข้อมูล
+//     (กล่องฟ้ายังใช้กับ flag จาก OCR เหมือนเดิม)
 //
 // postback ทั้งหมด:
 //   act=confirm  act=cancel  act=edit  act=fix&f=
 //   act=paid     act=delete  act=attach  act=more  act=back
 
-export const CARD_VERSION = '4.0';
+export const CARD_VERSION = '4.1';
 
 /* ───────────────────── iOS system colors ───────────────────── */
 const C = {
@@ -28,7 +27,7 @@ const C = {
   green: '#34C759',
   orange: '#FF9500',
   tintBlue: '#F2F7FF',
-  tintGreen: '#F1FBF4',
+  tintOrange: '#FFF6E9',
 };
 
 const LOW_CONF = 0.75;
@@ -134,12 +133,18 @@ function statsLine(stats) {
   };
 }
 
-function insightBox(insight) {
-  if (!has(insight)) return null;
+/** กล่องข้อความ — โทนฟ้า (ข้อมูล) หรือส้ม (ต้องลงมือทำ) */
+function noteBox(text, tone = 'info') {
+  if (!has(text)) return null;
+  const warn = tone === 'warn';
   return {
-    type: 'box', layout: 'vertical', backgroundColor: C.tintBlue,
+    type: 'box', layout: 'vertical',
+    backgroundColor: warn ? C.tintOrange : C.tintBlue,
     cornerRadius: '10px', paddingAll: '12px', margin: 'lg',
-    contents: [{ type: 'text', text: String(insight), size: 'xxs', color: C.blue, wrap: true }],
+    contents: [{
+      type: 'text', text: String(text), size: 'xxs',
+      color: warn ? '#A85D00' : C.blue, wrap: true,
+    }],
   };
 }
 
@@ -188,10 +193,7 @@ export function buildRecordCard(rec = {}, opts = {}) {
     : has(rec.category) ? String(rec.category)
     : isIncome ? 'รายรับ' : 'รายจ่าย';
 
-  const meta = [
-    formatDateTH(rec.date),
-    rec.paid ? 'จ่ายแล้ว' : 'ยังไม่จ่าย',
-  ].join('  ·  ');
+  const meta = [formatDateTH(rec.date), rec.paid ? 'จ่ายแล้ว' : 'ยังไม่จ่าย'].join('  ·  ');
 
   /* ---------- หัว ---------- */
   const head = [
@@ -229,10 +231,16 @@ export function buildRecordCard(rec = {}, opts = {}) {
     ...taxRows(rec),
   ]);
 
+  // กล่องเตือน: ตั้งค่าไม่ครบ (ส้ม) มาก่อน flag จาก OCR (ฟ้า)
+  const notes = [
+    opts.setupUrl ? noteBox(opts.setupWarn || 'ยังตั้งค่าข้อมูลบริษัทไม่ครบ — ใบรับรองแทนใบเสร็จจะออกมาไม่สมบูรณ์', 'warn') : null,
+    noteBox(opts.insight || rec.flag, 'info'),
+  ].filter(Boolean);
+
   const inner = {
     type: 'box', layout: 'vertical', flex: 1,
     paddingStart: '20px', paddingEnd: '20px', paddingTop: '20px', paddingBottom: '14px',
-    contents: [...head, insightBox(opts.insight || rec.flag), detail].filter(Boolean),
+    contents: [...head, ...notes, detail].filter(Boolean),
   };
 
   const body = {
@@ -274,7 +282,7 @@ export function buildRecordCard(rec = {}, opts = {}) {
       },
     });
 
-    // ลิงก์เล็ก: แก้ไข · ดูบิล · เพิ่มเติม
+    // ลิงก์เล็ก
     const driveLink = opts.driveLink || rec.imageUrl;
     const links = [
       textLink('แก้ไข', { type: 'postback', label: 'แก้ไข', data: pb('edit', id) }),
@@ -291,8 +299,14 @@ export function buildRecordCard(rec = {}, opts = {}) {
       type: 'box', layout: 'baseline', spacing: 'sm', paddingTop: '4px', contents: links,
     });
 
-    // ปุ่มล่าง: เปิดแดชบอร์ด
-    if (opts.dashboardUrl) {
+    // ปุ่มล่าง — สลับตามสถานะการตั้งค่า
+    if (opts.setupUrl) {
+      footer.contents.push({ type: 'separator', color: C.separator, margin: 'sm' });
+      footer.contents.push({
+        type: 'button', style: 'primary', color: C.orange, height: 'sm', margin: 'sm',
+        action: { type: 'uri', label: '⚠️  เพิ่มข้อมูลบริษัท', uri: opts.setupUrl },
+      });
+    } else if (opts.dashboardUrl) {
       footer.contents.push({ type: 'separator', color: C.separator, margin: 'sm' });
       footer.contents.push({
         type: 'button', style: 'link', height: 'sm', color: C.blue,
@@ -337,9 +351,16 @@ export function buildMoreCard(rec = {}, opts = {}) {
     item('📎', 'แนบรูปหลักฐาน', 'ส่งรูปใบเสร็จ/สลิปเพิ่มให้รายการนี้',
       { type: 'postback', label: 'แนบรูป', data: pb('attach', id) }),
     { type: 'separator', color: C.separator },
-    item('🗑', 'ลบรายการ', 'เอารายการนี้ออกจากบัญชี',
-      { type: 'postback', label: 'ลบ', data: pb('delete', id) }, true),
   ];
+
+  if (opts.dashboardUrl) {
+    rows.push(item('📊', 'เปิดแดชบอร์ด', 'ดูสรุป ออกใบแทน จับคู่หลักฐาน ตั้งค่า',
+      { type: 'uri', label: 'แดชบอร์ด', uri: opts.dashboardUrl }));
+    rows.push({ type: 'separator', color: C.separator });
+  }
+
+  rows.push(item('🗑', 'ลบรายการ', 'เอารายการนี้ออกจากบัญชี',
+    { type: 'postback', label: 'ลบ', data: pb('delete', id) }, true));
 
   return {
     type: 'flex', altText: 'ตัวเลือกเพิ่มเติม',
