@@ -1,10 +1,10 @@
-// DEAL LINE Finance Bot — v1.2
+// DEAL LINE Finance Bot — v1.3
 // ถ่ายบิลลง LINE → OCR → ยืนยัน → เขียนชีท (+เก็บรูป) → dashboard
 //
-// เปลี่ยนจาก v1.1:
-//   • ส่ง setupUrl ให้การ์ด — ปุ่มล่างจะกลายเป็น [⚠️ เพิ่มข้อมูลบริษัท] ลิงก์ตรงไปหน้าตั้งค่า
-//     พอตั้งค่าครบ ปุ่มกลับเป็น [📊 เปิดแดชบอร์ด] เอง
-//   • การ์ดเมนูรอง (เพิ่มเติม) มีทางเข้าแดชบอร์ดด้วย
+// เปลี่ยนจาก v1.2:
+//   • flag ตั้งค่าผูกกับ sheetId ด้วย (setup:{tenant}:{sheetId}) — ชีทเปลี่ยน flag เก่าใช้ไม่ได้ทันที
+//   • อ่านตั้งค่าไม่ได้ = ให้ปุ่มเพิ่มข้อมูลบริษัทขึ้น ไม่เงียบ
+//   • ล้าง flag ทั้งแบบเก่าและแบบผูก sheetId ตอนบันทึกตั้งค่า / migrate
 
 import { verifySignature, getMessageContent, reply, textMsg, confirmCard, savedCard, moreCard } from "./line.js";
 import { ocrReceipt } from "./ocr.js";
@@ -17,7 +17,7 @@ import {
 import { uploadImage, listUploadedImages } from "./drive.js";
 import { buildConnectUrl, handleCallback, getUserToken, createUserSheet } from "./oauth.js";
 
-const VERSION = "DEAL_LINE_BOT_v1.2";
+const VERSION = "DEAL_LINE_BOT_v1.3";
 
 const PENDING_ACTS = new Set(["confirm", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -53,12 +53,14 @@ function safeEqual(a, b) {
 
 /**
  * คืน { warn } ถ้ายังไม่ครบ / คืน null ถ้าครบแล้ว
- * ใช้ KV flag `setup:{tenant}` กันอ่านชีทซ้ำทุกครั้งที่บันทึกรายการ
- * flag ถูกล้างเมื่อมีการบันทึกตั้งค่าใหม่ (POST /api/settings) หรือสั่ง migrate
+ * ใช้ KV flag `setup:{tenant}:{sheetId}` กันอ่านชีทซ้ำทุกครั้งที่บันทึกรายการ
+ * ผูกกับ sheetId เพื่อกัน flag ค้างข้ามชีท — ล้างเมื่อบันทึกตั้งค่าใหม่ / migrate / เชื่อมใหม่
  */
 async function checkSetup(env, key, sheet) {
+  // ผูก flag กับ sheetId ด้วย — ชีทเปลี่ยนเมื่อไหร่ flag เก่าใช้ไม่ได้ทันที
+  const flag = `setup:${key}:${sheet.sheetId}`;
   try {
-    if ((await env.KV.get(`setup:${key}`)) === "1") return null;
+    if ((await env.KV.get(flag)) === "1") return null;
 
     const s = await readSettings(env, sheet.sheetId, sheet.token);
     const missing = [];
@@ -67,13 +69,14 @@ async function checkSetup(env, key, sheet) {
     if (!s.approver_name) missing.push("ชื่อผู้อนุมัติ");
 
     if (!missing.length) {
-      await env.KV.put(`setup:${key}`, "1");
+      await env.KV.put(flag, "1");
       return null;
     }
     return { warn: `ยังขาด ${missing.join(" · ")} — ใบรับรองแทนใบเสร็จจะออกมาไม่สมบูรณ์ กดปุ่มส้มด้านล่างเพื่อกรอก (ทำครั้งเดียว)` };
   } catch (e) {
+    // อ่านตั้งค่าไม่ได้ = ถือว่ายังไม่ครบ ให้ปุ่มขึ้น ดีกว่าเงียบแล้วลูกค้าไม่รู้ตัว
     console.warn("checkSetup", e.message);
-    return null;
+    return { warn: "อ่านข้อมูลบริษัทไม่ได้ — กดปุ่มด้านล่างเพื่อตรวจการตั้งค่า" };
   }
 }
 
@@ -106,7 +109,7 @@ export default {
             tenant, sheetId,
             connected: !!(await env.KV.get(`gtoken:${tenant}`)),
             hasDashToken: !!(await env.KV.get(`dtoken:${tenant}`)),
-            setupDone: (await env.KV.get(`setup:${tenant}`)) === "1",
+            setupDone: (await env.KV.get(`setup:${tenant}:${sheetId}`)) === "1",
             sheetUrl: `https://docs.google.com/spreadsheets/d/${sheetId}/edit`,
           });
         }
@@ -179,7 +182,8 @@ export default {
           if (request.method === "POST") {
             const b = await request.json();
             const saved = await writeSettings(env, sheetId, b, token);
-            await env.KV.delete(`setup:${key}`);   // ให้เช็คใหม่รอบหน้า
+            await env.KV.delete(`setup:${key}`);              // ของเก่า
+            await env.KV.delete(`setup:${key}:${sheetId}`);   // ให้เช็คใหม่รอบหน้า
             return cors(json(saved));
           }
           return cors(json(await readSettings(env, sheetId, token)));
@@ -597,6 +601,7 @@ async function handleText(event, env, key) {
       const i = await backfillIds(env, sheet.sheetId, sheet.token);
       const s = await ensureSettingsTab(env, sheet.sheetId, sheet.token);
       await env.KV.delete(`setup:${key}`);
+      await env.KV.delete(`setup:${key}:${sheet.sheetId}`);
       return reply(env, event.replyToken, textMsg(
         `อัปเกรดชีทเรียบร้อย ✅\n` +
         `หัวคอลัมน์: ${h.changed ? `เพิ่ม ${h.added} ช่อง` : "ครบอยู่แล้ว"}\n` +
