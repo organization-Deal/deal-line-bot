@@ -112,7 +112,7 @@ function parseJson(text) {
 async function askGemini(env, imageBase64, mediaType) {
   if (!env.GEMINI_KEY) throw new Error("GEMINI_KEY ยังไม่ได้ตั้ง (npx wrangler secret put GEMINI_KEY)");
 
-  const model = env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = env.GEMINI_MODEL || "gemini-flash-latest";
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_KEY}`;
 
