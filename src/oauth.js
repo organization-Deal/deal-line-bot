@@ -1,5 +1,8 @@
-// OAuth ของลูกค้า — v1.2
-// หน้าจบ OAuth พาไปตั้งค่าข้อมูลบริษัทต่อเลย ไม่ใช่บอกให้กลับ LINE เฉย ๆ
+// OAuth ของลูกค้า — v1.3
+// เปลี่ยนจาก v1.2:
+//   • เชื่อมเสร็จ push การ์ดกลับเข้า LINE (callback มาจาก browser ไม่มี replyToken ต้อง push)
+//   • ไม่สร้างชีทใหม่ถ้ามีอยู่แล้ว (กันข้อมูลหายตอนเชื่อมซ้ำ)
+//   • ล้าง flag setup ตอนเชื่อม เพื่อให้เช็คข้อมูลบริษัทใหม่รอบหน้า
 
 import { HEADER } from "./sheets.js";
 
@@ -28,6 +31,82 @@ async function getDashToken(env, key) {
   return t;
 }
 
+/* ── push เข้า LINE — callback มาจาก browser จึงไม่มี replyToken ── */
+async function pushToLine(env, to, messages) {
+  if (!env.LINE_ACCESS_TOKEN || !to) return false;
+  try {
+    const r = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.LINE_ACCESS_TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        to,
+        messages: Array.isArray(messages) ? messages : [messages],
+      }),
+    });
+    if (!r.ok) console.error("push failed", r.status, await r.text());
+    return r.ok;
+  } catch (e) {
+    console.error("push error", e);
+    return false;
+  }
+}
+
+function connectedCard({ setupUrl, dashboardUrl, reused }) {
+  const rows = [
+    { ok: true, text: reused
+        ? "เชื่อม Google แล้ว — ใช้ชีทเดิม ข้อมูลเก่าอยู่ครบ"
+        : "เชื่อม Google แล้ว — สร้างชีทในบัญชีของคุณเรียบร้อย" },
+    { ok: !!0, text: "เพิ่มข้อมูลบริษัท (ทำครั้งเดียว) — ชื่อบริษัท · เลขผู้เสียภาษี · ผู้อนุมัติ" },
+    { ok: !!0, text: "ส่งรูปบิลเข้ามาในแชทนี้ได้เลย" },
+  ];
+
+  const buttons = [];
+  if (setupUrl) {
+    buttons.push({
+      type: "button", style: "primary", color: "#DC6234", height: "sm",
+      action: { type: "uri", label: "\u2699\uFE0F เพิ่มข้อมูลบริษัท", uri: setupUrl },
+    });
+  }
+  if (dashboardUrl) {
+    buttons.push({
+      type: "button", style: setupUrl ? "secondary" : "primary",
+      color: setupUrl ? undefined : "#12674F", height: "sm",
+      action: { type: "uri", label: "\u{1F4CA} เปิดแดชบอร์ด", uri: dashboardUrl },
+    });
+  }
+
+  const bubble = {
+    type: "bubble",
+    body: {
+      type: "box", layout: "vertical", spacing: "sm",
+      contents: [
+        { type: "text", text: "\u2705 เชื่อม Google สำเร็จ", weight: "bold", size: "md", color: "#12674F" },
+        { type: "text", text: "บิลและชีททั้งหมดเก็บใน Google Drive ของคุณเอง", size: "sm", color: "#8c8c8c", wrap: true },
+        {
+          type: "box", layout: "vertical", margin: "lg", spacing: "sm",
+          contents: rows.map((r) => ({
+            type: "box", layout: "baseline", spacing: "sm",
+            contents: [
+              { type: "text", text: r.ok ? "\u2713" : "\u25CB", size: "sm", flex: 0,
+                color: r.ok ? "#12674F" : "#B0B7BD" },
+              { type: "text", text: r.text, size: "sm", wrap: true, flex: 1,
+                color: r.ok ? "#1C1F24" : "#5C6470" },
+            ],
+          })),
+        },
+      ],
+    },
+  };
+  if (buttons.length) {
+    bubble.footer = { type: "box", layout: "vertical", spacing: "sm", contents: buttons };
+  }
+
+  return { type: "flex", altText: "เชื่อม Google สำเร็จ", contents: bubble };
+}
+
 export async function handleCallback(env, url, origin) {
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
@@ -52,7 +131,8 @@ export async function handleCallback(env, url, origin) {
   // เช็คก่อนว่าเคยมีชีทของ tenant นี้แล้วรึยัง
   // ถ้ามี = ห้ามสร้างใหม่เด็ดขาด ไม่งั้นเชื่อมซ้ำทีข้อมูลหายทุกที
   let sheetId = await env.KV.get(`tenant:${state}`);
-  if (sheetId) {
+  const reused = !!sheetId;
+  if (reused) {
     console.log(`OAUTH reuse existing sheet for ${state}: ${sheetId}`);
   } else {
     try {
@@ -64,14 +144,23 @@ export async function handleCallback(env, url, origin) {
     }
   }
 
-  let setupUrl = null;
+  // ให้เช็คข้อมูลบริษัทใหม่รอบหน้า — flag เก่าอาจค้างจากชีทคนละใบ
+  await env.KV.delete(`setup:${state}`);
+  if (sheetId) await env.KV.delete(`setup:${state}:${sheetId}`);
+
+  let setupUrl = null, dashboardUrl = null;
   if (env.DASHBOARD_URL) {
     const base = env.DASHBOARD_URL.replace(/\/$/, "");
     const t = await getDashToken(env, state);
-    setupUrl = `${base}/receipt?tenant=${encodeURIComponent(state)}&k=${t}`;
+    const qs = `?tenant=${encodeURIComponent(state)}&k=${t}`;
+    setupUrl = `${base}/receipt${qs}`;
+    dashboardUrl = `${base}${qs}`;
   }
 
-  return successPage(setupUrl);
+  // ยิงการ์ดกลับเข้า LINE — พังก็ไม่เป็นไร หน้าเว็บยังขึ้นปกติ
+  await pushToLine(env, state, connectedCard({ setupUrl, dashboardUrl, reused }));
+
+  return successPage(setupUrl, reused);
 }
 
 export async function getUserToken(env, key) {
@@ -162,18 +251,22 @@ font-size:15px;font-weight:600;background:#12674F;color:#fff}
 </style><div class="card">${inner}</div></html>`;
 }
 
-function successPage(setupUrl) {
+function successPage(setupUrl, reused) {
   const cta = setupUrl
     ? `<a class="btn" href="${setupUrl}">ตั้งค่าข้อมูลบริษัท →</a>
-       <p class="foot">ข้ามไปก่อนก็ได้ — บันทึกบิลได้ตามปกติ<br>แต่ใบรับรองแทนใบเสร็จจะยังไม่สมบูรณ์</p>`
+       <p class="foot">ส่งการ์ดยืนยันเข้า LINE ให้แล้ว<br>ข้ามขั้นนี้ก่อนก็ได้ — บันทึกบิลได้ตามปกติ</p>`
     : `<p class="foot">กลับไปที่ LINE แล้วส่งรูปบิลได้เลย</p>`;
+
+  const first = reused
+    ? `<b>เชื่อม Google แล้ว</b><br>ใช้ชีทเดิม — ข้อมูลเก่ายังอยู่ครบ`
+    : `<b>เชื่อม Google แล้ว</b><br>สร้างชีทในบัญชีของคุณเรียบร้อย`;
 
   return html(shell(
     `<div class="mark">📒</div>
      <h1>เชื่อม Google สำเร็จ</h1>
      <p class="lead">เหลืออีกขั้นเดียวก่อนใช้งานเต็มรูปแบบ</p>
      <ul>
-       <li class="a"><span class="n">✓</span><span><b>เชื่อม Google แล้ว</b><br>สร้างชีทในบัญชีของคุณเรียบร้อย</span></li>
+       <li class="a"><span class="n">✓</span><span>${first}</span></li>
        <li class="b"><span class="n">2</span><span><b>ตั้งค่าข้อมูลบริษัท</b> — ทำครั้งเดียว<br>ชื่อบริษัท · เลขผู้เสียภาษี · โลโก้ · ลายเซ็น</span></li>
        <li class="c"><span class="n">3</span><span>เริ่มส่งรูปบิลใน LINE</span></li>
      </ul>
