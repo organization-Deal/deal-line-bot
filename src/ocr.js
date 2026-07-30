@@ -1,12 +1,12 @@
-// src/ocr.js — v2.3 (Claude + guard สลิป)
-// อ่านบิล/ใบเสร็จ/สลิปโอนเงิน ด้วย Claude แล้วคืนเป็น field
+// src/ocr.js — v3.0 (Gemini)
+// อ่านบิล/ใบเสร็จ/สลิปโอนเงิน แล้วคืนเป็น field เหมือน v2.x เป๊ะ
 //
-// เปลี่ยนจาก v2.2:
-//   • prompt เข้มขึ้นเรื่องชื่อ: เบลอ/ถูกปิด (นาย x*** y) → ห้ามเดาเติม ปล่อยว่างดีกว่า
-//   • GUARD สลิปโอนเงิน: ชื่อผู้รับในสลิปอ่านยากทุกใบ → กด confidence.vendor
-//     เพดาน 0.5 เสมอ ให้การ์ดไฮไลต์ส้มบังคับคนเช็ค ไม่ปล่อยชื่อมั่วลงชีทเงียบ ๆ
-//
-// โมเดลเริ่มต้น = haiku-4-5 (ถูกสุด) จะขยับเป็น sonnet ตั้งที่ env.CLAUDE_MODEL
+// เครื่องยนต์ OCR = Gemini 2.0 Flash (ถูกสุด + อ่านไทยแม่นพอ ๆ กับ Sonnet)
+//   • อ่าน key จาก env.GEMINI_KEY (ต้องเป็น key ของ project ที่เปิด billing/มีโควตา)
+//   • โมเดลตั้งทับได้ที่ env.GEMINI_MODEL (ดีฟอลต์ gemini-2.0-flash)
+//   • responseMimeType บังคับ JSON ล้วน + temperature 0 ให้ผลนิ่ง
+//   • GUARD สลิปโอนเงิน: กด confidence.vendor เพดาน 0.5 ไฮไลต์ส้มบังคับคนเช็ค
+//   • prompt เข้มเรื่องชื่อ: เบลอ/ถูกปิด → ห้ามเดาเติม ปล่อยว่างดีกว่า
 
 const CATEGORIES = [
   "อาหาร & รับรอง",
@@ -39,8 +39,10 @@ Extract data from this image as JSON only.
 
 ## VENDOR
 - Receipts: the shop/company that issued it (usually at the top).
-- Transfer slips: the DESTINATION account holder ("ผู้รับเงิน" / "บัญชีปลายทาง").
-  NEVER the sender ("ผู้โอน" / "จาก"). This is the most common mistake — check carefully.
+- Transfer slips: the DESTINATION account holder — the person the money went TO,
+  labelled "ไปยัง" / "ผู้รับเงิน" / "บัญชีปลายทาง".
+  NEVER the sender, labelled "จาก" / "ผู้โอน". The sender is the person who paid;
+  the vendor is who they paid. Getting this backwards is the most common mistake.
 - PromptPay with only a phone number: use the display name shown next to it, else "".
 - Copy Thai names EXACTLY, character by character, only what you can clearly see.
 - If any part of the name is blurry, masked (e.g. "นาย x*** y"), or you are not
@@ -107,41 +109,52 @@ function parseJson(text) {
   }
 }
 
-async function askClaude(env, imageBase64, mediaType) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+async function askGemini(env, imageBase64, mediaType) {
+  if (!env.GEMINI_KEY) throw new Error("GEMINI_KEY ยังไม่ได้ตั้ง (npx wrangler secret put GEMINI_KEY)");
+
+  const model = env.GEMINI_MODEL || "gemini-2.0-flash";
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_KEY}`;
+
+  const res = await fetch(url, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": env.CLAUDE_KEY,
-      "anthropic-version": "2023-06-01",
-    },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      model: env.CLAUDE_MODEL || "claude-haiku-4-5-20251001",
-      max_tokens: 1000,
-      messages: [
+      contents: [
         {
           role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: mediaType, data: imageBase64 } },
-            { type: "text", text: PROMPT },
+          parts: [
+            { inline_data: { mime_type: mediaType, data: imageBase64 } },
+            { text: PROMPT },
           ],
         },
-        { role: "assistant", content: "{" },   // prefill: บังคับให้ออกมาเป็น JSON
       ],
+      generationConfig: {
+        temperature: 0,               // ผลนิ่ง ไม่เดาต่างกันทุกครั้ง
+        maxOutputTokens: 1000,
+        responseMimeType: "application/json",
+      },
     }),
   });
 
-  if (!res.ok) throw new Error("Claude OCR error: " + res.status + " " + (await res.text()));
+  if (!res.ok) {
+    const body = await res.text();
+    // 429 = โควตาหมด/ key อยู่ผิด project ที่ไม่มีโควตา
+    if (res.status === 429) {
+      throw new Error("Gemini 429 — โควตาหมดหรือ key อยู่ผิด project (ต้องเป็น project ที่เปิด billing). " + body.slice(0, 200));
+    }
+    throw new Error("Gemini OCR error: " + res.status + " " + body.slice(0, 300));
+  }
   const json = await res.json();
 
-  // log ไว้ดูต้นทุนจริงใน `wrangler tail`
-  const u = json.usage || {};
-  console.log(`[ocr] in=${u.input_tokens} out=${u.output_tokens} model=${json.model}`);
+  const u = json.usageMetadata || {};
+  console.log(`[ocr] in=${u.promptTokenCount} out=${u.candidatesTokenCount} model=${model}`);
 
-  return "{" + (json.content?.[0]?.text || "");
+  const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error("Gemini: empty response " + JSON.stringify(json).slice(0, 300));
+  return text;
 }
 
-/** ทำความสะอาดวันที่ — เผื่อโมเดลยังคืน พ.ศ. มา */
 function cleanDate(raw) {
   const today = () => new Date().toISOString().slice(0, 10);
   if (!raw) return today();
@@ -153,11 +166,11 @@ function cleanDate(raw) {
   if (nums[0].length === 4) [y, m, d] = nums.map(Number);
   else [d, m, y] = nums.map(Number);
 
-  if (y > 2400) y -= 543;                        // พ.ศ. หลุดมา
+  if (y > 2400) y -= 543;
   if (y < 100) y += y > 50 ? 1900 : 2000;
 
   const nowY = new Date().getFullYear();
-  if (y < nowY - 5 || y > nowY + 1) return today();   // ปีเพี้ยนไปไกล = อ่านผิด
+  if (y < nowY - 5 || y > nowY + 1) return today();
 
   const p = (n) => String(n).padStart(2, "0");
   return `${y}-${p(m || 1)}-${p(d || 1)}`;
@@ -170,12 +183,12 @@ function clamp01(v, fallback = 0.8) {
 }
 
 export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
-  let text = await askClaude(env, imageBase64, mediaType);
+  let text = await askGemini(env, imageBase64, mediaType);
   let data = parseJson(text);
 
   if (!data) {
     console.warn("OCR: JSON เพี้ยน ลองใหม่");
-    text = await askClaude(env, imageBase64, mediaType);
+    text = await askGemini(env, imageBase64, mediaType);
     data = parseJson(text);
   }
   if (!data) throw new Error("OCR returned non-JSON: " + text.slice(0, 300));
@@ -187,14 +200,11 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
   const docType = DOC_TYPES.includes(data.docType) ? data.docType : "";
   const isSlip = docType === "สลิปโอนเงิน";
 
-  // ยอดเป็น 0 = อ่านไม่ออกแน่ ๆ บังคับให้ต่ำเพื่อให้การ์ดไฮไลต์
   const amountConf = amount > 0 ? clamp01(c.amount, 0.9) : 0.2;
 
-  // ชื่อผู้รับในสลิปอ่านยากทุกใบ → กดเพดานไว้ 0.5 บังคับให้คนเช็คเสมอ
   let vendorConf = vendor ? clamp01(c.vendor, 0.8) : 0.2;
   if (isSlip && vendor) vendorConf = Math.min(vendorConf, 0.5);
 
-  // flag ยาวเกินจะล้นการ์ด ตัดที่ 90
   const flag = String(data.flag || "").trim().slice(0, 90);
 
   return {
@@ -210,10 +220,8 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
     vatRate:  Number(data.vatRate) || 0,
     whtRate:  Number(data.whtRate) || 0,
 
-    // → card.js โชว์ในกล่องฟ้า 💡
     flag,
 
-    // → card.js ใช้ตัวนี้ไฮไลต์ช่องสีส้ม (ต่ำกว่า 0.75 = แตะแก้ได้)
     confidence: {
       amount:   amountConf,
       vendor:   vendorConf,
