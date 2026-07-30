@@ -1,15 +1,12 @@
-// src/ocr.js — v3.0
-// อ่านบิล/ใบเสร็จ/สลิปโอนเงิน ด้วย Gemini แล้วคืนเป็น field
+// src/ocr.js — v2.3 (Claude + guard สลิป)
+// อ่านบิล/ใบเสร็จ/สลิปโอนเงิน ด้วย Claude แล้วคืนเป็น field
 //
 // เปลี่ยนจาก v2.2:
-//   • ย้ายจาก Claude Haiku → Gemini (ถูกกว่า + อ่านไทยดีกว่า)
-//     - อ่าน key จาก env.GEMINI_KEY (secret ใหม่ — ไม่ทับ CLAUDE_KEY เดิม)
-//     - โมเดล gemini-2.0-flash (ตั้งทับที่ env.GEMINI_MODEL)
-//   • prompt / field / confidence เหมือนเดิมทุกอย่าง
-//   • GUARD สลิปโอนเงิน: ชื่อผู้รับในสลิปอ่านยากทุกใบ → บังคับ confidence.vendor
+//   • prompt เข้มขึ้นเรื่องชื่อ: เบลอ/ถูกปิด (นาย x*** y) → ห้ามเดาเติม ปล่อยว่างดีกว่า
+//   • GUARD สลิปโอนเงิน: ชื่อผู้รับในสลิปอ่านยากทุกใบ → กด confidence.vendor
 //     เพดาน 0.5 เสมอ ให้การ์ดไฮไลต์ส้มบังคับคนเช็ค ไม่ปล่อยชื่อมั่วลงชีทเงียบ ๆ
 //
-// อยากสลับกลับไป Claude: ดู askClaude() ที่เก็บไว้ท้ายไฟล์ แล้วสลับใน ocrReceipt
+// โมเดลเริ่มต้น = haiku-4-5 (ถูกสุด) จะขยับเป็น sonnet ตั้งที่ env.CLAUDE_MODEL
 
 const CATEGORIES = [
   "อาหาร & รับรอง",
@@ -45,9 +42,10 @@ Extract data from this image as JSON only.
 - Transfer slips: the DESTINATION account holder ("ผู้รับเงิน" / "บัญชีปลายทาง").
   NEVER the sender ("ผู้โอน" / "จาก"). This is the most common mistake — check carefully.
 - PromptPay with only a phone number: use the display name shown next to it, else "".
-- Copy Thai names character by character. Do NOT normalise, complete, or guess spelling.
-  If a name is blurry or partly hidden (masked with x, X, *), copy only what is clearly
-  legible and leave the rest out — never invent the missing characters.
+- Copy Thai names EXACTLY, character by character, only what you can clearly see.
+- If any part of the name is blurry, masked (e.g. "นาย x*** y"), or you are not
+  certain of a character, DO NOT invent or complete it. Return only the readable part,
+  or "" if unreadable, and score vendor confidence low. A guessed name is worse than a blank.
 
 ## DATE
 - Return YYYY-MM-DD in the Gregorian calendar (ค.ศ.).
@@ -109,45 +107,38 @@ function parseJson(text) {
   }
 }
 
-/* ═══════════════════ Gemini ═══════════════════ */
-
-async function askGemini(env, imageBase64, mediaType) {
-  const model = env.GEMINI_MODEL || "gemini-2.0-flash";
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_KEY}`;
-
-  const res = await fetch(url, {
+async function askClaude(env, imageBase64, mediaType) {
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": env.CLAUDE_KEY,
+      "anthropic-version": "2023-06-01",
+    },
     body: JSON.stringify({
-      contents: [
+      model: env.CLAUDE_MODEL || "claude-haiku-4-5-20251001",
+      max_tokens: 1000,
+      messages: [
         {
           role: "user",
-          parts: [
-            { inline_data: { mime_type: mediaType, data: imageBase64 } },
-            { text: PROMPT },
+          content: [
+            { type: "image", source: { type: "base64", media_type: mediaType, data: imageBase64 } },
+            { type: "text", text: PROMPT },
           ],
         },
+        { role: "assistant", content: "{" },   // prefill: บังคับให้ออกมาเป็น JSON
       ],
-      generationConfig: {
-        temperature: 0,                 // อ่านเอกสาร ไม่ต้องการความสร้างสรรค์
-        maxOutputTokens: 1000,
-        responseMimeType: "application/json",   // บังคับ JSON ล้วน
-      },
     }),
   });
 
-  if (!res.ok) throw new Error("Gemini OCR error: " + res.status + " " + (await res.text()));
+  if (!res.ok) throw new Error("Claude OCR error: " + res.status + " " + (await res.text()));
   const json = await res.json();
 
-  // log ต้นทุนจริงใน `wrangler tail`
-  const u = json.usageMetadata || {};
-  console.log(`[ocr] in=${u.promptTokenCount} out=${u.candidatesTokenCount} model=${model}`);
+  // log ไว้ดูต้นทุนจริงใน `wrangler tail`
+  const u = json.usage || {};
+  console.log(`[ocr] in=${u.input_tokens} out=${u.output_tokens} model=${json.model}`);
 
-  const parts = json.candidates?.[0]?.content?.parts || [];
-  const text = parts.map((p) => p.text || "").join("");
-  if (!text) throw new Error("Gemini returned empty: " + JSON.stringify(json).slice(0, 300));
-  return text;
+  return "{" + (json.content?.[0]?.text || "");
 }
 
 /** ทำความสะอาดวันที่ — เผื่อโมเดลยังคืน พ.ศ. มา */
@@ -179,12 +170,12 @@ function clamp01(v, fallback = 0.8) {
 }
 
 export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
-  let text = await askGemini(env, imageBase64, mediaType);
+  let text = await askClaude(env, imageBase64, mediaType);
   let data = parseJson(text);
 
   if (!data) {
     console.warn("OCR: JSON เพี้ยน ลองใหม่");
-    text = await askGemini(env, imageBase64, mediaType);
+    text = await askClaude(env, imageBase64, mediaType);
     data = parseJson(text);
   }
   if (!data) throw new Error("OCR returned non-JSON: " + text.slice(0, 300));
@@ -194,13 +185,14 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
   const c = data.confidence || {};
 
   const docType = DOC_TYPES.includes(data.docType) ? data.docType : "";
+  const isSlip = docType === "สลิปโอนเงิน";
 
   // ยอดเป็น 0 = อ่านไม่ออกแน่ ๆ บังคับให้ต่ำเพื่อให้การ์ดไฮไลต์
   const amountConf = amount > 0 ? clamp01(c.amount, 0.9) : 0.2;
 
-  // ชื่อผู้รับในสลิปโอนเงินอ่านยากทุกใบ — เพดาน confidence ไว้ 0.5 บังคับคนเช็ค
+  // ชื่อผู้รับในสลิปอ่านยากทุกใบ → กดเพดานไว้ 0.5 บังคับให้คนเช็คเสมอ
   let vendorConf = vendor ? clamp01(c.vendor, 0.8) : 0.2;
-  if (docType === "สลิปโอนเงิน") vendorConf = Math.min(vendorConf, 0.5);
+  if (isSlip && vendor) vendorConf = Math.min(vendorConf, 0.5);
 
   // flag ยาวเกินจะล้นการ์ด ตัดที่ 90
   const flag = String(data.flag || "").trim().slice(0, 90);
@@ -231,32 +223,5 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
     },
   };
 }
-
-/* ═══════════════════ เก็บไว้เผื่อสลับกลับ Claude ═══════════════════
-async function askClaude(env, imageBase64, mediaType) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": env.CLAUDE_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: env.CLAUDE_MODEL || "claude-haiku-4-5-20251001",
-      max_tokens: 1000,
-      messages: [
-        { role: "user", content: [
-          { type: "image", source: { type: "base64", media_type: mediaType, data: imageBase64 } },
-          { type: "text", text: PROMPT },
-        ] },
-        { role: "assistant", content: "{" },
-      ],
-    }),
-  });
-  if (!res.ok) throw new Error("Claude OCR error: " + res.status + " " + (await res.text()));
-  const json = await res.json();
-  return "{" + (json.content?.[0]?.text || "");
-}
-═══════════════════════════════════════════════════════════════════ */
 
 export { CATEGORIES, DOC_TYPES };
