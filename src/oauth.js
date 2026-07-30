@@ -49,11 +49,19 @@ export async function handleCallback(env, url, origin) {
 
   if (tok.refresh_token) await env.KV.put(`gtoken:${state}`, tok.refresh_token);
 
-  try {
-    const { sheetId } = await createUserSheet(env, tok.access_token, "DEAL Finance");
-    await env.KV.put(`tenant:${state}`, sheetId);
-  } catch (e) {
-    console.error("create user sheet", e);
+  // เช็คก่อนว่าเคยมีชีทของ tenant นี้แล้วรึยัง
+  // ถ้ามี = ห้ามสร้างใหม่เด็ดขาด ไม่งั้นเชื่อมซ้ำทีข้อมูลหายทุกที
+  let sheetId = await env.KV.get(`tenant:${state}`);
+  if (sheetId) {
+    console.log(`OAUTH reuse existing sheet for ${state}: ${sheetId}`);
+  } else {
+    try {
+      sheetId = (await createUserSheet(env, tok.access_token, "DEAL Finance")).sheetId;
+      await env.KV.put(`tenant:${state}`, sheetId);
+      console.log(`OAUTH created new sheet for ${state}: ${sheetId}`);
+    } catch (e) {
+      console.error("create user sheet", e);
+    }
   }
 
   let setupUrl = null;
