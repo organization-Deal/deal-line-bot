@@ -44,10 +44,12 @@ export const SCHEMA = [
   { col: "V", key: "attTax",      header: "แนบใบกำกับภาษี" },
   { col: "W", key: "attSlip",     header: "แนบสลิป" },
   { col: "X", key: "attOther",    header: "แนบหลักฐานอื่น" },
-  { col: "Y", key: "transferor",   header: "ผู้โอน/จากบัญชี" },
+  { col: "Y",  key: "transferor",     header: "ผู้โอน/จากบัญชี" },
+  { col: "Z",  key: "claimPdfUrl",    header: "ลิงก์ใบเบิก PDF" },
+  { col: "AA", key: "receiptPdfUrl",  header: "ลิงก์ใบแทน PDF" },
 ];
 
-const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "Y"
+const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "AA"
 export const HEADER = SCHEMA.map((s) => s.header);              // oauth.js / provision.js ใช้ตัวนี้
 const COL_OF = Object.fromEntries(SCHEMA.map((s) => [s.key, s.col]));
 
@@ -126,6 +128,8 @@ export function allAttachments(rec) {
   for (const t of ATTACH_TYPES) {
     for (const url of splitUrls(rec[t.key])) out.push({ type: t.key, label: t.label, url });
   }
+  if (rec.claimPdfUrl) out.push({ type: "claimPdfUrl", label: "ใบเบิก PDF", url: rec.claimPdfUrl });
+  if (rec.receiptPdfUrl) out.push({ type: "receiptPdfUrl", label: "ใบแทน PDF", url: rec.receiptPdfUrl });
   return out;
 }
 
@@ -256,6 +260,8 @@ export async function appendExpense(env, sheetId, r, meta = {}, token = null) {
     attTax:      "",
     attSlip:     "",
     attOther:    "",
+    claimPdfUrl: "",
+    receiptPdfUrl: "",
   };
   if (slot) full[slot] = link;
 
