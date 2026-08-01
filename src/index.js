@@ -17,7 +17,7 @@ import {
 import { uploadImage, listUploadedImages } from "./drive.js";
 import { buildConnectUrl, handleCallback, getUserToken, createUserSheet } from "./oauth.js";
 
-const VERSION = "DEAL_LINE_BOT_v1.3";
+const VERSION = "DEAL_LINE_BOT_v1.4";
 
 const PENDING_ACTS = new Set(["confirm", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -344,18 +344,22 @@ async function computeStats(env, sheet, rec, justAppended = null) {
 }
 
 async function renderSaved(env, key, sheet, rec, justAppended = null) {
-  const [stats, setup, dash, setupPage] = await Promise.all([
+  const [stats, setup, dash, receiptPage] = await Promise.all([
     computeStats(env, sheet, rec, justAppended),
     checkSetup(env, key, sheet),
     dashUrl(env, key),
     dashUrl(env, key, "/receipt"),
   ]);
+  const receiptUrl = receiptPage && rec.id
+    ? `${receiptPage}&id=${encodeURIComponent(rec.id)}`
+    : receiptPage;
 
   return savedCard(rec, rec.imageUrl || null, dash, {
     id: rec.id,
     stats,
+    receiptUrl,
     // มี setupUrl = ยังตั้งค่าไม่ครบ → ปุ่มล่างกลายเป็น "เพิ่มข้อมูลบริษัท"
-    setupUrl: setup ? setupPage : null,
+    setupUrl: setup ? receiptPage : null,
     setupWarn: setup ? setup.warn : null,
   });
 }
@@ -540,7 +544,8 @@ function promptFor(field) {
   switch (field) {
     case "amount":   return "พิมพ์ยอดเงินที่ถูกต้องมาได้เลย (เฉพาะตัวเลข)";
     case "date":     return "พิมพ์วันที่ที่ถูกต้อง เช่น 24/07/2569 หรือ 2026-07-24";
-    case "vendor":   return "พิมพ์ชื่อร้าน/ผู้รับเงินที่ถูกต้อง";
+    case "vendor":     return "พิมพ์ชื่อร้าน/ผู้รับเงินที่ถูกต้อง";
+    case "transferor": return "พิมพ์ชื่อผู้โอน/ชื่อบัญชีต้นทางที่ถูกต้อง";
     case "category": return "พิมพ์หมวดที่ถูกต้อง";
     case "note":     return "พิมพ์รายละเอียดที่ถูกต้อง";
     default:         return "พิมพ์ค่าที่ถูกต้องมาได้เลย";
