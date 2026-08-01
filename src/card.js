@@ -13,7 +13,7 @@
 //   act=confirm  act=cancel  act=edit  act=fix&f=
 //   act=paid     act=delete  act=attach  act=more  act=back
 
-export const CARD_VERSION = '4.1';
+export const CARD_VERSION = '4.2';
 
 /* ───────────────────── iOS system colors ───────────────────── */
 const C = {
@@ -224,7 +224,23 @@ export function buildRecordCard(rec = {}, opts = {}) {
   }
 
   /* ---------- รายละเอียด ---------- */
+  const isTransferSlip = rec.docType === 'สลิปโอนเงิน';
+  const transferorValue = isTransferSlip
+    ? (has(rec.transferor) ? rec.transferor : 'ไม่พบข้อมูล — แตะแก้ไข')
+    : rec.transferor;
+  const receiverValue = isTransferSlip
+    ? (has(rec.vendor) ? rec.vendor : 'ไม่พบข้อมูล — แตะแก้ไข')
+    : rec.vendor;
+
   const detail = hairList([
+    hairRow('ผู้โอน / จาก', transferorValue, {
+      low: isTransferSlip && (!has(rec.transferor) || isLow(rec, 'transferor')),
+      id, field: 'transferor',
+    }),
+    hairRow(isTransferSlip ? 'ผู้รับ / ไปยัง' : 'ร้าน / ผู้รับ', receiverValue, {
+      low: isTransferSlip && (!has(rec.vendor) || isLow(rec, 'vendor')),
+      id, field: 'vendor',
+    }),
     hairRow('หมวดหมู่', rec.category, { low: isLow(rec, 'category'), id, field: 'category' }),
     hairRow('เอกสาร', rec.docType),
     hairRow('โน้ต', rec.note, { low: isLow(rec, 'note'), id, field: 'note' }),
@@ -291,6 +307,10 @@ export function buildRecordCard(rec = {}, opts = {}) {
       links.push(dot());
       links.push(textLink('ดูบิล', { type: 'uri', label: 'ดูบิล', uri: driveLink }));
     }
+    if (opts.receiptUrl) {
+      links.push(dot());
+      links.push(textLink('ใบแทน', { type: 'uri', label: 'ใบแทน', uri: opts.receiptUrl }, C.orange));
+    }
     links.push(dot());
     links.push(textLink('เพิ่มเติม', { type: 'postback', label: 'เพิ่มเติม', data: pb('more', id) }, C.secondary));
     links.push({ type: 'filler' });
@@ -305,6 +325,12 @@ export function buildRecordCard(rec = {}, opts = {}) {
       footer.contents.push({
         type: 'button', style: 'primary', color: C.orange, height: 'sm', margin: 'sm',
         action: { type: 'uri', label: '⚠️  เพิ่มข้อมูลบริษัท', uri: opts.setupUrl },
+      });
+    } else if (opts.receiptUrl) {
+      footer.contents.push({ type: 'separator', color: C.separator, margin: 'sm' });
+      footer.contents.push({
+        type: 'button', style: 'link', height: 'sm', color: C.orange,
+        action: { type: 'uri', label: '🧾 ใบแทนรายการนี้พร้อมแล้ว', uri: opts.receiptUrl },
       });
     } else if (opts.dashboardUrl) {
       footer.contents.push({ type: 'separator', color: C.separator, margin: 'sm' });
