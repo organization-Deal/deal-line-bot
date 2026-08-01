@@ -1,4 +1,4 @@
-// Phase 1 email inbox: receive forwarded invoices/receipts through Cloudflare Email Routing.
+// Email document ingestion shared by Cloudflare Email Routing and Gmail OAuth sync.
 
 import { parseEmail, bytesToBase64 } from "./email-mime.js";
 import { analyzeEmailDocument } from "./email-ocr.js";
@@ -94,7 +94,7 @@ async function dashboardUrl(env, tenant, page = "email") {
   return `${base}/?tenant=${encodeURIComponent(tenant)}&k=${encodeURIComponent(k)}&page=${encodeURIComponent(page)}`;
 }
 
-async function notifyTenant(env, tenant, records, subject) {
+export async function notifyEmailRecords(env, tenant, records, subject) {
   if (!env.LINE_ACCESS_TOKEN || !tenant || !records.length) return;
   const review = records.filter(x => x.status === "รอตรวจสอบ").length;
   const dup = records.filter(x => x.status === "สงสัยซ้ำ").length;
@@ -135,7 +135,7 @@ async function processOne(env, tenant, sheetId, token, base, item) {
   });
 
   const candidate = {
-    receivedAt: new Date().toISOString(),
+    receivedAt: base.receivedAt || new Date().toISOString(),
     messageId: base.messageId,
     from: base.from,
     subject: base.subject,
@@ -181,7 +181,7 @@ async function processTextOnly(env, tenant, sheetId, token, base) {
   });
   const bytes = new TextEncoder().encode(`${base.subject}\n\n${text}`);
   const candidate = {
-    receivedAt: new Date().toISOString(), messageId: base.messageId, from: base.from,
+    receivedAt: base.receivedAt || new Date().toISOString(), messageId: base.messageId, from: base.from,
     subject: base.subject, filename: "เนื้อหาอีเมล", mimeType: "text/plain",
     fileHash: await sha256(bytes), docType: analysis.docType, vendor: analysis.vendor,
     taxId: analysis.taxId, invoiceNo: analysis.invoiceNo, documentDate: analysis.date,
@@ -198,35 +198,28 @@ async function processTextOnly(env, tenant, sheetId, token, base) {
   return appendEmailInbox(env, sheetId, candidate, token);
 }
 
-export async function handleIncomingEmail(message, env, ctx) {
-  if (message.rawSize > 25 * 1024 * 1024) {
-    message.setReject("Message too large");
-    return;
-  }
-  const inboxToken = emailTokenFromRecipient(message.to);
-  const tenant = inboxToken ? await env.KV.get(`emailinbox:${inboxToken}`) : "";
-  if (!tenant) {
-    message.setReject("Unknown accounting inbox");
-    return;
-  }
+
+/**
+ * Process one normalized email from any provider.
+ * parsed = { subject, messageId, from, recipient, text, receivedAt, attachments[] }
+ * Each attachment item = { filename, mimeType, content: Uint8Array }
+ */
+export async function processNormalizedEmail(env, tenant, parsed = {}, { notify = true, ctx = null } = {}) {
   const sheetId = (await env.KV.get(`tenant:${tenant}`)) || env.DEFAULT_SHEET_ID;
-  if (!sheetId) {
-    message.setReject("Accounting inbox is not connected");
-    return;
-  }
-
+  if (!sheetId) throw new Error("Accounting inbox is not connected");
   const token = await getUserToken(env, tenant);
+  if (!token) throw new Error("Google Drive/Sheets ยังไม่ได้เชื่อม");
   await ensureEmailInboxTab(env, sheetId, token);
-  const parsed = await parseEmail(message.raw);
-  const base = {
-    subject: parsed.subject || message.headers.get("subject") || "",
-    messageId: parsed.messageId || message.headers.get("message-id") || `cf-${Date.now()}`,
-    from: parsed.from || message.from,
-    recipient: message.to,
-    text: parsed.text || "",
-  };
 
-  const docs = parsed.attachments
+  const base = {
+    subject: parsed.subject || "",
+    messageId: parsed.messageId || `email-${Date.now()}`,
+    from: parsed.from || "",
+    recipient: parsed.recipient || "",
+    text: parsed.text || "",
+    receivedAt: parsed.receivedAt || new Date().toISOString(),
+  };
+  const docs = (parsed.attachments || [])
     .filter(supportedAttachment)
     .filter(a => a.content?.byteLength > 6000 && a.content.byteLength <= MAX_FILE_BYTES)
     .sort((a, b) => (String(a.mimeType).includes("pdf") ? -1 : 0) - (String(b.mimeType).includes("pdf") ? -1 : 0))
@@ -240,22 +233,61 @@ export async function handleIncomingEmail(message, env, ctx) {
       records.push(await processTextOnly(env, tenant, sheetId, token, base));
     } else {
       records.push(await appendEmailInbox(env, sheetId, {
-        receivedAt: new Date().toISOString(), messageId: base.messageId, from: base.from,
+        receivedAt: base.receivedAt, messageId: base.messageId, from: base.from,
         subject: base.subject, filename: "ไม่มีไฟล์เอกสาร", mimeType: "text/plain",
         status: "ไม่ใช่เอกสาร", docType: "ไม่ใช่เอกสารบัญชี", recipient: base.recipient,
         bodyPreview: base.text.replace(/\s+/g, " ").slice(0, 1500), confidence: 1,
       }, token));
     }
-    console.log(`[email] tenant=${tenant} subject=${base.subject.slice(0, 80)} docs=${records.length}`);
-    ctx.waitUntil(notifyTenant(env, tenant, records, base.subject).catch(e => console.error("email notify", e)));
+    if (notify && records.length) {
+      const work = notifyEmailRecords(env, tenant, records, base.subject).catch(e => console.error("email notify", e));
+      if (ctx?.waitUntil) ctx.waitUntil(work); else await work;
+    }
+    return records;
   } catch (error) {
     console.error("email process failed", error);
-    await appendEmailInbox(env, sheetId, {
-      receivedAt: new Date().toISOString(), messageId: base.messageId, from: base.from,
+    const failed = await appendEmailInbox(env, sheetId, {
+      receivedAt: base.receivedAt, messageId: base.messageId, from: base.from,
       subject: base.subject, filename: "ประมวลผลไม่สำเร็จ", status: "อ่านไม่สำเร็จ",
       flag: String(error?.message || error).slice(0, 250), recipient: base.recipient,
       bodyPreview: base.text.replace(/\s+/g, " ").slice(0, 1500),
-    }, token).catch(e => console.error("email error log failed", e));
+    }, token).catch(e => {
+      console.error("email error log failed", e);
+      return null;
+    });
+    if (failed) records.push(failed);
+    throw error;
+  }
+}
+
+export async function handleIncomingEmail(message, env, ctx) {
+  if (message.rawSize > 25 * 1024 * 1024) {
+    message.setReject("Message too large");
+    return;
+  }
+  const inboxToken = emailTokenFromRecipient(message.to);
+  const tenant = inboxToken ? await env.KV.get(`emailinbox:${inboxToken}`) : "";
+  if (!tenant) {
+    message.setReject("Unknown accounting inbox");
+    return;
+  }
+
+  const parsed = await parseEmail(message.raw);
+  const normalized = {
+    subject: parsed.subject || message.headers.get("subject") || "",
+    messageId: parsed.messageId || message.headers.get("message-id") || `cf-${Date.now()}`,
+    from: parsed.from || message.from,
+    recipient: message.to,
+    text: parsed.text || "",
+    receivedAt: new Date().toISOString(),
+    attachments: parsed.attachments || [],
+  };
+
+  try {
+    const records = await processNormalizedEmail(env, tenant, normalized, { notify: true, ctx });
+    console.log(`[email-routing] tenant=${tenant} subject=${normalized.subject.slice(0, 80)} docs=${records.length}`);
+  } catch (error) {
+    console.error("email routing failed", error);
     ctx.waitUntil(push(env, tenant, textMsg(`อ่านเอกสารจากอีเมลไม่สำเร็จ\n${String(error?.message || error).slice(0, 180)}`)).catch(() => {}));
   }
 }
