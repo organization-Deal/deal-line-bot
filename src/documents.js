@@ -1,6 +1,9 @@
-// สร้าง "ใบเบิกค่าใช้จ่าย" + "ใบรับรองแทนใบเสร็จ" อัตโนมัติ
-// วิธีทำ: HTML → Google Docs (Drive import) → export PDF → อัป PDF กลับเข้า Drive ลูกค้า
-// ใช้ scope drive.file เดิมได้ ไม่ต้องขอ OAuth scope เพิ่ม
+// สร้าง "ใบขอเบิก" + "ใบรับรองแทนใบเสร็จรับเงิน" อัตโนมัติ
+// Flow: HTML → Google Docs (Drive import) → export PDF → อัป PDF กลับเข้า Drive
+// V3 ปรับ HTML ให้ Google Docs แปลงได้ตรงขึ้น: กำหนดขนาดรูปด้วย attribute,
+// ตารางจัดวางทั้งหมด border=0 และลดความสูงเพื่อให้จบในหน้าเดียว
+
+export const DOCUMENT_TEMPLATE_VERSION = "FORMAL_DOCS_V3_GOOGLE_SAFE_20260802";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
@@ -30,7 +33,9 @@ function dateParts(input) {
     if (y < 100) y += 2000;
   } else {
     const now = new Date();
-    y = now.getUTCFullYear(); m = now.getUTCMonth() + 1; d = now.getUTCDate();
+    y = now.getUTCFullYear();
+    m = now.getUTCMonth() + 1;
+    d = now.getUTCDate();
   }
   const p = (x) => String(x || 1).padStart(2, "0");
   return {
@@ -46,7 +51,10 @@ function concatBytes(...parts) {
   const total = arrays.reduce((s, a) => s + a.byteLength, 0);
   const out = new Uint8Array(total);
   let off = 0;
-  for (const a of arrays) { out.set(a, off); off += a.byteLength; }
+  for (const a of arrays) {
+    out.set(a, off);
+    off += a.byteLength;
+  }
   return out;
 }
 
@@ -83,7 +91,10 @@ async function uploadMultipart(token, metadata, mediaType, media, fields = "id,n
 async function shareAnyone(token, fileId) {
   const res = await fetch(`${DRIVE}/files/${fileId}/permissions?supportsAllDrives=true`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
     body: JSON.stringify({ role: "reader", type: "anyone" }),
   });
   if (!res.ok) console.warn("shareAnyone", fileId, res.status, await res.text());
@@ -110,60 +121,66 @@ async function exportPdf(token, docId) {
   throw new Error(`Drive export PDF failed ${last}`);
 }
 
-function img(url, alt, maxWidth) {
+function img(url, alt, width = 72) {
   if (!url) return "";
-  return `<img src="${esc(url)}" alt="${esc(alt)}" style="max-width:${maxWidth}px;max-height:72px;object-fit:contain">`;
+  // Google Docs importer มักไม่สน max-width แต่ยอมรับ width attribute
+  return `<img src="${esc(url)}" alt="${esc(alt)}" width="${width}" style="width:${width}px;height:auto;border:0">`;
 }
 
 function shell(title, body) {
   return `<!doctype html><html lang="th"><head><meta charset="utf-8"><title>${esc(title)}</title>
   <style>
-    table.form-grid{border-collapse:collapse;border:1px solid #222}
+    @page{size:A4;margin:12mm 13mm}
+    body{font-family:'Sarabun','Noto Sans Thai',Tahoma,Arial,sans-serif;color:#111;font-size:9.4pt;line-height:1.35;margin:0}
+    table{border-collapse:collapse}
+    table.form-grid{border:1px solid #222}
     table.form-grid th,table.form-grid td{border:1px solid #222}
-  </style></head>
-  <body style="font-family:'Noto Sans Thai','Sarabun',Tahoma,Arial,sans-serif;color:#111;font-size:10.2pt;line-height:1.45;margin:34px 38px">
-  ${body}</body></html>`;
+    .no-border,.no-border tr,.no-border td{border:0!important}
+  </style></head><body>${body}</body></html>`;
 }
 
 function formalCompanyHeader(settings) {
   const address = esc(settings.company_address || "—").replace(/\\n|\n/g, "<br>");
-  return `<table style="width:100%;border-collapse:collapse;margin:0 0 8px">
+  return `<table class="no-border" border="0" cellspacing="0" cellpadding="0" width="100%" style="width:100%;border:0;margin:0 0 7px">
     <tr>
-      <td style="width:15%;vertical-align:top;text-align:left;padding-top:1px">
-        ${img(settings.logo_url, "โลโก้บริษัท", 74)}
+      <td width="90" style="width:90px;border:0;vertical-align:top;text-align:left;padding:0">${img(settings.logo_url, "โลโก้บริษัท", 68)}</td>
+      <td style="border:0;vertical-align:top;text-align:center;padding:0 10px">
+        <div style="font-size:14pt;font-weight:700;line-height:1.2">${esc(settings.company_name || "—")}</div>
+        <div style="font-size:9.5pt;line-height:1.35;margin-top:2px">${address}</div>
+        ${settings.tax_id ? `<div style="font-size:9.5pt;line-height:1.35">เลขที่ประจำตัวผู้เสียภาษี : ${esc(settings.tax_id)}</div>` : ""}
       </td>
-      <td style="width:70%;vertical-align:top;text-align:center;padding:0 12px">
-        <div style="font-size:15.5pt;font-weight:700;line-height:1.25">${esc(settings.company_name || "—")}</div>
-        <div style="font-size:10.5pt;line-height:1.45;margin-top:3px">${address}</div>
-        ${settings.tax_id ? `<div style="font-size:10.5pt;line-height:1.45">เลขที่ประจำตัวผู้เสียภาษี : ${esc(settings.tax_id)}</div>` : ""}
-      </td>
-      <td style="width:15%"></td>
+      <td width="90" style="width:90px;border:0"></td>
     </tr>
   </table>`;
 }
 
-function compactMeta(rows, align = "left") {
-  return `<table style="width:100%;border-collapse:collapse;font-size:9.2pt;line-height:1.5;margin:6px 0 14px">
-    ${rows.map(([label, value]) => `<tr>
-      <td style="width:${align === "right" ? "70%" : "118px"};${align === "right" ? "" : "font-weight:700"}">${align === "right" ? "" : esc(label)}</td>
-      <td style="text-align:${align};${align === "right" ? "font-weight:700" : ""}">${align === "right" ? `<span style="font-weight:400">${esc(label)}</span><br>` : ": "}${esc(value || "—")}</td>
-    </tr>`).join("")}
-  </table>`;
+function claimNumberBlock(claimNo) {
+  return `<div style="text-align:right;font-size:9.5pt;line-height:1.35;margin:2px 2px 7px">
+    <div><b>เลขที่</b></div><div style="font-size:10.5pt;font-weight:700">${esc(claimNo)}</div>
+  </div>`;
+}
+
+function replacementMeta(receiptNo, issueDate) {
+  return `<div style="font-size:8.8pt;line-height:1.45;margin:5px 0 12px">
+    <div><b>เลขที่เอกสาร:</b> ${esc(receiptNo)}</div>
+    <div><b>เลขที่ชุด:</b> ${esc(receiptNo)}</div>
+    <div><b>วันที่สร้างเอกสาร:</b> ${esc(issueDate)}</div>
+  </div>`;
 }
 
 function signatureCell(name, role, issueDate, signUrl = "", position = "") {
-  const roleLine = position ? `${esc(role)} · ${esc(position)}` : esc(role);
-  return `<td style="width:50%;text-align:center;vertical-align:bottom;padding:18px 34px 0">
-    <div style="height:48px;line-height:48px;text-align:center">${img(signUrl, `ลายเซ็น ${role}`, 145) || "&nbsp;"}</div>
-    <div style="border-top:1px solid #333;margin:0 auto;padding-top:5px;width:82%"></div>
+  const roleLine = position ? `${esc(role)} ตำแหน่ง ${esc(position)}` : esc(role);
+  return `<td width="50%" style="width:50%;border:0;text-align:center;vertical-align:bottom;padding:10px 24px 0">
+    <div style="height:38px;text-align:center">${img(signUrl, `ลายเซ็น ${role}`, 120) || "&nbsp;"}</div>
+    <div style="border-top:1px solid #333;width:78%;margin:0 auto;padding-top:4px"></div>
     <div style="font-weight:700">(${esc(name || "—")})</div>
-    <div style="font-size:9.4pt;margin-top:2px">${roleLine}</div>
-    <div style="font-size:9.2pt;margin-top:2px">วันที่ ${esc(issueDate)}</div>
+    <div style="font-size:8.7pt;margin-top:1px">${roleLine}</div>
+    <div style="font-size:8.5pt;margin-top:1px">วันที่ ${esc(issueDate)}</div>
   </td>`;
 }
 
 function formalSignatures(payer, settings, issueDate, payerPosition = "") {
-  return `<table style="width:100%;border-collapse:collapse;margin-top:26px;page-break-inside:avoid">
+  return `<table class="no-border" border="0" cellspacing="0" cellpadding="0" width="100%" style="width:100%;border:0;margin-top:15px;page-break-inside:avoid">
     <tr>
       ${signatureCell(payer, "ผู้เบิกจ่าย", issueDate, "", payerPosition)}
       ${signatureCell(settings.approver_name, "ผู้อนุมัติ", issueDate, settings.approver_sign_url || "", settings.approver_position || "")}
@@ -185,33 +202,28 @@ function buildClaimHtml(rec, settings, claimNo) {
   const evidence = rec.imageUrl
     ? `<a href="${esc(rec.imageUrl)}" style="color:#111;text-decoration:underline">เปิดหลักฐานต้นฉบับ</a>`
     : "—";
-  const blankRows = Array.from({ length: 7 }, () => `
-    <tr style="height:27px"><td>&nbsp;</td><td></td><td></td><td></td><td></td></tr>`).join("");
+  const blankRows = Array.from({ length: 4 }, () =>
+    `<tr style="height:25px"><td>&nbsp;</td><td></td><td></td><td></td><td></td></tr>`
+  ).join("");
 
   return shell("ใบขอเบิก", `
     ${formalCompanyHeader(settings)}
+    ${claimNumberBlock(claimNo)}
 
-    <table style="width:100%;border-collapse:collapse;margin:8px 0 4px">
-      <tr>
-        <td style="width:68%"></td>
-        <td style="text-align:center;font-size:10pt"><b>เลขที่</b><br><span style="font-size:11pt;font-weight:700">${esc(claimNo)}</span></td>
-      </tr>
-    </table>
+    <div style="text-align:center;font-size:17pt;font-weight:700;margin:5px 0 13px">ใบขอเบิก</div>
 
-    <div style="text-align:center;font-size:18pt;font-weight:700;margin:10px 0 18px">ใบขอเบิก</div>
-
-    <table class="form-grid" style="width:100%;border-collapse:collapse;table-layout:fixed;font-size:9.8pt" border="1" cellpadding="6">
+    <table class="form-grid" border="1" cellspacing="0" cellpadding="5" width="100%" style="width:100%;table-layout:fixed;font-size:9.1pt">
       <thead>
-        <tr style="height:34px">
-          <th style="width:8%;text-align:center">ลำดับ</th>
-          <th style="width:15%;text-align:center">วันที่</th>
-          <th style="width:43%;text-align:center">รายการ</th>
-          <th style="width:12%;text-align:center">หน่วย</th>
-          <th style="width:22%;text-align:center">จำนวนเงิน<br>(บาท)</th>
+        <tr style="height:31px">
+          <th width="8%" style="width:8%;text-align:center">ลำดับ</th>
+          <th width="15%" style="width:15%;text-align:center">วันที่</th>
+          <th width="43%" style="width:43%;text-align:center">รายการ</th>
+          <th width="12%" style="width:12%;text-align:center">หน่วย</th>
+          <th width="22%" style="width:22%;text-align:center">จำนวนเงิน<br>(บาท)</th>
         </tr>
       </thead>
       <tbody>
-        <tr style="height:42px">
+        <tr style="height:37px">
           <td style="text-align:center;vertical-align:middle">1</td>
           <td style="text-align:center;vertical-align:middle">${esc(tx.en)}</td>
           <td style="vertical-align:middle">${esc(detail)}</td>
@@ -222,29 +234,14 @@ function buildClaimHtml(rec, settings, claimNo) {
       </tbody>
     </table>
 
-    <table style="width:100%;border-collapse:collapse;margin-top:10px;font-size:10.5pt">
-      <tr><td style="width:66%"></td><td style="text-align:right"><b>รวมทั้งสิ้น&nbsp;&nbsp;${money(rec.amount)} บาท</b></td></tr>
-    </table>
+    <div style="text-align:right;font-size:10pt;font-weight:700;margin-top:8px">รวมทั้งสิ้น ${money(rec.amount)} บาท</div>
 
-    <div style="font-size:9.4pt;margin-top:24px;page-break-inside:avoid">
-      <div style="font-weight:700;margin-bottom:7px">ข้อมูลการโอนเงิน</div>
-      <table style="width:100%;border-collapse:collapse;line-height:1.6">
-        <tr>
-          <td style="width:15%">ช่องทางการโอน</td><td style="width:35%"><b>${esc(paymentChannel)}</b></td>
-          <td style="width:13%">ผู้ขอเบิก</td><td style="width:37%"><b>${esc(payer)}</b></td>
-        </tr>
-        <tr>
-          <td>ชื่อบัญชี</td><td><b>${esc(accountName)}</b></td>
-          <td>เลขบัญชี</td><td><b>${esc(accountNo)}</b></td>
-        </tr>
-        <tr>
-          <td>ธนาคาร</td><td><b>${esc(bankName)}</b></td>
-          <td>ผู้รับ / ไปยัง</td><td><b>${esc(rec.vendor || "—")}</b></td>
-        </tr>
-        <tr>
-          <td>หลักฐานอ้างอิง</td><td colspan="3">${evidence}</td>
-        </tr>
-      </table>
+    <div style="font-size:8.8pt;margin-top:15px;line-height:1.5;page-break-inside:avoid">
+      <div style="font-weight:700;margin-bottom:4px">ข้อมูลการโอนเงิน</div>
+      <div>ช่องทางการโอน: <b>${esc(paymentChannel)}</b>&nbsp;&nbsp;&nbsp;&nbsp;ผู้ขอเบิก: <b>${esc(payer)}</b></div>
+      <div>ชื่อบัญชี: <b>${esc(accountName)}</b>&nbsp;&nbsp;&nbsp;&nbsp;เลขบัญชี: <b>${esc(accountNo)}</b></div>
+      <div>ธนาคาร: <b>${esc(bankName)}</b>&nbsp;&nbsp;&nbsp;&nbsp;ผู้รับ / ไปยัง: <b>${esc(rec.vendor || "—")}</b></div>
+      <div>ผู้โอน / จากบัญชี: <b>${esc(transferor)}</b>&nbsp;&nbsp;&nbsp;&nbsp;หลักฐานอ้างอิง: ${evidence}</div>
     </div>
 
     ${formalSignatures(payer, settings, issue, payerPosition)}
@@ -261,33 +258,30 @@ function buildReplacementHtml(rec, settings, receiptNo) {
   const detail = rec.note || rec.category || "ค่าใช้จ่าย";
   const noReceiptReason = rec.noReceiptReason || "ไม่อาจเรียกเก็บใบเสร็จรับเงินจากผู้รับได้";
   const note = rec.receiptNote || "";
-  const blankRows = Array.from({ length: 8 }, () => `
-    <tr style="height:28px"><td>&nbsp;</td><td></td><td></td><td></td></tr>`).join("");
+  const blankRows = Array.from({ length: 7 }, () =>
+    `<tr style="height:25px"><td>&nbsp;</td><td></td><td></td><td></td></tr>`
+  ).join("");
 
   return shell("ใบรับรองแทนใบเสร็จรับเงิน", `
     ${formalCompanyHeader(settings)}
-    ${compactMeta([
-      ["เลขที่เอกสาร", receiptNo],
-      ["เลขที่ชุด", receiptNo],
-      ["วันที่สร้างเอกสาร", issue],
-    ])}
+    ${replacementMeta(receiptNo, issue)}
 
-    <div style="text-align:center;font-size:17.5pt;font-weight:700;margin:10px 0 4px">ใบรับรองแทนใบเสร็จรับเงิน</div>
-    <div style="text-align:center;font-size:11pt;margin-bottom:18px">
+    <div style="text-align:center;font-size:16.5pt;font-weight:700;margin:6px 0 3px">ใบรับรองแทนใบเสร็จรับเงิน</div>
+    <div style="text-align:center;font-size:10.5pt;margin-bottom:13px">
       บจ. / หจก. ${esc(settings.company_name || "—")} (ผู้ซื้อ/ผู้รับบริการ)
     </div>
 
-    <table class="form-grid" style="width:100%;border-collapse:collapse;table-layout:fixed;font-size:9.7pt" border="1" cellpadding="6">
+    <table class="form-grid" border="1" cellspacing="0" cellpadding="5" width="100%" style="width:100%;table-layout:fixed;font-size:9pt">
       <thead>
-        <tr style="height:34px">
-          <th style="width:20%;text-align:center">วัน เดือน ปี</th>
-          <th style="width:38%;text-align:center">รายละเอียดรายจ่าย</th>
-          <th style="width:18%;text-align:center">จำนวนเงิน</th>
-          <th style="width:24%;text-align:center">หมายเหตุ</th>
+        <tr style="height:31px">
+          <th width="20%" style="width:20%;text-align:center">วัน เดือน ปี</th>
+          <th width="38%" style="width:38%;text-align:center">รายละเอียดรายจ่าย</th>
+          <th width="18%" style="width:18%;text-align:center">จำนวนเงิน</th>
+          <th width="24%" style="width:24%;text-align:center">หมายเหตุ</th>
         </tr>
       </thead>
       <tbody>
-        <tr style="height:48px">
+        <tr style="height:42px">
           <td style="text-align:center;vertical-align:middle">${esc(tx.en)}</td>
           <td style="text-align:center;vertical-align:middle">${esc(detail)}</td>
           <td style="text-align:right;vertical-align:middle">${money(rec.amount)}</td>
@@ -297,17 +291,13 @@ function buildReplacementHtml(rec, settings, receiptNo) {
       </tbody>
     </table>
 
-    <table style="width:100%;border-collapse:collapse;margin-top:10px;font-size:10.5pt">
-      <tr><td style="width:64%"></td><td style="text-align:right"><b>รวมทั้งสิ้น : ${money(rec.amount)} บาท</b></td></tr>
-    </table>
+    <div style="text-align:right;font-size:10pt;font-weight:700;margin-top:8px">รวมทั้งสิ้น : ${money(rec.amount)} บาท</div>
 
-    <div style="margin-top:22px;font-size:9.3pt;line-height:1.6;page-break-inside:avoid">
+    <div style="margin-top:15px;font-size:8.8pt;line-height:1.5;page-break-inside:avoid">
       <div>ข้าพเจ้า <b>${esc(payer)}</b> (ผู้เบิกจ่าย)${payerPosition ? ` ตำแหน่ง <b>${esc(payerPosition)}</b>` : ""}</div>
-      <div style="margin-top:7px">
-        ขอรับรองว่า รายจ่ายข้างต้นนี้${esc(noReceiptReason)} และข้าพเจ้าได้จ่ายไปในงานของทางบริษัท / ห้างหุ้นส่วนจำกัดโดยแท้จริง
-      </div>
-      <div style="margin-top:4px">ผู้โอน / จากบัญชี: <b>${esc(transferor)}</b>&nbsp;&nbsp;&nbsp;&nbsp;ผู้รับ / ไปยัง: <b>${esc(recipient)}</b></div>
-      <div style="margin-top:4px">ดังนั้น ในวันที่ ${esc(issue)}</div>
+      <div style="margin-top:5px">ขอรับรองว่า รายจ่ายข้างต้นนี้${esc(noReceiptReason)} และข้าพเจ้าได้จ่ายไปในงานของบริษัท / ห้างหุ้นส่วนจำกัดโดยแท้จริง</div>
+      <div style="margin-top:3px">ผู้โอน / จากบัญชี: <b>${esc(transferor)}</b>&nbsp;&nbsp;&nbsp;&nbsp;ผู้รับ / ไปยัง: <b>${esc(recipient)}</b></div>
+      <div style="margin-top:3px">ดังนั้น ในวันที่ ${esc(issue)}</div>
     </div>
 
     ${formalSignatures(payer, settings, issue, payerPosition)}
@@ -318,7 +308,7 @@ async function htmlToPdfOnDrive(token, name, html) {
   let docId = null;
   try {
     const doc = await uploadMultipart(token, {
-      name: `${name} (ต้นฉบับ)` ,
+      name: `${name} (ต้นฉบับ)`,
       mimeType: "application/vnd.google-apps.document",
     }, "text/html; charset=UTF-8", new TextEncoder().encode(html));
     docId = doc.id;
@@ -345,6 +335,8 @@ async function htmlToPdfOnDrive(token, name, html) {
 export async function createExpenseDocuments(env, rec, settings = {}, token) {
   if (!token) throw new Error("ไม่มี Google OAuth token สำหรับสร้างเอกสาร");
   if (!rec?.id) throw new Error("รายการไม่มี id");
+
+  console.log(`[documents] template=${DOCUMENT_TEMPLATE_VERSION} id=${rec.id}`);
 
   const d = dateParts(rec.dateISO || rec.dateText || rec.date);
   const id = String(rec.id).replace(/[^a-zA-Z0-9]/g, "").slice(-8).toUpperCase();
