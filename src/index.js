@@ -16,9 +16,14 @@ import {
 } from "./sheets.js";
 import { uploadImage, listUploadedImages } from "./drive.js";
 import { createExpenseDocuments } from "./documents.js";
+import {
+  handleIncomingEmail, getEmailInboxInfo, rotateEmailInbox, listEmailDocuments,
+  listSubscriptions, approveEmailDocument, patchEmailDocument,
+} from "./email.js";
+import { ensureEmailInboxTab } from "./email-sheets.js";
 import { buildConnectUrl, handleCallback, getUserToken, createUserSheet } from "./oauth.js";
 
-const VERSION = "DEAL_LINE_BOT_v1.7_DUPLICATE_DETECTION";
+const VERSION = "DEAL_LINE_BOT_v1.8_EMAIL_INBOX";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -135,7 +140,8 @@ export default {
         const headers = await ensureHeaders(env, sheetId, token);
         const ids = await backfillIds(env, sheetId, token);
         const settings = await ensureSettingsTab(env, sheetId, token);
-        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings });
+        const emailInbox = await ensureEmailInboxTab(env, sheetId, token);
+        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox });
       } catch (e) {
         console.error("migrate", e);
         return json({ error: String(e) }, 500);
@@ -192,6 +198,45 @@ export default {
             return cors(json(saved));
           }
           return cors(json(await readSettings(env, sheetId, token)));
+        }
+
+        /* Email Inbox — เอกสารที่ส่ง/forward เข้ามา */
+        if (url.pathname === "/api/email-inbox-info") {
+          if (request.method === "POST") {
+            const b = await request.json().catch(() => ({}));
+            const info = b.rotate ? await rotateEmailInbox(env, key) : await getEmailInboxInfo(env, key);
+            await ensureEmailInboxTab(env, sheetId, token);
+            return cors(json({ ok: true, ...info }));
+          }
+          const info = await getEmailInboxInfo(env, key);
+          await ensureEmailInboxTab(env, sheetId, token);
+          return cors(json({ ok: true, ...info }));
+        }
+
+        if (url.pathname === "/api/email-documents") {
+          return cors(json(await listEmailDocuments(env, sheetId, token)));
+        }
+
+        if (url.pathname === "/api/subscriptions") {
+          return cors(json(await listSubscriptions(env, sheetId, token)));
+        }
+
+        if (url.pathname === "/api/email-update" && request.method === "POST") {
+          const b = await request.json();
+          const out = await patchEmailDocument(env, sheetId, b.id, b.patch || {}, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/email-ignore" && request.method === "POST") {
+          const b = await request.json();
+          const out = await patchEmailDocument(env, sheetId, b.id, { status: "ข้ามแล้ว" }, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/email-approve" && request.method === "POST") {
+          const b = await request.json();
+          const out = await approveEmailDocument(env, sheetId, b.id, token, { force: b.force === true });
+          return cors(json(out, out.ok ? 200 : (out.reason === "duplicate" ? 409 : 400)));
         }
 
         // สร้าง/สร้างใหม่ ใบเบิก + ใบแทนของรายการเดียว
@@ -306,6 +351,10 @@ export default {
       ctx.waitUntil(handleEvent(event, env).catch((e) => reportEventError(env, event, e, "ประมวลผลรายการ")));
     }
     return new Response("ok");
+  },
+
+  async email(message, env, ctx) {
+    return handleIncomingEmail(message, env, ctx);
   },
 };
 
@@ -825,17 +874,36 @@ async function handleText(event, env, key) {
       const h = await ensureHeaders(env, sheet.sheetId, sheet.token);
       const i = await backfillIds(env, sheet.sheetId, sheet.token);
       const s = await ensureSettingsTab(env, sheet.sheetId, sheet.token);
+      const e = await ensureEmailInboxTab(env, sheet.sheetId, sheet.token);
       await env.KV.delete(`setup:${key}`);
       await env.KV.delete(`setup:${key}:${sheet.sheetId}`);
       return reply(env, event.replyToken, textMsg(
         `อัปเกรดชีทเรียบร้อย ✅\n` +
         `หัวคอลัมน์: ${h.changed ? `เพิ่ม ${h.added} ช่อง` : "ครบอยู่แล้ว"}\n` +
         `เติม id/วันที่: ${i.filled} ช่อง\n` +
-        `แท็บ _settings: ${s.created ? "สร้างใหม่" : "มีอยู่แล้ว"}`
+        `แท็บ _settings: ${s.created ? "สร้างใหม่" : "มีอยู่แล้ว"}\n` +
+        `แท็บ Email_Inbox: ${e.created ? "สร้างใหม่" : "มีอยู่แล้ว"}`
       ));
     } catch (e) {
       return reply(env, event.replyToken, textMsg("อัปเกรดไม่สำเร็จ 🙏\n" + String(e).slice(0, 300)));
     }
+  }
+
+  if (/^(อีเมล|email|อีเมลรับเอกสาร|รับเอกสาร)$/i.test(text)) {
+    const info = await getEmailInboxInfo(env, key);
+    const base = await dashUrl(env, key);
+    const url = base ? `${base}&page=email` : "";
+    if (!info.address) {
+      return reply(env, event.replyToken, textMsg(
+        "ฟีเจอร์อีเมลพร้อมแล้ว แต่ยังไม่ได้ตั้ง EMAIL_DOMAIN ใน Cloudflare\n" +
+        "เปิดหน้าเอกสารจากอีเมลใน Dashboard เพื่อตรวจการตั้งค่า"
+      ));
+    }
+    return reply(env, event.replyToken, textMsg(
+      `อีเมลรับใบเสร็จและใบกำกับของธุรกิจนี้:\n${info.address}\n\n` +
+      `Forward เอกสารมาที่อีเมลนี้ แล้วระบบจะอ่านและแจ้งกลับใน LINE อัตโนมัติ` +
+      (url ? `\n\nเปิดกล่องเอกสาร:\n${url}` : "")
+    ));
   }
 
   if (/^(ตั้งค่า|settings|ข้อมูลบริษัท)$/i.test(text)) {
@@ -880,6 +948,7 @@ async function handleText(event, env, key) {
       "คำสั่งเสริม (ถ้าอยากใช้):\n" +
       "• แดชบอร์ด — เปิดหน้ารวมทุกอย่าง\n" +
       "• ตั้งค่า — กรอกข้อมูลบริษัท\n" +
+      "• อีเมล — ดูอีเมลรับใบเสร็จ/ใบกำกับ\n" +
       "• รีเซ็ตลิงก์ — ยกเลิกลิงก์เก่าทั้งหมด\n" +
       "• เชื่อม — เชื่อม Google"
     ));
