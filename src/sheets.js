@@ -44,9 +44,10 @@ export const SCHEMA = [
   { col: "V", key: "attTax",      header: "แนบใบกำกับภาษี" },
   { col: "W", key: "attSlip",     header: "แนบสลิป" },
   { col: "X", key: "attOther",    header: "แนบหลักฐานอื่น" },
+  { col: "Y", key: "transferor",   header: "ผู้โอน/จากบัญชี" },
 ];
 
-const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "X"
+const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "Y"
 export const HEADER = SCHEMA.map((s) => s.header);              // oauth.js / provision.js ใช้ตัวนี้
 const COL_OF = Object.fromEntries(SCHEMA.map((s) => [s.key, s.col]));
 
@@ -234,6 +235,7 @@ export async function appendExpense(env, sheetId, r, meta = {}, token = null) {
     dateISO:     d.iso,
     amount:      Number(r.amount) || 0,
     vendor:      r.vendor || "",
+    transferor:  r.transferor || "",
     category:    r.category || "",
     note:        r.note || "",
     sender:      meta.sender || "",
