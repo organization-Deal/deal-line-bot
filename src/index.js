@@ -6,7 +6,7 @@
 //   • อ่านตั้งค่าไม่ได้ = ให้ปุ่มเพิ่มข้อมูลบริษัทขึ้น ไม่เงียบ
 //   • ล้าง flag ทั้งแบบเก่าและแบบผูก sheetId ตอนบันทึกตั้งค่า / migrate
 
-import { verifySignature, getMessageContent, reply, textMsg, confirmCard, savedCard, moreCard } from "./line.js";
+import { verifySignature, getMessageContent, reply, push, textMsg, confirmCard, savedCard, moreCard } from "./line.js";
 import { ocrReceipt } from "./ocr.js";
 import {
   appendExpense, readExpenses, getExpenseById, updateExpenseById,
@@ -18,7 +18,7 @@ import { uploadImage, listUploadedImages } from "./drive.js";
 import { createExpenseDocuments } from "./documents.js";
 import { buildConnectUrl, handleCallback, getUserToken, createUserSheet } from "./oauth.js";
 
-const VERSION = "DEAL_LINE_BOT_v1.5_AUTO_DOCS";
+const VERSION = "DEAL_LINE_BOT_v1.6_NO_SILENT_TIMEOUT";
 
 const PENDING_ACTS = new Set(["confirm", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -278,8 +278,33 @@ export default {
     let body;
     try { body = JSON.parse(raw); } catch { return new Response("bad json", { status: 400 }); }
 
-    for (const event of body.events || [])
-      ctx.waitUntil(handleEvent(event, env).catch((e) => console.error("handleEvent", e)));
+    for (const event of body.events || []) {
+      const key = tenantKey(event.source);
+      const isImage = event.type === "message" && event.message?.type === "image";
+      const isConfirm = event.type === "postback" && new URLSearchParams(event.postback?.data || "").get("act") === "confirm";
+
+      if (isImage) {
+        // ตอบรับทันที ไม่ถือ replyToken รอ OCR/Drive
+        await reply(env, event.replyToken, textMsg("รับรูปแล้วครับ กำลังอ่านบิลและบันทึกหลักฐาน… ⏳"));
+        ctx.waitUntil(runHeavyTask(
+          () => handleImage(event, env, key, "push"),
+          env, event, "อ่านบิล", 25000
+        ));
+        continue;
+      }
+
+      if (isConfirm) {
+        // ตอบรับทันที แล้วค่อย push การ์ดพร้อมใบเบิก/ใบแทนกลับมา
+        await reply(env, event.replyToken, textMsg("รับรายการแล้วครับ กำลังบันทึกและสร้างเอกสารอัตโนมัติ… ⏳"));
+        ctx.waitUntil(runHeavyTask(
+          () => handlePostback(event, env, key, "push"),
+          env, event, "สร้างเอกสาร", 25000
+        ));
+        continue;
+      }
+
+      ctx.waitUntil(handleEvent(event, env).catch((e) => reportEventError(env, event, e, "ประมวลผลรายการ")));
+    }
     return new Response("ok");
   },
 };
@@ -292,6 +317,47 @@ function adminOk(env, url) {
 
 function tenantKey(source = {}) {
   return source.groupId || source.roomId || source.userId || "unknown";
+}
+
+function lineTarget(source = {}) {
+  return source.groupId || source.roomId || source.userId || "";
+}
+
+async function sendEvent(env, event, messages, mode = "reply") {
+  if (mode === "push") return push(env, lineTarget(event.source), messages);
+  return reply(env, event.replyToken, messages);
+}
+
+function friendlyError(error, label = "ประมวลผล") {
+  const raw = String(error?.message || error || "unknown error");
+  if (/429|quota/i.test(raw)) return `${label}ไม่สำเร็จ: โควตา OCR หมดหรือ API ถูกจำกัด`;
+  if (/GEMINI_KEY|CLAUDE_KEY|OCR/i.test(raw)) return `${label}ไม่สำเร็จ: ระบบอ่านบิลมีปัญหา`;
+  if (/Drive|upload|Google/i.test(raw)) return `${label}ไม่สำเร็จ: Google Drive มีปัญหา`;
+  if (/timeout/i.test(raw)) return `${label}นานเกิน 25 วินาที ระบบหยุดงานนี้เพื่อไม่ให้เงียบค้าง`;
+  return `${label}ไม่สำเร็จ: ${raw.slice(0, 160)}`;
+}
+
+async function reportEventError(env, event, error, label) {
+  console.error(`[${label}]`, error);
+  const target = lineTarget(event.source);
+  if (!target) return false;
+  return push(env, target, textMsg(`งานหยุดกลางทาง ❌\n${friendlyError(error, label)}\nลองส่งใหม่อีกครั้ง หากยังขึ้นซ้ำให้เปิด Cloudflare Live Logs ดูข้อความ error`));
+}
+
+async function runHeavyTask(task, env, event, label, timeoutMs = 25000) {
+  let timer;
+  try {
+    await Promise.race([
+      Promise.resolve().then(task),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timeout`)), timeoutMs);
+      }),
+    ]);
+  } catch (e) {
+    await reportEventError(env, event, e, label);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function tenantTitle(env, source) {
@@ -453,40 +519,61 @@ async function handleEvent(event, env) {
 
 /* ───────────────────────── รูป ───────────────────────── */
 
-async function handleImage(event, env, key) {
-  const sheet = await resolveSheet(env, event.source);
-  if (!sheet) return reply(env, event.replyToken, connectMsg(env, key));
+async function handleImage(event, env, key, mode = "reply") {
+  const respond = (messages) => sendEvent(env, event, messages, mode);
+  const uid = event.source.userId;
 
+  // ทำงานที่ไม่ขึ้นต่อกันพร้อมกัน เพื่อลดเวลาจากเดิมที่รอทีละขั้น
+  const [sheet, content, sender, attachRaw] = await Promise.all([
+    resolveSheet(env, event.source),
+    getMessageContent(env, event.message.id),
+    getDisplayName(env, event.source),
+    uid ? env.KV.get(`attach:${uid}`) : Promise.resolve(null),
+  ]);
+
+  if (!sheet) return respond(connectMsg(env, key));
   console.log(`[image] tenant=${key} sheetId=${sheet.sheetId} oauth=${!!sheet.token}`);
 
-  const { base64, mediaType } = await getMessageContent(env, event.message.id);
-  const driveLink = await uploadImage(env, base64, mediaType, `bill-${Date.now()}.jpg`, sheet.token);
+  const { base64, mediaType } = content;
+  const drivePromise = uploadImage(
+    env, base64, mediaType, `bill-${Date.now()}.jpg`, sheet.token
+  );
 
-  const uid = event.source.userId;
-  const raw = uid ? await env.KV.get(`attach:${uid}`) : null;
-  if (raw) {
+  if (attachRaw) {
+    const driveLink = await drivePromise;
+    if (!driveLink) throw new Error("Drive upload failed");
     await env.KV.delete(`attach:${uid}`);
     let target;
-    try { target = JSON.parse(raw); } catch { target = { id: raw, type: "attOther" }; }
-    const out = await addAttachment(env, sheet.sheetId, target.id, target.type || "attOther", driveLink, sheet.token);
-    if (!out.ok) return reply(env, event.replyToken, textMsg(MSG_STALE));
-    return reply(env, event.replyToken, await renderSaved(env, key, sheet, out.record));
+    try { target = JSON.parse(attachRaw); }
+    catch { target = { id: attachRaw, type: "attOther" }; }
+    const out = await addAttachment(
+      env, sheet.sheetId, target.id, target.type || "attOther", driveLink, sheet.token
+    );
+    if (!out.ok) return respond(textMsg(MSG_STALE));
+    return respond(await renderSaved(env, key, sheet, out.record));
   }
 
-  const record = await ocrReceipt(env, base64, mediaType);
-  const sender = await getDisplayName(env, event.source);
+  // OCR กับอัป Drive ทำพร้อมกัน ลดโอกาสชนเพดาน waitUntil 30 วินาที
+  const [driveLink, record] = await Promise.all([
+    drivePromise,
+    ocrReceipt(env, base64, mediaType),
+  ]);
+  if (!driveLink) throw new Error("Drive upload failed");
 
   const id = crypto.randomUUID().slice(0, 8);
-  await env.KV.put(`pending:${id}`,
+  await env.KV.put(
+    `pending:${id}`,
     JSON.stringify({ record, driveLink, sheetId: sheet.sheetId, sender }),
-    { expirationTtl: 3600 });
+    { expirationTtl: 3600 }
+  );
 
-  return reply(env, event.replyToken, confirmCard(id, record, { driveLink }));
+  return respond(confirmCard(id, record, { driveLink }));
 }
 
 /* ───────────────────────── postback ───────────────────────── */
 
-async function handlePostback(event, env, key) {
+async function handlePostback(event, env, key, mode = "reply") {
+  const respond = (messages) => sendEvent(env, event, messages, mode);
   const p = new URLSearchParams(event.postback.data);
   const act = p.get("act");
   const id = p.get("id");
@@ -495,12 +582,12 @@ async function handlePostback(event, env, key) {
 
   if (PENDING_ACTS.has(act)) {
     const raw = await env.KV.get(`pending:${id}`);
-    if (!raw) return reply(env, event.replyToken, textMsg(MSG_STALE));
+    if (!raw) return respond(textMsg(MSG_STALE));
     const pending = JSON.parse(raw);
 
     if (act === "cancel") {
       await env.KV.delete(`pending:${id}`);
-      return reply(env, event.replyToken, textMsg("ยกเลิกแล้วครับ ไม่ได้บันทึกลงชีท\nรูปยังอยู่ใน Drive — จับเข้ารายการอื่นได้จากแดชบอร์ด"));
+      return respond(textMsg("ยกเลิกแล้วครับ ไม่ได้บันทึกลงชีท\nรูปยังอยู่ใน Drive — จับเข้ารายการอื่นได้จากแดชบอร์ด"));
     }
 
     const token = await getUserToken(env, key);
@@ -550,51 +637,51 @@ async function handlePostback(event, env, key) {
       rec.documentError = "บันทึกรายการแล้ว แต่สร้างใบเบิก/ใบแทน PDF ไม่สำเร็จ กรุณาตรวจข้อมูลบริษัทหรือ Google Drive";
     }
 
-    return reply(env, event.replyToken, await renderSaved(env, key, sheet, rec, rec));
+    return respond(await renderSaved(env, key, sheet, rec, rec));
   }
 
   const sheet = await resolveSheet(env, event.source);
-  if (!sheet) return reply(env, event.replyToken, connectMsg(env, key));
+  if (!sheet) return respond(connectMsg(env, key));
 
   if (act === "paid") {
     const out = await togglePaid(env, sheet.sheetId, id, sheet.token);
-    if (!out.ok) return reply(env, event.replyToken, textMsg(MSG_STALE));
-    return reply(env, event.replyToken, await renderSaved(env, key, sheet, out.record));
+    if (!out.ok) return respond(textMsg(MSG_STALE));
+    return respond(await renderSaved(env, key, sheet, out.record));
   }
 
   if (act === "more") {
     const rec = await getExpenseById(env, sheet.sheetId, id, sheet.token);
-    if (!rec) return reply(env, event.replyToken, textMsg(MSG_STALE));
-    return reply(env, event.replyToken, moreCard(rec, { id, dashboardUrl: await dashUrl(env, key) }));
+    if (!rec) return respond(textMsg(MSG_STALE));
+    return respond(moreCard(rec, { id, dashboardUrl: await dashUrl(env, key) }));
   }
 
   if (act === "back") {
     const rec = await getExpenseById(env, sheet.sheetId, id, sheet.token);
-    if (!rec) return reply(env, event.replyToken, textMsg(MSG_STALE));
-    return reply(env, event.replyToken, await renderSaved(env, key, sheet, rec));
+    if (!rec) return respond(textMsg(MSG_STALE));
+    return respond(await renderSaved(env, key, sheet, rec));
   }
 
   if (act === "delete") {
     const out = await softDeleteById(env, sheet.sheetId, id, sheet.token);
-    if (!out.ok) return reply(env, event.replyToken, textMsg(MSG_STALE));
-    return reply(env, event.replyToken, textMsg("ลบรายการแล้วครับ 🗑️"));
+    if (!out.ok) return respond(textMsg(MSG_STALE));
+    return respond(textMsg("ลบรายการแล้วครับ 🗑️"));
   }
 
   if (act === "attach") {
-    if (!uid) return reply(env, event.replyToken, textMsg("ส่งรูปมาในแชทส่วนตัวนะครับ"));
+    if (!uid) return respond(textMsg("ส่งรูปมาในแชทส่วนตัวนะครับ"));
     const type = p.get("t") || "attOther";
     await env.KV.put(`attach:${uid}`, JSON.stringify({ id, type }), { expirationTtl: 600 });
-    return reply(env, event.replyToken, textMsg("ส่งรูปหลักฐานมาได้เลยครับ 📸 (ภายใน 10 นาที)"));
+    return respond(textMsg("ส่งรูปหลักฐานมาได้เลยครับ 📸 (ภายใน 10 นาที)"));
   }
 
   if (act === "edit" || act === "fix") {
-    if (!uid) return reply(env, event.replyToken, textMsg("ทำรายการนี้ในแชทส่วนตัวนะครับ"));
+    if (!uid) return respond(textMsg("ทำรายการนี้ในแชทส่วนตัวนะครับ"));
     const isPending = !!(await env.KV.get(`pending:${id}`));
     const f = act === "fix" && field ? field : "amount";
     await env.KV.put(`edit:${uid}`,
       JSON.stringify({ id, field: f, scope: isPending ? "pending" : "sheet" }),
       { expirationTtl: 600 });
-    return reply(env, event.replyToken, textMsg(promptFor(f)));
+    return respond(textMsg(promptFor(f)));
   }
 }
 
