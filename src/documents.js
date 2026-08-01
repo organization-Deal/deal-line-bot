@@ -36,6 +36,7 @@ function dateParts(input) {
   return {
     iso: `${y}-${p(m)}-${p(d)}`,
     compact: `${y}${p(m)}${p(d)}`,
+    en: `${p(d)}/${p(m)}/${y}`,
     th: `${p(d)}/${p(m)}/${y + 543}`,
   };
 }
@@ -115,163 +116,201 @@ function img(url, alt, maxWidth) {
 }
 
 function shell(title, body) {
-  return `<!doctype html><html lang="th"><head><meta charset="utf-8"><title>${esc(title)}</title></head>
-  <body style="font-family:'Noto Sans Thai','Sarabun',Arial,sans-serif;color:#171717;font-size:11pt;line-height:1.45;margin:28px">
+  return `<!doctype html><html lang="th"><head><meta charset="utf-8"><title>${esc(title)}</title>
+  <style>
+    table.form-grid{border-collapse:collapse;border:1px solid #222}
+    table.form-grid th,table.form-grid td{border:1px solid #222}
+  </style></head>
+  <body style="font-family:'Noto Sans Thai','Sarabun',Tahoma,Arial,sans-serif;color:#111;font-size:10.2pt;line-height:1.45;margin:34px 38px">
   ${body}</body></html>`;
 }
 
-function header(settings, docNo, issueDate) {
+function formalCompanyHeader(settings) {
   const address = esc(settings.company_address || "—").replace(/\\n|\n/g, "<br>");
-  return `<table style="width:100%;border-collapse:collapse;margin-bottom:12px"><tr>
-    <td style="width:95px;vertical-align:top">${img(settings.logo_url, "โลโก้", 85)}</td>
-    <td style="vertical-align:top"><div style="font-size:15pt;font-weight:700">${esc(settings.company_name || "—")}</div>
-      <div>${address}</div>${settings.tax_id ? `<div>เลขประจำตัวผู้เสียภาษี ${esc(settings.tax_id)}</div>` : ""}</td>
-    <td style="width:190px;text-align:right;vertical-align:top"><div><b>เลขที่เอกสาร</b> ${esc(docNo)}</div><div><b>วันที่ออก</b> ${esc(issueDate)}</div></td>
-  </tr></table>`;
-}
-
-function signature(name, role, signUrl = "") {
-  return `<td style="width:50%;text-align:center;vertical-align:bottom;padding:28px 18px 0">
-    <div style="height:55px">${img(signUrl, "ลายเซ็น", 150)}</div>
-    <div style="border-top:1px solid #555;padding-top:5px">ลงชื่อ ${esc(name || "—")}</div>
-    <div>(${esc(role)})</div>
-  </td>`;
-}
-
-
-function formalReplacementHeader(settings, receiptNo, issueDate) {
-  const address = esc(settings.company_address || "—").replace(/\\n|\n/g, "<br>");
-  return `<table style="width:100%;border-collapse:collapse;margin-bottom:10px">
+  return `<table style="width:100%;border-collapse:collapse;margin:0 0 8px">
     <tr>
-      <td style="width:105px;vertical-align:top;text-align:left;padding-top:2px">
-        ${img(settings.logo_url, "โลโก้บริษัท", 76)}
+      <td style="width:15%;vertical-align:top;text-align:left;padding-top:1px">
+        ${img(settings.logo_url, "โลโก้บริษัท", 74)}
       </td>
-      <td style="vertical-align:top;text-align:center;padding:0 18px">
-        <div style="font-size:16pt;font-weight:700;margin-bottom:3px">${esc(settings.company_name || "—")}</div>
-        <div style="font-size:10.5pt;line-height:1.45">${address}</div>
-        ${settings.tax_id ? `<div style="font-size:10.5pt">เลขที่ประจำตัวผู้เสียภาษี : ${esc(settings.tax_id)}</div>` : ""}
+      <td style="width:70%;vertical-align:top;text-align:center;padding:0 12px">
+        <div style="font-size:15.5pt;font-weight:700;line-height:1.25">${esc(settings.company_name || "—")}</div>
+        <div style="font-size:10.5pt;line-height:1.45;margin-top:3px">${address}</div>
+        ${settings.tax_id ? `<div style="font-size:10.5pt;line-height:1.45">เลขที่ประจำตัวผู้เสียภาษี : ${esc(settings.tax_id)}</div>` : ""}
       </td>
-      <td style="width:105px"></td>
+      <td style="width:15%"></td>
     </tr>
-  </table>
-  <table style="width:100%;border-collapse:collapse;margin:8px 0 22px;font-size:9.5pt">
-    <tr><td style="width:105px"><b>เลขที่เอกสาร</b></td><td>: ${esc(receiptNo)}</td></tr>
-    <tr><td><b>เลขที่ชุด</b></td><td>: ${esc(receiptNo)}</td></tr>
-    <tr><td><b>วันที่สร้างเอกสาร</b></td><td>: ${esc(issueDate)}</td></tr>
   </table>`;
 }
 
-function formalSingleSignature(name, issueDate, position = "") {
-  const pos = position ? `ตำแหน่ง ${esc(position)}` : "ผู้เบิกจ่าย";
-  return `<table style="width:100%;border-collapse:collapse;margin-top:42px">
+function compactMeta(rows, align = "left") {
+  return `<table style="width:100%;border-collapse:collapse;font-size:9.2pt;line-height:1.5;margin:6px 0 14px">
+    ${rows.map(([label, value]) => `<tr>
+      <td style="width:${align === "right" ? "70%" : "118px"};${align === "right" ? "" : "font-weight:700"}">${align === "right" ? "" : esc(label)}</td>
+      <td style="text-align:${align};${align === "right" ? "font-weight:700" : ""}">${align === "right" ? `<span style="font-weight:400">${esc(label)}</span><br>` : ": "}${esc(value || "—")}</td>
+    </tr>`).join("")}
+  </table>`;
+}
+
+function signatureCell(name, role, issueDate, signUrl = "", position = "") {
+  const roleLine = position ? `${esc(role)} · ${esc(position)}` : esc(role);
+  return `<td style="width:50%;text-align:center;vertical-align:bottom;padding:18px 34px 0">
+    <div style="height:48px;line-height:48px;text-align:center">${img(signUrl, `ลายเซ็น ${role}`, 145) || "&nbsp;"}</div>
+    <div style="border-top:1px solid #333;margin:0 auto;padding-top:5px;width:82%"></div>
+    <div style="font-weight:700">(${esc(name || "—")})</div>
+    <div style="font-size:9.4pt;margin-top:2px">${roleLine}</div>
+    <div style="font-size:9.2pt;margin-top:2px">วันที่ ${esc(issueDate)}</div>
+  </td>`;
+}
+
+function formalSignatures(payer, settings, issueDate, payerPosition = "") {
+  return `<table style="width:100%;border-collapse:collapse;margin-top:26px;page-break-inside:avoid">
     <tr>
-      <td style="width:22%"></td>
-      <td style="width:56%;text-align:center;vertical-align:bottom">
-        <div style="height:34px"></div>
-        <div style="white-space:nowrap">ลงชื่อ&nbsp;&nbsp;............................................................</div>
-        <div style="margin-top:7px">(${esc(name || "—")})</div>
-        <div style="margin-top:2px">${pos}</div>
-        <div style="margin-top:2px">วันที่ ${esc(issueDate)}</div>
-      </td>
-      <td style="width:22%"></td>
+      ${signatureCell(payer, "ผู้เบิกจ่าย", issueDate, "", payerPosition)}
+      ${signatureCell(settings.approver_name, "ผู้อนุมัติ", issueDate, settings.approver_sign_url || "", settings.approver_position || "")}
     </tr>
   </table>`;
 }
 
 function buildClaimHtml(rec, settings, claimNo) {
   const tx = dateParts(rec.dateISO || rec.dateText || rec.date);
-  const issue = dateParts(new Date().toISOString()).th;
+  const issue = dateParts(new Date().toISOString()).en;
   const payer = rec.payerName || rec.sender || "—";
+  const payerPosition = rec.payerPosition || rec.position || settings.payer_position || "";
   const transferor = rec.transferor || payer;
   const detail = rec.note || rec.category || "ค่าใช้จ่าย";
+  const paymentChannel = rec.paymentMethod || rec.docType || "โอนเงิน";
+  const accountName = rec.bankAccountName || settings.bank_account_name || transferor || "—";
+  const accountNo = rec.bankAccountNo || settings.bank_account_no || "—";
+  const bankName = rec.bankName || settings.bank_name || "—";
   const evidence = rec.imageUrl
-    ? `<a href="${esc(rec.imageUrl)}">เปิดหลักฐานต้นฉบับใน Google Drive</a>`
-    : "ไม่มีลิงก์หลักฐานต้นฉบับ";
+    ? `<a href="${esc(rec.imageUrl)}" style="color:#111;text-decoration:underline">เปิดหลักฐานต้นฉบับ</a>`
+    : "—";
+  const blankRows = Array.from({ length: 7 }, () => `
+    <tr style="height:27px"><td>&nbsp;</td><td></td><td></td><td></td><td></td></tr>`).join("");
 
-  return shell("ใบเบิกค่าใช้จ่าย", `
-    ${header(settings, claimNo, issue)}
-    <div style="text-align:center;font-size:18pt;font-weight:700;margin:18px 0 4px">ใบเบิกค่าใช้จ่าย</div>
-    <div style="text-align:center;color:#555;margin-bottom:18px">Expense Reimbursement Form</div>
-    <table style="width:100%;border-collapse:collapse" border="1" cellpadding="8">
-      <tr><td style="width:26%;background:#f2f2f2"><b>ผู้เบิกจ่าย</b></td><td>${esc(payer)}</td></tr>
-      <tr><td style="background:#f2f2f2"><b>วันที่รายการ</b></td><td>${esc(tx.th)}</td></tr>
-      <tr><td style="background:#f2f2f2"><b>หมวดค่าใช้จ่าย</b></td><td>${esc(rec.category || "—")}</td></tr>
-      <tr><td style="background:#f2f2f2"><b>รายละเอียด</b></td><td>${esc(detail)}</td></tr>
-      <tr><td style="background:#f2f2f2"><b>ผู้โอน / จากบัญชี</b></td><td>${esc(transferor || "—")}</td></tr>
-      <tr><td style="background:#f2f2f2"><b>ผู้รับ / ไปยัง</b></td><td>${esc(rec.vendor || "—")}</td></tr>
-      <tr><td style="background:#f2f2f2"><b>จำนวนเงิน</b></td><td style="font-size:16pt;font-weight:700">${money(rec.amount)} บาท</td></tr>
-      <tr><td style="background:#f2f2f2"><b>หลักฐาน</b></td><td>${evidence}</td></tr>
+  return shell("ใบขอเบิก", `
+    ${formalCompanyHeader(settings)}
+
+    <table style="width:100%;border-collapse:collapse;margin:8px 0 4px">
+      <tr>
+        <td style="width:68%"></td>
+        <td style="text-align:center;font-size:10pt"><b>เลขที่</b><br><span style="font-size:11pt;font-weight:700">${esc(claimNo)}</span></td>
+      </tr>
     </table>
-    <p style="margin-top:16px">ข้าพเจ้าขอเบิกค่าใช้จ่ายข้างต้น ซึ่งเป็นค่าใช้จ่ายที่เกิดขึ้นเพื่อกิจการของบริษัท และขอรับรองว่าข้อมูลดังกล่าวถูกต้องตามความเป็นจริง</p>
-    <table style="width:100%;border-collapse:collapse;margin-top:18px"><tr>
-      ${signature(payer, "ผู้เบิกจ่าย")}
-      ${signature(settings.approver_name, "ผู้อนุมัติ", settings.approver_sign_url)}
-    </tr></table>
-  `);
-}
 
-function buildReplacementHtml(rec, settings, receiptNo) {
-  const tx = dateParts(rec.dateISO || rec.dateText || rec.date);
-  const issue = dateParts(new Date().toISOString()).th;
-  const payer = rec.payerName || rec.sender || "—";
-  const position = rec.payerPosition || rec.position || settings.payer_position || "";
-  const transferor = rec.transferor || payer;
-  const recipient = rec.vendor || "—";
-  const detail = rec.note || rec.category || "ค่าใช้จ่าย";
-  const noReceiptReason = rec.noReceiptReason || "ไม่สามารถเรียกเก็บใบเสร็จรับเงินจากผู้รับได้";
-  const blankRows = Array.from({ length: 8 }, () => `
-    <tr style="height:30px">
-      <td>&nbsp;</td><td></td><td></td><td></td>
-    </tr>`).join("");
+    <div style="text-align:center;font-size:18pt;font-weight:700;margin:10px 0 18px">ใบขอเบิก</div>
 
-  return shell("ใบรับรองแทนใบเสร็จรับเงิน", `
-    ${formalReplacementHeader(settings, receiptNo, issue)}
-
-    <div style="text-align:center;font-size:18pt;font-weight:700;margin:0 0 5px">ใบรับรองแทนใบเสร็จรับเงิน</div>
-    <div style="text-align:center;font-size:11pt;margin-bottom:20px">
-      ${esc(settings.company_name || "—")} (ผู้ซื้อ/ผู้รับบริการ)
-    </div>
-
-    <table style="width:100%;border-collapse:collapse;table-layout:fixed;font-size:10pt" border="1" cellpadding="6">
+    <table class="form-grid" style="width:100%;border-collapse:collapse;table-layout:fixed;font-size:9.8pt" border="1" cellpadding="6">
       <thead>
-        <tr style="height:32px">
-          <th style="width:18%;text-align:center">วัน เดือน ปี</th>
-          <th style="width:38%;text-align:center">รายละเอียดรายจ่าย</th>
-          <th style="width:18%;text-align:center">จำนวนเงิน</th>
-          <th style="width:26%;text-align:center">หมายเหตุ</th>
+        <tr style="height:34px">
+          <th style="width:8%;text-align:center">ลำดับ</th>
+          <th style="width:15%;text-align:center">วันที่</th>
+          <th style="width:43%;text-align:center">รายการ</th>
+          <th style="width:12%;text-align:center">หน่วย</th>
+          <th style="width:22%;text-align:center">จำนวนเงิน<br>(บาท)</th>
         </tr>
       </thead>
       <tbody>
-        <tr style="height:52px">
-          <td style="text-align:center;vertical-align:middle">${esc(tx.th)}</td>
+        <tr style="height:42px">
+          <td style="text-align:center;vertical-align:middle">1</td>
+          <td style="text-align:center;vertical-align:middle">${esc(tx.en)}</td>
           <td style="vertical-align:middle">${esc(detail)}</td>
+          <td style="text-align:center;vertical-align:middle">-</td>
           <td style="text-align:right;vertical-align:middle">${money(rec.amount)}</td>
-          <td style="vertical-align:middle">${esc(rec.receiptNote || "")}</td>
         </tr>
         ${blankRows}
       </tbody>
     </table>
 
     <table style="width:100%;border-collapse:collapse;margin-top:10px;font-size:10.5pt">
-      <tr>
-        <td style="width:58%"></td>
-        <td style="text-align:right"><b>รวมทั้งสิ้น :</b></td>
-        <td style="width:22%;text-align:right"><b>${money(rec.amount)} บาท</b></td>
-      </tr>
+      <tr><td style="width:66%"></td><td style="text-align:right"><b>รวมทั้งสิ้น&nbsp;&nbsp;${money(rec.amount)} บาท</b></td></tr>
     </table>
 
-    <div style="margin-top:24px;font-size:9.8pt;line-height:1.65">
-      <div><b>ข้าพเจ้า ${esc(payer)}</b> (ผู้เบิกจ่าย)${position ? ` ตำแหน่ง ${esc(position)}` : ""}</div>
-      <div style="margin-top:7px">
-        ขอรับรองว่า รายจ่ายข้างต้นนี้${esc(noReceiptReason)} และได้จ่ายไปเพื่อกิจการของบริษัทโดยแท้จริง
-      </div>
-      <div style="margin-top:4px">
-        ผู้โอน / จากบัญชี: ${esc(transferor)}&nbsp;&nbsp;&nbsp;&nbsp;ผู้รับ / ไปยัง: ${esc(recipient)}
-      </div>
-      <div style="margin-top:4px">ทั้งนี้ เพื่อใช้เป็นหลักฐานประกอบการเบิกจ่ายตามระเบียบของบริษัท</div>
+    <div style="font-size:9.4pt;margin-top:24px;page-break-inside:avoid">
+      <div style="font-weight:700;margin-bottom:7px">ข้อมูลการโอนเงิน</div>
+      <table style="width:100%;border-collapse:collapse;line-height:1.6">
+        <tr>
+          <td style="width:15%">ช่องทางการโอน</td><td style="width:35%"><b>${esc(paymentChannel)}</b></td>
+          <td style="width:13%">ผู้ขอเบิก</td><td style="width:37%"><b>${esc(payer)}</b></td>
+        </tr>
+        <tr>
+          <td>ชื่อบัญชี</td><td><b>${esc(accountName)}</b></td>
+          <td>เลขบัญชี</td><td><b>${esc(accountNo)}</b></td>
+        </tr>
+        <tr>
+          <td>ธนาคาร</td><td><b>${esc(bankName)}</b></td>
+          <td>ผู้รับ / ไปยัง</td><td><b>${esc(rec.vendor || "—")}</b></td>
+        </tr>
+        <tr>
+          <td>หลักฐานอ้างอิง</td><td colspan="3">${evidence}</td>
+        </tr>
+      </table>
     </div>
 
-    ${formalSingleSignature(payer, issue, position)}
+    ${formalSignatures(payer, settings, issue, payerPosition)}
+  `);
+}
+
+function buildReplacementHtml(rec, settings, receiptNo) {
+  const tx = dateParts(rec.dateISO || rec.dateText || rec.date);
+  const issue = dateParts(new Date().toISOString()).en;
+  const payer = rec.payerName || rec.sender || "—";
+  const payerPosition = rec.payerPosition || rec.position || settings.payer_position || "";
+  const transferor = rec.transferor || payer;
+  const recipient = rec.vendor || "—";
+  const detail = rec.note || rec.category || "ค่าใช้จ่าย";
+  const noReceiptReason = rec.noReceiptReason || "ไม่อาจเรียกเก็บใบเสร็จรับเงินจากผู้รับได้";
+  const note = rec.receiptNote || "";
+  const blankRows = Array.from({ length: 8 }, () => `
+    <tr style="height:28px"><td>&nbsp;</td><td></td><td></td><td></td></tr>`).join("");
+
+  return shell("ใบรับรองแทนใบเสร็จรับเงิน", `
+    ${formalCompanyHeader(settings)}
+    ${compactMeta([
+      ["เลขที่เอกสาร", receiptNo],
+      ["เลขที่ชุด", receiptNo],
+      ["วันที่สร้างเอกสาร", issue],
+    ])}
+
+    <div style="text-align:center;font-size:17.5pt;font-weight:700;margin:10px 0 4px">ใบรับรองแทนใบเสร็จรับเงิน</div>
+    <div style="text-align:center;font-size:11pt;margin-bottom:18px">
+      บจ. / หจก. ${esc(settings.company_name || "—")} (ผู้ซื้อ/ผู้รับบริการ)
+    </div>
+
+    <table class="form-grid" style="width:100%;border-collapse:collapse;table-layout:fixed;font-size:9.7pt" border="1" cellpadding="6">
+      <thead>
+        <tr style="height:34px">
+          <th style="width:20%;text-align:center">วัน เดือน ปี</th>
+          <th style="width:38%;text-align:center">รายละเอียดรายจ่าย</th>
+          <th style="width:18%;text-align:center">จำนวนเงิน</th>
+          <th style="width:24%;text-align:center">หมายเหตุ</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="height:48px">
+          <td style="text-align:center;vertical-align:middle">${esc(tx.en)}</td>
+          <td style="text-align:center;vertical-align:middle">${esc(detail)}</td>
+          <td style="text-align:right;vertical-align:middle">${money(rec.amount)}</td>
+          <td style="vertical-align:middle">${esc(note)}</td>
+        </tr>
+        ${blankRows}
+      </tbody>
+    </table>
+
+    <table style="width:100%;border-collapse:collapse;margin-top:10px;font-size:10.5pt">
+      <tr><td style="width:64%"></td><td style="text-align:right"><b>รวมทั้งสิ้น : ${money(rec.amount)} บาท</b></td></tr>
+    </table>
+
+    <div style="margin-top:22px;font-size:9.3pt;line-height:1.6;page-break-inside:avoid">
+      <div>ข้าพเจ้า <b>${esc(payer)}</b> (ผู้เบิกจ่าย)${payerPosition ? ` ตำแหน่ง <b>${esc(payerPosition)}</b>` : ""}</div>
+      <div style="margin-top:7px">
+        ขอรับรองว่า รายจ่ายข้างต้นนี้${esc(noReceiptReason)} และข้าพเจ้าได้จ่ายไปในงานของทางบริษัท / ห้างหุ้นส่วนจำกัดโดยแท้จริง
+      </div>
+      <div style="margin-top:4px">ผู้โอน / จากบัญชี: <b>${esc(transferor)}</b>&nbsp;&nbsp;&nbsp;&nbsp;ผู้รับ / ไปยัง: <b>${esc(recipient)}</b></div>
+      <div style="margin-top:4px">ดังนั้น ในวันที่ ${esc(issue)}</div>
+    </div>
+
+    ${formalSignatures(payer, settings, issue, payerPosition)}
   `);
 }
 
