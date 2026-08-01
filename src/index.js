@@ -26,8 +26,13 @@ import {
   buildGmailConnectUrl, handleGmailCallback, getGmailStatus,
   syncGmailAccount, syncConnectedGmailAccounts, disconnectGmail,
 } from "./gmail.js";
+import {
+  ensureBatchTab, getBatchDashboard, createReimbursementBatches,
+  requestUrgentBatch, updateReimbursementBatchStatus,
+  runScheduledReimbursementBatches,
+} from "./batches.js";
 
-const VERSION = "DEAL_LINE_BOT_v1.9_GMAIL_CONNECT_BETA";
+const VERSION = "DEAL_LINE_BOT_v2.0_REIMBURSEMENT_BATCH";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -163,7 +168,8 @@ export default {
         const ids = await backfillIds(env, sheetId, token);
         const settings = await ensureSettingsTab(env, sheetId, token);
         const emailInbox = await ensureEmailInboxTab(env, sheetId, token);
-        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox });
+        const batchTab = await ensureBatchTab(env, sheetId, token);
+        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox, batchTab });
       } catch (e) {
         console.error("migrate", e);
         return json({ error: String(e) }, 500);
@@ -279,6 +285,35 @@ export default {
           return cors(json(out, out.ok ? 200 : (out.reason === "duplicate" ? 409 : 400)));
         }
 
+        /* รอบเบิก — รวมหลายรายการของผู้เบิกเป็นไฟล์เดียว */
+        if (url.pathname === "/api/batches") {
+          return cors(json(await getBatchDashboard(env, sheetId, token)));
+        }
+
+        if (url.pathname === "/api/batch-close" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await createReimbursementBatches(env, key, sheetId, token, {
+            type: b.type === "ด่วน" ? "ด่วน" : "ปกติ",
+            payerKey: b.payerKey || "",
+            expenseIds: Array.isArray(b.expenseIds) ? b.expenseIds : [],
+            note: b.note || "ปิดรอบด้วยตนเองจาก Dashboard",
+          });
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/batch-urgent" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const ids = Array.isArray(b.expenseIds) ? b.expenseIds : [b.id].filter(Boolean);
+          const out = await requestUrgentBatch(env, key, sheetId, token, ids);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/batch-status" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await updateReimbursementBatchStatus(env, sheetId, b.batchId, b.status, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
         // สร้าง/สร้างใหม่ ใบเบิก + ใบแทนของรายการเดียว
         // หน้าเอกสารเรียกอัตโนมัติเมื่อเปิดรายการเก่าที่ยังไม่มีไฟล์
         if (url.pathname === "/api/generate-docs" && request.method === "POST") {
@@ -366,7 +401,8 @@ export default {
     for (const event of body.events || []) {
       const key = tenantKey(event.source);
       const isImage = event.type === "message" && event.message?.type === "image";
-      const isConfirm = event.type === "postback" && new URLSearchParams(event.postback?.data || "").get("act") === "confirm";
+      const postbackAct = event.type === "postback" ? new URLSearchParams(event.postback?.data || "").get("act") : "";
+      const isConfirm = postbackAct === "confirm" || postbackAct === "confirm_force";
 
       if (isImage) {
         // ตอบรับทันที ไม่ถือ replyToken รอ OCR/Drive
@@ -398,9 +434,13 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(syncConnectedGmailAccounts(env, {
-      limit: Number(env.GMAIL_SYNC_BATCH || 5),
-    }).catch(e => console.error("gmail scheduled sync", e)));
+    ctx.waitUntil(Promise.allSettled([
+      syncConnectedGmailAccounts(env, {
+        limit: Number(env.GMAIL_SYNC_BATCH || 5),
+      }).catch(e => console.error("gmail scheduled sync", e)),
+      runScheduledReimbursementBatches(env)
+        .catch(e => console.error("reimbursement scheduled batch", e)),
+    ]));
   },
 };
 
@@ -551,6 +591,7 @@ async function renderSaved(env, key, sheet, rec, justAppended = null) {
     stats,
     claimUrl: rec.claimPdfUrl || null,
     receiptUrl: rec.receiptPdfUrl || null,
+    batchClaimUrl: rec.batchClaimPdfUrl || null,
     documentsUrl: documentsPage,
     // มี setupUrl = ยังตั้งค่าไม่ครบ → แจ้งให้กรอก แต่รายการยังบันทึกตามปกติ
     setupUrl,
@@ -755,7 +796,7 @@ async function handlePostback(event, env, key, mode = "reply") {
 
     const { id: rowId, row } = await appendExpense(
       env, pending.sheetId, toSave,
-      { sender: pending.sender, driveLink: pending.driveLink, payerName: pending.sender },
+      { sender: pending.sender, driveLink: pending.driveLink, payerName: pending.sender, payerId: uid || "" },
       token
     );
     // กันกดซ้ำทันทีหลังบันทึกแถวสำเร็จ แม้ขั้นสร้าง PDF จะมีปัญหา
@@ -775,6 +816,12 @@ async function handlePostback(event, env, key, mode = "reply") {
       imageHash: toSave.imageHash || "",
       duplicateStatus: toSave.duplicateStatus || "",
       duplicateOf: toSave.duplicateOf || "",
+      payerId: uid || "",
+      batchType: "ปกติ",
+      batchStatus: "รอเข้ารอบ",
+      batchNo: "",
+      batchDocId: "",
+      batchClaimPdfUrl: "",
     };
 
     // กดบันทึกครั้งเดียว → สร้างใบเบิก + ใบแทนเป็น PDF → อัป Drive → เขียนลิงก์ลงชีท
@@ -802,6 +849,34 @@ async function handlePostback(event, env, key, mode = "reply") {
 
   const sheet = await resolveSheet(env, event.source);
   if (!sheet) return respond(connectMsg(env, key));
+
+  if (act === "urgent") {
+    const rec = await getExpenseById(env, sheet.sheetId, id, sheet.token);
+    if (!rec) return respond(textMsg(MSG_STALE));
+    if (rec.batchDocId || rec.batchStatus === "รวมรอบแล้ว" || rec.batchStatus === "จ่ายแล้ว") {
+      return respond(await renderSaved(env, key, sheet, rec));
+    }
+    await respond(textMsg("กำลังรวมรายการนี้เป็นรอบเบิกด่วน… ⏳"));
+    try {
+      const out = await requestUrgentBatch(env, key, sheet.sheetId, sheet.token, [id]);
+      if (!out.ok || !out.batches?.length) {
+        return push(env, lineTarget(event.source), textMsg("สร้างรอบเบิกด่วนไม่สำเร็จ กรุณาเปิด Dashboard เพื่อตรวจรายการ"));
+      }
+      const batch = out.batches[0];
+      const updated = await getExpenseById(env, sheet.sheetId, id, sheet.token);
+      const messages = [
+        textMsg(`สร้างรอบเบิกด่วนแล้ว ✅
+เลขที่ ${batch.docId}
+รวม ฿${Number(batch.total || 0).toLocaleString("th-TH", { minimumFractionDigits: 2 })}`),
+      ];
+      if (updated) messages.push(await renderSaved(env, key, sheet, updated));
+      return push(env, lineTarget(event.source), messages);
+    } catch (e) {
+      console.error("urgent batch", e);
+      return push(env, lineTarget(event.source), textMsg(`สร้างรอบเบิกด่วนไม่สำเร็จ ❌
+${String(e.message || e).slice(0, 180)}`));
+    }
+  }
 
   if (act === "paid") {
     const out = await togglePaid(env, sheet.sheetId, id, sheet.token);
@@ -921,6 +996,7 @@ async function handleText(event, env, key) {
       const i = await backfillIds(env, sheet.sheetId, sheet.token);
       const s = await ensureSettingsTab(env, sheet.sheetId, sheet.token);
       const e = await ensureEmailInboxTab(env, sheet.sheetId, sheet.token);
+      const b = await ensureBatchTab(env, sheet.sheetId, sheet.token);
       await env.KV.delete(`setup:${key}`);
       await env.KV.delete(`setup:${key}:${sheet.sheetId}`);
       return reply(env, event.replyToken, textMsg(
@@ -928,7 +1004,8 @@ async function handleText(event, env, key) {
         `หัวคอลัมน์: ${h.changed ? `เพิ่ม ${h.added} ช่อง` : "ครบอยู่แล้ว"}\n` +
         `เติม id/วันที่: ${i.filled} ช่อง\n` +
         `แท็บ _settings: ${s.created ? "สร้างใหม่" : "มีอยู่แล้ว"}\n` +
-        `แท็บ Email_Inbox: ${e.created ? "สร้างใหม่" : "มีอยู่แล้ว"}`
+        `แท็บ Email_Inbox: ${e.created ? "สร้างใหม่" : "มีอยู่แล้ว"}\n` +
+        `แท็บ รอบเบิก: ${b.created ? "สร้างใหม่" : "มีอยู่แล้ว"}`
       ));
     } catch (e) {
       return reply(env, event.replyToken, textMsg("อัปเกรดไม่สำเร็จ 🙏\n" + String(e).slice(0, 300)));
@@ -980,6 +1057,18 @@ async function handleText(event, env, key) {
     return reply(env, event.replyToken, textMsg("ออกใบรับรองแทนใบเสร็จได้ที่นี่ 🧾\n" + url));
   }
 
+  if (/^(รอบเบิก|เบิกเป็นรอบ|batch)$/i.test(text)) {
+    const base = await dashUrl(env, key);
+    const url = base ? `${base}&page=batches` : "";
+    return reply(env, event.replyToken, textMsg(
+      `เปิดหน้ารอบเบิกได้ที่นี่
+ระบบรวมหลายรายการของผู้เบิกคนเดียวเป็นใบขอเบิกรวมอัตโนมัติทุกวันจันทร์ 11:00 น.` +
+      (url ? `
+
+${url}` : "")
+    ));
+  }
+
   if (/เชื่อม|connect/i.test(text)) {
     return reply(env, event.replyToken, connectMsg(env, key));
   }
@@ -996,6 +1085,7 @@ async function handleText(event, env, key) {
       "• แดชบอร์ด — เปิดหน้ารวมทุกอย่าง\n" +
       "• ตั้งค่า — กรอกข้อมูลบริษัท\n" +
       "• อีเมล — เชื่อม Gmail และดูใบเสร็จ/ใบกำกับอัตโนมัติ\n" +
+      "• รอบเบิก — ดูรายการรอเข้ารอบและใบขอเบิกรวม\n" +
       "• รีเซ็ตลิงก์ — ยกเลิกลิงก์เก่าทั้งหมด\n" +
       "• เชื่อม — เชื่อม Google"
     ));
