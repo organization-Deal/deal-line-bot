@@ -44,6 +44,27 @@ export async function reply(env, replyToken, messages) {
   if (!res.ok) console.error("LINE reply error:", res.status, await res.text());
 }
 
+// ส่งข้อความภายหลังด้วย push — ใช้เมื่อ OCR / สร้าง PDF ใช้เวลานานเกินกว่าจะถือ replyToken ไว้
+export async function push(env, to, messages) {
+  if (!to) {
+    console.error("LINE push error: missing target");
+    return false;
+  }
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      Authorization: `Bearer ${env.LINE_ACCESS_TOKEN}`,
+    },
+    body: JSON.stringify({ to, messages: Array.isArray(messages) ? messages : [messages] }),
+  });
+  if (!res.ok) {
+    console.error("LINE push error:", res.status, await res.text());
+    return false;
+  }
+  return true;
+}
+
 export function textMsg(text) {
   return { type: "text", text };
 }
