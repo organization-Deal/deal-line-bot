@@ -12,15 +12,15 @@ import {
   appendExpense, readExpenses, getExpenseById, updateExpenseById,
   togglePaid, toggleNeedSlip, softDeleteById, listForSlip, normalizeDate,
   ensureHeaders, backfillIds, readSettings, writeSettings, ensureSettingsTab,
-  addAttachment, removeAttachment, usedFileIds, ATTACH_TYPES,
+  addAttachment, removeAttachment, usedFileIds, ATTACH_TYPES, findDuplicateExpenses,
 } from "./sheets.js";
 import { uploadImage, listUploadedImages } from "./drive.js";
 import { createExpenseDocuments } from "./documents.js";
 import { buildConnectUrl, handleCallback, getUserToken, createUserSheet } from "./oauth.js";
 
-const VERSION = "DEAL_LINE_BOT_v1.6_NO_SILENT_TIMEOUT";
+const VERSION = "DEAL_LINE_BOT_v1.7_DUPLICATE_DETECTION";
 
-const PENDING_ACTS = new Set(["confirm", "cancel"]);
+const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
 
 /* ═══════════════════ token ประจำ tenant ═══════════════════ */
@@ -499,6 +499,24 @@ async function dashboardMsg(env, key) {
   };
 }
 
+async function sha256Base64(base64) {
+  const raw = atob(base64);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function duplicateMeta(check) {
+  if (!check?.hasDuplicate) return { duplicateStatus: "", duplicateOf: "" };
+  return {
+    duplicateStatus: check.level === "high"
+      ? "ยืนยันบันทึกซ้ำ — ความเสี่ยงสูง"
+      : "ยืนยันบันทึกซ้ำ — ควรตรวจสอบ",
+    duplicateOf: check.matches.map((m) => m.id).filter(Boolean).join(", "),
+  };
+}
+
 /* ═════════════════════════ event handler ═════════════════════════ */
 
 async function handleEvent(event, env) {
@@ -553,21 +571,38 @@ async function handleImage(event, env, key, mode = "reply") {
     return respond(await renderSaved(env, key, sheet, out.record));
   }
 
-  // OCR กับอัป Drive ทำพร้อมกัน ลดโอกาสชนเพดาน waitUntil 30 วินาที
-  const [driveLink, record] = await Promise.all([
+  // OCR, อัป Drive และสร้างลายนิ้วมือไฟล์ทำพร้อมกัน
+  const [driveLink, record, imageHash] = await Promise.all([
     drivePromise,
     ocrReceipt(env, base64, mediaType),
+    sha256Base64(base64),
   ]);
   if (!driveLink) throw new Error("Drive upload failed");
+
+  const candidate = { ...record, imageHash };
+  const duplicateCheck = await findDuplicateExpenses(
+    env, sheet.sheetId, candidate, sheet.token
+  );
+
+  console.log(
+    `[duplicate] tenant=${key} level=${duplicateCheck.level} matches=${duplicateCheck.matches.length}`
+  );
 
   const id = crypto.randomUUID().slice(0, 8);
   await env.KV.put(
     `pending:${id}`,
-    JSON.stringify({ record, driveLink, sheetId: sheet.sheetId, sender }),
+    JSON.stringify({
+      record: candidate,
+      driveLink,
+      imageHash,
+      duplicateCheck,
+      sheetId: sheet.sheetId,
+      sender,
+    }),
     { expirationTtl: 3600 }
   );
 
-  return respond(confirmCard(id, record, { driveLink }));
+  return respond(confirmCard(id, candidate, { driveLink, duplicateCheck }));
 }
 
 /* ───────────────────────── postback ───────────────────────── */
@@ -593,8 +628,35 @@ async function handlePostback(event, env, key, mode = "reply") {
     const token = await getUserToken(env, key);
     const sheet = { sheetId: pending.sheetId, token };
 
+    // ตรวจซ้ำอีกรอบตอนกดบันทึก ป้องกันมีคนบันทึกรายการเดียวกันแทรกระหว่างรอตรวจ
+    const duplicateCheck = await findDuplicateExpenses(
+      env,
+      pending.sheetId,
+      { ...pending.record, imageHash: pending.imageHash || pending.record.imageHash },
+      token
+    );
+    pending.duplicateCheck = duplicateCheck;
+
+    if (duplicateCheck.hasDuplicate && act !== "confirm_force") {
+      await env.KV.put(`pending:${id}`, JSON.stringify(pending), { expirationTtl: 3600 });
+      return respond(confirmCard(id, pending.record, {
+        driveLink: pending.driveLink,
+        duplicateCheck,
+      }));
+    }
+
+    const dupMeta = duplicateCheck.hasDuplicate ? duplicateMeta(duplicateCheck) : {
+      duplicateStatus: "",
+      duplicateOf: "",
+    };
+
     // ทุกรายการที่เบิก ตั้งให้ออกใบแทนไว้ก่อน — บัญชีค่อยเอาออกในแดชบอร์ด
-    const toSave = { ...pending.record, needSlip: true };
+    const toSave = {
+      ...pending.record,
+      needSlip: true,
+      imageHash: pending.imageHash || pending.record.imageHash || "",
+      ...dupMeta,
+    };
 
     const { id: rowId, row } = await appendExpense(
       env, pending.sheetId, toSave,
@@ -615,6 +677,9 @@ async function handlePostback(event, env, key, mode = "reply") {
       type: pending.record.type || "รายจ่าย",
       claimPdfUrl: "",
       receiptPdfUrl: "",
+      imageHash: toSave.imageHash || "",
+      duplicateStatus: toSave.duplicateStatus || "",
+      duplicateOf: toSave.duplicateOf || "",
     };
 
     // กดบันทึกครั้งเดียว → สร้างใบเบิก + ใบแทนเป็น PDF → อัป Drive → เขียนลิงก์ลงชีท
@@ -725,9 +790,19 @@ async function handleText(event, env, key) {
       if (!raw) return reply(env, event.replyToken, textMsg(MSG_STALE));
       const pending = JSON.parse(raw);
       pending.record[field] = value;
+      const token = await getUserToken(env, key);
+      pending.duplicateCheck = await findDuplicateExpenses(
+        env,
+        pending.sheetId,
+        { ...pending.record, imageHash: pending.imageHash || pending.record.imageHash },
+        token
+      );
       await env.KV.put(`pending:${id}`, JSON.stringify(pending), { expirationTtl: 3600 });
       return reply(env, event.replyToken,
-        confirmCard(id, pending.record, { driveLink: pending.driveLink }));
+        confirmCard(id, pending.record, {
+          driveLink: pending.driveLink,
+          duplicateCheck: pending.duplicateCheck,
+        }));
     }
 
     const sheet = await resolveSheet(env, event.source);
