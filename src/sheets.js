@@ -50,9 +50,18 @@ export const SCHEMA = [
   { col: "AB", key: "imageHash",       header: "ลายนิ้วมือไฟล์" },
   { col: "AC", key: "duplicateStatus", header: "สถานะเบิกซ้ำ" },
   { col: "AD", key: "duplicateOf",     header: "อ้างอิงรายการซ้ำ" },
+  { col: "AE", key: "payerId",             header: "รหัสผู้เบิก LINE" },
+  { col: "AF", key: "batchType",           header: "ประเภทรอบเบิก" },
+  { col: "AG", key: "batchStatus",         header: "สถานะรอบเบิก" },
+  { col: "AH", key: "batchNo",             header: "เลขรอบเบิก" },
+  { col: "AI", key: "batchDocId",          header: "เลขเอกสารรอบเบิก" },
+  { col: "AJ", key: "batchClaimPdfUrl",    header: "ใบขอเบิกรวม PDF" },
+  { col: "AK", key: "batchPart",           header: "ส่วนเอกสารรอบเบิก" },
+  { col: "AL", key: "batchCreatedAt",      header: "สร้างรอบเบิกเมื่อ" },
+  { col: "AM", key: "urgentRequestedAt",   header: "ขอเบิกด่วนเมื่อ" },
 ];
 
-const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "AD"
+const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "AM"
 export const HEADER = SCHEMA.map((s) => s.header);              // oauth.js / provision.js ใช้ตัวนี้
 const COL_OF = Object.fromEntries(SCHEMA.map((s) => [s.key, s.col]));
 
@@ -133,6 +142,7 @@ export function allAttachments(rec) {
   }
   if (rec.claimPdfUrl) out.push({ type: "claimPdfUrl", label: "ใบเบิก PDF", url: rec.claimPdfUrl });
   if (rec.receiptPdfUrl) out.push({ type: "receiptPdfUrl", label: "ใบแทน PDF", url: rec.receiptPdfUrl });
+  if (rec.batchClaimPdfUrl) out.push({ type: "batchClaimPdfUrl", label: "ใบขอเบิกรวม PDF", url: rec.batchClaimPdfUrl });
   return out;
 }
 
@@ -268,6 +278,15 @@ export async function appendExpense(env, sheetId, r, meta = {}, token = null) {
     imageHash:       r.imageHash || "",
     duplicateStatus: r.duplicateStatus || "",
     duplicateOf:     r.duplicateOf || "",
+    payerId:             meta.payerId || r.payerId || "",
+    batchType:           r.batchType || "ปกติ",
+    batchStatus:         r.batchStatus || "รอเข้ารอบ",
+    batchNo:             r.batchNo || "",
+    batchDocId:          r.batchDocId || "",
+    batchClaimPdfUrl:    r.batchClaimPdfUrl || "",
+    batchPart:           r.batchPart || "",
+    batchCreatedAt:      r.batchCreatedAt || "",
+    urgentRequestedAt:   r.urgentRequestedAt || "",
   };
   if (slot) full[slot] = link;
 
