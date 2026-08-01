@@ -22,8 +22,12 @@ import {
 } from "./email.js";
 import { ensureEmailInboxTab } from "./email-sheets.js";
 import { buildConnectUrl, handleCallback, getUserToken, createUserSheet } from "./oauth.js";
+import {
+  buildGmailConnectUrl, handleGmailCallback, getGmailStatus,
+  syncGmailAccount, syncConnectedGmailAccounts, disconnectGmail,
+} from "./gmail.js";
 
-const VERSION = "DEAL_LINE_BOT_v1.8_EMAIL_INBOX";
+const VERSION = "DEAL_LINE_BOT_v1.9_GMAIL_CONNECT_BETA";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -103,6 +107,24 @@ export default {
     }
     if (url.pathname === "/oauth/callback") {
       return await handleCallback(env, url, url.origin);
+    }
+
+    if (url.pathname === "/gmail/connect") {
+      const key = url.searchParams.get("tenant");
+      if (!key) return new Response("missing tenant", { status: 400 });
+      const expected = await getDashToken(env, key, { create: false });
+      if (!expected || !safeEqual(url.searchParams.get("k") || "", expected)) {
+        return new Response("invalid dashboard link", { status: 401 });
+      }
+      try {
+        return Response.redirect(await buildGmailConnectUrl(env, url.origin, key), 302);
+      } catch (e) {
+        console.error("gmail connect", e);
+        return new Response(String(e), { status: 500 });
+      }
+    }
+    if (url.pathname === "/gmail/callback") {
+      return await handleGmailCallback(env, url, url.origin);
     }
 
     /* ══════════════ admin ══════════════ */
@@ -200,7 +222,25 @@ export default {
           return cors(json(await readSettings(env, sheetId, token)));
         }
 
-        /* Email Inbox — เอกสารที่ส่ง/forward เข้ามา */
+        /* Gmail OAuth — เชื่อมโดยตรงสำหรับ Beta */
+        if (url.pathname === "/api/gmail-status") {
+          return cors(json(await getGmailStatus(env, key)));
+        }
+
+        if (url.pathname === "/api/gmail-sync" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await syncGmailAccount(env, key, {
+            maxMessages: Math.max(1, Math.min(30, Number(b.maxMessages || 15))),
+            notify: b.notify !== false,
+          });
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/gmail-disconnect" && request.method === "POST") {
+          return cors(json(await disconnectGmail(env, key)));
+        }
+
+        /* Email Inbox เดิมแบบ Forward — ยังเก็บไว้เป็น fallback */
         if (url.pathname === "/api/email-inbox-info") {
           if (request.method === "POST") {
             const b = await request.json().catch(() => ({}));
@@ -355,6 +395,12 @@ export default {
 
   async email(message, env, ctx) {
     return handleIncomingEmail(message, env, ctx);
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(syncConnectedGmailAccounts(env, {
+      limit: Number(env.GMAIL_SYNC_BATCH || 5),
+    }).catch(e => console.error("gmail scheduled sync", e)));
   },
 };
 
@@ -890,19 +936,20 @@ async function handleText(event, env, key) {
   }
 
   if (/^(อีเมล|email|อีเมลรับเอกสาร|รับเอกสาร)$/i.test(text)) {
-    const info = await getEmailInboxInfo(env, key);
     const base = await dashUrl(env, key);
     const url = base ? `${base}&page=email` : "";
-    if (!info.address) {
+    const status = await getGmailStatus(env, key);
+    if (status.connected) {
       return reply(env, event.replyToken, textMsg(
-        "ฟีเจอร์อีเมลพร้อมแล้ว แต่ยังไม่ได้ตั้ง EMAIL_DOMAIN ใน Cloudflare\n" +
-        "เปิดหน้าเอกสารจากอีเมลใน Dashboard เพื่อตรวจการตั้งค่า"
+        `เชื่อม Gmail แล้ว ✅\n${status.email || "บัญชี Google"}\n\n` +
+        `ระบบจะค้นหาใบเสร็จ ใบกำกับภาษี และ Subscription อัตโนมัติ` +
+        (url ? `\n\nเปิดกล่องเอกสาร:\n${url}` : "")
       ));
     }
     return reply(env, event.replyToken, textMsg(
-      `อีเมลรับใบเสร็จและใบกำกับของธุรกิจนี้:\n${info.address}\n\n` +
-      `Forward เอกสารมาที่อีเมลนี้ แล้วระบบจะอ่านและแจ้งกลับใน LINE อัตโนมัติ` +
-      (url ? `\n\nเปิดกล่องเอกสาร:\n${url}` : "")
+      `เปิดหน้าเอกสารจากอีเมล แล้วกด “เชื่อมต่อ Gmail” ได้เลย` +
+      (url ? `\n\n${url}` : "") +
+      `\n\nรุ่น Beta ต้องใช้อีเมลที่ถูกเพิ่มเป็น Test user`
     ));
   }
 
@@ -948,7 +995,7 @@ async function handleText(event, env, key) {
       "คำสั่งเสริม (ถ้าอยากใช้):\n" +
       "• แดชบอร์ด — เปิดหน้ารวมทุกอย่าง\n" +
       "• ตั้งค่า — กรอกข้อมูลบริษัท\n" +
-      "• อีเมล — ดูอีเมลรับใบเสร็จ/ใบกำกับ\n" +
+      "• อีเมล — เชื่อม Gmail และดูใบเสร็จ/ใบกำกับอัตโนมัติ\n" +
       "• รีเซ็ตลิงก์ — ยกเลิกลิงก์เก่าทั้งหมด\n" +
       "• เชื่อม — เชื่อม Google"
     ));
