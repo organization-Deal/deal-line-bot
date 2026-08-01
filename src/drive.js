@@ -10,7 +10,7 @@ function base64ToBytes(b64) {
   return out;
 }
 
-export async function uploadImage(env, base64, mediaType, name, token = null) {
+export async function uploadFile(env, data, mediaType, name, token = null, { publicRead = false } = {}) {
   let authToken, parents;
   if (token) {
     // โหมด OAuth: เก็บใน Drive ของลูกค้าเอง (ไม่ต้องมีโฟลเดอร์ ไม่ติดโควตา)
@@ -33,7 +33,8 @@ export async function uploadImage(env, base64, mediaType, name, token = null) {
     JSON.stringify(metadata) +
     `\r\n--${boundary}\r\nContent-Type: ${mediaType}\r\n\r\n`;
   const post = `\r\n--${boundary}--`;
-  const body = new Uint8Array([...enc.encode(pre), ...base64ToBytes(base64), ...enc.encode(post)]);
+  const bytes = data instanceof Uint8Array ? data : base64ToBytes(String(data || ""));
+  const body = new Uint8Array([...enc.encode(pre), ...bytes, ...enc.encode(post)]);
 
   const res = await fetch(
     "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink&supportsAllDrives=true",
@@ -46,14 +47,23 @@ export async function uploadImage(env, base64, mediaType, name, token = null) {
   if (!res.ok) { console.error("Drive upload error:", res.status, await res.text()); return null; }
   const file = await res.json();
 
-  // ให้ใครมีลิงก์ดูรูปได้ (best-effort) — จำเป็นเพื่อให้ <img> ในแดชบอร์ดโหลดได้
-  await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}/permissions?supportsAllDrives=true`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${authToken}`, "content-type": "application/json" },
-    body: JSON.stringify({ role: "reader", type: "anyone" }),
-  }).catch(() => {});
+  // เอกสารอีเมล/ใบกำกับเป็นข้อมูลบริษัท: ค่าเริ่มต้นเก็บแบบ private ใน Drive
+  // รูปจาก LINE รุ่นเดิมยังเรียก uploadImage() ซึ่งส่ง publicRead=true เพื่อให้หน้า Dashboard แสดงภาพได้
+  if (publicRead) {
+    await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}/permissions?supportsAllDrives=true`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${authToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ role: "reader", type: "anyone" }),
+    }).catch(() => {});
+  }
 
   return file.webViewLink || `https://drive.google.com/file/d/${file.id}/view`;
+}
+
+
+// backward-compatible alias used by LINE image uploads
+export async function uploadImage(env, base64, mediaType, name, token = null) {
+  return uploadFile(env, base64, mediaType, name, token, { publicRead: true });
 }
 
 /**
