@@ -11,7 +11,7 @@
 //   act=confirm  act=cancel  act=edit  act=fix&f=
 //   act=paid     act=delete  act=attach  act=more  act=back
 
-export const CARD_VERSION = '5.0';
+export const CARD_VERSION = '5.1-duplicate';
 
 /* ───────────────────── Apple-like palette ───────────────────── */
 const C = {
@@ -28,6 +28,7 @@ const C = {
   tintBlue: '#F0F7FF',
   tintGreen: '#F0F8F2',
   tintOrange: '#FFF7ED',
+  tintRed: '#FFF1F2',
 };
 
 const LOW_CONF = 0.75;
@@ -120,6 +121,7 @@ function statusPill(text, tone = 'neutral') {
     success: { bg: C.tintGreen, fg: C.green },
     warning: { bg: C.tintOrange, fg: C.orange },
     info: { bg: C.tintBlue, fg: C.blue },
+    danger: { bg: C.tintRed, fg: C.red },
   };
   const t = tones[tone] || tones.neutral;
 
@@ -200,19 +202,65 @@ function sectionLabel(text, margin = 'xl') {
 function noteCard(text, tone = 'info') {
   if (!has(text)) return null;
   const warning = tone === 'warn';
+  const danger = tone === 'danger';
 
   return {
     type: 'box',
     layout: 'vertical',
-    backgroundColor: warning ? C.tintOrange : C.tintBlue,
+    backgroundColor: danger ? C.tintRed : (warning ? C.tintOrange : C.tintBlue),
     cornerRadius: '14px',
     paddingAll: '13px',
     margin: 'md',
     contents: [{
       type: 'text', text: String(text), size: 'xs',
-      color: warning ? C.orange : C.blue,
+      color: danger ? C.red : (warning ? C.orange : C.blue),
       wrap: true,
     }],
+  };
+}
+
+function duplicateWarning(check) {
+  if (!check?.hasDuplicate || !Array.isArray(check.matches) || !check.matches.length) return null;
+
+  const high = check.level === 'high';
+  const lines = check.matches.slice(0, 2).map((m, i) => {
+    const who = has(m.vendor) ? ` · ${m.vendor}` : '';
+    return `${i + 1}. ${formatDateTH(m.date || m.dateISO)} · ฿${money(m.amount)}${who}\n${m.reason}`;
+  });
+
+  const contents = [
+    {
+      type: 'text',
+      text: high ? 'พบความเสี่ยงเบิกซ้ำสูง' : 'พบรายการที่อาจเบิกซ้ำ',
+      size: 'sm', weight: 'bold', color: C.red, wrap: true,
+    },
+    {
+      type: 'text',
+      text: `ระบบพบ ${check.matches.length} รายการคล้ายกัน กรุณาตรวจสอบก่อนบันทึก`,
+      size: 'xs', color: C.red, margin: 'xs', wrap: true,
+    },
+    {
+      type: 'text',
+      text: lines.join('\n\n'),
+      size: 'xxs', color: C.label, margin: 'md', wrap: true,
+    },
+  ];
+
+  const evidence = check.matches.find((m) => has(m.imageUrl));
+  if (evidence) {
+    contents.push({
+      type: 'button', style: 'link', height: 'sm', color: C.blue, margin: 'sm',
+      action: { type: 'uri', label: 'เปิดหลักฐานรายการเดิม', uri: evidence.imageUrl },
+    });
+  }
+
+  return {
+    type: 'box', layout: 'vertical',
+    backgroundColor: C.tintRed,
+    cornerRadius: '16px',
+    paddingAll: '14px',
+    margin: 'lg',
+    contents,
   };
 }
 
@@ -295,13 +343,19 @@ export function buildRecordCard(rec = {}, opts = {}) {
       ? String(rec.category)
       : isIncome ? 'รายรับ' : 'รายจ่าย';
 
-  const statusText = mode === 'confirm'
-    ? 'รอตรวจสอบ'
-    : rec.paid ? 'จ่ายแล้ว' : 'บันทึกแล้ว';
+  const duplicateCheck = opts.duplicateCheck || null;
+  const hasDuplicate = !!duplicateCheck?.hasDuplicate;
+  const savedAsDuplicate = has(rec.duplicateStatus);
 
-  const statusTone = mode === 'confirm'
-    ? 'warning'
-    : rec.paid ? 'success' : 'info';
+  const statusText = mode === 'confirm'
+    ? (hasDuplicate ? 'เสี่ยงเบิกซ้ำ' : 'รอตรวจสอบ')
+    : savedAsDuplicate ? 'บันทึกซ้ำแล้ว' : (rec.paid ? 'จ่ายแล้ว' : 'บันทึกแล้ว');
+
+  const statusTone = (hasDuplicate || savedAsDuplicate)
+    ? 'danger'
+    : mode === 'confirm'
+      ? 'warning'
+      : rec.paid ? 'success' : 'info';
 
   const amountColor = isIncome ? C.green : C.label;
   const prefix = isIncome ? '+' : MINUS;
@@ -370,10 +424,23 @@ export function buildRecordCard(rec = {}, opts = {}) {
     statsLine(opts.stats),
   ].filter(Boolean);
 
+  if (mode === 'confirm' && hasDuplicate) {
+    bodyContents.push(duplicateWarning(duplicateCheck));
+  }
+
   if (mode === 'confirm') {
     bodyContents.push(noteCard(
-      'ตรวจข้อมูลก่อนบันทึก ช่องสีส้มคือข้อมูลที่ AI ยังไม่มั่นใจและแตะแก้ไขได้',
+      hasDuplicate
+        ? 'ตรวจทั้งรายการเดิมและข้อมูลที่ AI อ่านมา หากเป็นคนละรายการจริงจึงค่อยกดบันทึกซ้ำอยู่ดี'
+        : 'ตรวจข้อมูลก่อนบันทึก ช่องสีส้มคือข้อมูลที่ AI ยังไม่มั่นใจและแตะแก้ไขได้',
       'warn',
+    ));
+  }
+
+  if (mode === 'saved' && savedAsDuplicate) {
+    bodyContents.push(noteCard(
+      `${rec.duplicateStatus}${has(rec.duplicateOf) ? ` · อ้างอิง ${rec.duplicateOf}` : ''}`,
+      'danger',
     ));
   }
 
@@ -408,8 +475,12 @@ export function buildRecordCard(rec = {}, opts = {}) {
 
   if (mode === 'confirm') {
     footerContents.push({
-      type: 'button', style: 'primary', color: C.blue, height: 'sm',
-      action: { type: 'postback', label: 'ยืนยันและบันทึก', data: pb('confirm', id) },
+      type: 'button', style: 'primary', color: hasDuplicate ? C.red : C.blue, height: 'sm',
+      action: {
+        type: 'postback',
+        label: hasDuplicate ? 'บันทึกซ้ำอยู่ดี' : 'ยืนยันและบันทึก',
+        data: pb(hasDuplicate ? 'confirm_force' : 'confirm', id),
+      },
     });
     footerContents.push({
       type: 'box', layout: 'horizontal', margin: 'xs', contents: [
