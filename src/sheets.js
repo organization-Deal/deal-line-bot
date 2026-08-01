@@ -1,4 +1,4 @@
-// src/sheets.js — v3.0
+// src/sheets.js — v3.1 duplicate detection
 // อ่าน/เขียน Google Sheet — รับ token ได้ (token ลูกค้าจาก OAuth) ถ้าไม่ส่งใช้ service account
 //
 // เปลี่ยนจาก v2.0:
@@ -47,9 +47,12 @@ export const SCHEMA = [
   { col: "Y",  key: "transferor",     header: "ผู้โอน/จากบัญชี" },
   { col: "Z",  key: "claimPdfUrl",    header: "ลิงก์ใบเบิก PDF" },
   { col: "AA", key: "receiptPdfUrl",  header: "ลิงก์ใบแทน PDF" },
+  { col: "AB", key: "imageHash",       header: "ลายนิ้วมือไฟล์" },
+  { col: "AC", key: "duplicateStatus", header: "สถานะเบิกซ้ำ" },
+  { col: "AD", key: "duplicateOf",     header: "อ้างอิงรายการซ้ำ" },
 ];
 
-const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "AA"
+const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "AD"
 export const HEADER = SCHEMA.map((s) => s.header);              // oauth.js / provision.js ใช้ตัวนี้
 const COL_OF = Object.fromEntries(SCHEMA.map((s) => [s.key, s.col]));
 
@@ -262,6 +265,9 @@ export async function appendExpense(env, sheetId, r, meta = {}, token = null) {
     attOther:    "",
     claimPdfUrl: "",
     receiptPdfUrl: "",
+    imageHash:       r.imageHash || "",
+    duplicateStatus: r.duplicateStatus || "",
+    duplicateOf:     r.duplicateOf || "",
   };
   if (slot) full[slot] = link;
 
@@ -311,6 +317,119 @@ export async function readExpenses(env, sheetId, token = null, opts = {}) {
   });
 
   return out.reverse();
+}
+
+/* ══════════════════════ ตรวจจับการเบิกซ้ำ ══════════════════════ */
+
+function normalizeIdentity(v) {
+  return String(v || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/(?:บริษัท|บจก\.?|หจก\.?|จำกัด|นาย|นางสาว|นาง|mr\.?|mrs\.?|ms\.?|co\.?\s*,?\s*ltd\.?)/gi, "")
+    .replace(/[^0-9a-z฀-๿]/g, "");
+}
+
+function normalizeText(v) {
+  return String(v || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^0-9a-z฀-๿]/g, "");
+}
+
+function dateIsoOf(r) {
+  if (r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.dateISO || ""))) return String(r.dateISO);
+  return normalizeDate(r?.dateText || r?.date || "").iso;
+}
+
+function dayDiff(a, b) {
+  const ta = Date.parse(`${a}T00:00:00Z`);
+  const tb = Date.parse(`${b}T00:00:00Z`);
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return 99999;
+  return Math.abs(ta - tb) / 86400000;
+}
+
+/**
+ * ตรวจรายการคล้ายกันจากข้อมูลในชีท
+ * ระดับสูง:
+ *   - ไฟล์รูปเดียวกัน (SHA-256 ตรงกัน)
+ *   - วัน + ยอด + ผู้รับ ตรงกัน
+ * ระดับควรตรวจ:
+ *   - ยอด + วัน ตรงกัน และผู้โอน/รายละเอียดคล้ายกัน
+ *   - ยอด + ผู้รับ ตรงกันภายใน 7 วัน
+ */
+export async function findDuplicateExpenses(env, sheetId, candidate = {}, token = null, opts = {}) {
+  const all = await readExpenses(env, sheetId, token);
+  const excludeId = String(opts.excludeId || candidate.id || "").trim();
+  const amount = Number(candidate.amount) || 0;
+  const iso = dateIsoOf(candidate);
+  const vendor = normalizeIdentity(candidate.vendor);
+  const transferor = normalizeIdentity(candidate.transferor);
+  const note = normalizeText(candidate.note);
+  const imageHash = String(candidate.imageHash || "").trim();
+
+  const matches = [];
+
+  for (const rec of all) {
+    if (!rec || (excludeId && String(rec.id) === excludeId)) continue;
+
+    const recAmount = Number(rec.amount) || 0;
+    const sameAmount = amount > 0 && Math.abs(amount - recAmount) < 0.01;
+    const recIso = dateIsoOf(rec);
+    const sameDate = iso === recIso;
+    const days = dayDiff(iso, recIso);
+    const sameVendor = !!vendor && vendor === normalizeIdentity(rec.vendor);
+    const sameTransferor = !!transferor && transferor === normalizeIdentity(rec.transferor);
+    const sameNote = !!note && note === normalizeText(rec.note);
+    const sameImage = !!imageHash && imageHash === String(rec.imageHash || "").trim();
+
+    let score = 0;
+    let reason = "";
+
+    if (sameImage) {
+      score = 100;
+      reason = "ใช้รูปหลักฐานไฟล์เดียวกัน";
+    } else if (sameAmount && sameDate && sameVendor) {
+      score = 95;
+      reason = "วันที่ ยอดเงิน และผู้รับตรงกัน";
+    } else if (sameAmount && sameDate && (sameTransferor || sameNote)) {
+      score = 88;
+      reason = sameTransferor
+        ? "วันที่ ยอดเงิน และผู้โอนตรงกัน"
+        : "วันที่ ยอดเงิน และรายละเอียดตรงกัน";
+    } else if (sameAmount && sameVendor && days <= 7) {
+      score = 78;
+      reason = `ยอดและผู้รับตรงกันภายใน ${Math.round(days)} วัน`;
+    } else if (sameAmount && sameDate) {
+      score = 72;
+      reason = "วันที่และยอดเงินตรงกัน";
+    }
+
+    if (score < 72) continue;
+    matches.push({
+      id: rec.id,
+      score,
+      level: score >= 90 ? "high" : "medium",
+      reason,
+      date: rec.dateText || rec.date,
+      dateISO: rec.dateISO || recIso,
+      amount: rec.amount,
+      vendor: rec.vendor || "",
+      transferor: rec.transferor || "",
+      imageUrl: rec.imageUrl || "",
+      createdAt: rec.createdAt || "",
+      paid: !!rec.paid,
+    });
+  }
+
+  matches.sort((a, b) => b.score - a.score || String(b.createdAt).localeCompare(String(a.createdAt)));
+  const top = matches.slice(0, 3);
+  const high = top.some((m) => m.level === "high");
+
+  return {
+    hasDuplicate: top.length > 0,
+    level: top.length ? (high ? "high" : "medium") : "none",
+    matches: top,
+  };
 }
 
 export async function findRowById(env, sheetId, id, token = null) {
