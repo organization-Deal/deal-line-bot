@@ -15,9 +15,10 @@ import {
   addAttachment, removeAttachment, usedFileIds, ATTACH_TYPES,
 } from "./sheets.js";
 import { uploadImage, listUploadedImages } from "./drive.js";
+import { createExpenseDocuments } from "./documents.js";
 import { buildConnectUrl, handleCallback, getUserToken, createUserSheet } from "./oauth.js";
 
-const VERSION = "DEAL_LINE_BOT_v1.4";
+const VERSION = "DEAL_LINE_BOT_v1.5_AUTO_DOCS";
 
 const PENDING_ACTS = new Set(["confirm", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -72,12 +73,16 @@ async function checkSetup(env, key, sheet) {
       await env.KV.put(flag, "1");
       return null;
     }
-    return { warn: `ยังขาด ${missing.join(" · ")} — ใบรับรองแทนใบเสร็จจะออกมาไม่สมบูรณ์ กดปุ่มส้มด้านล่างเพื่อกรอก (ทำครั้งเดียว)` };
+    return { warn: `ยังขาด ${missing.join(" · ")} — ระบบยังสร้างใบเบิกและใบแทนไม่ได้ กดปุ่มส้มด้านล่างเพื่อกรอก (ทำครั้งเดียว)` };
   } catch (e) {
     // อ่านตั้งค่าไม่ได้ = ถือว่ายังไม่ครบ ให้ปุ่มขึ้น ดีกว่าเงียบแล้วลูกค้าไม่รู้ตัว
     console.warn("checkSetup", e.message);
     return { warn: "อ่านข้อมูลบริษัทไม่ได้ — กดปุ่มด้านล่างเพื่อตรวจการตั้งค่า" };
   }
+}
+
+function documentSettingsReady(s = {}) {
+  return !!(s.company_name && s.tax_id && s.approver_name);
 }
 
 export default {
@@ -187,6 +192,32 @@ export default {
             return cors(json(saved));
           }
           return cors(json(await readSettings(env, sheetId, token)));
+        }
+
+        // สร้าง/สร้างใหม่ ใบเบิก + ใบแทนของรายการเดียว
+        // หน้าเอกสารเรียกอัตโนมัติเมื่อเปิดรายการเก่าที่ยังไม่มีไฟล์
+        if (url.pathname === "/api/generate-docs" && request.method === "POST") {
+          const b = await request.json();
+          const rec = await getExpenseById(env, sheetId, b.id, token);
+          if (!rec) return cors(json({ error: "not_found" }, 404));
+          if (!b.force && rec.claimPdfUrl && rec.receiptPdfUrl) {
+            return cors(json({ ok: true, skipped: true, record: rec }));
+          }
+          const settings = await readSettings(env, sheetId, token);
+          if (!documentSettingsReady(settings)) {
+            return cors(json({
+              error: "settings_incomplete",
+              hint: "กรอกชื่อบริษัท เลขผู้เสียภาษี และชื่อผู้อนุมัติก่อนสร้างเอกสาร",
+            }, 400));
+          }
+          const docs = await createExpenseDocuments(env, rec, settings, token);
+          const patch = {
+            slipNo: docs.receiptNo,
+            claimPdfUrl: docs.claimUrl,
+            receiptPdfUrl: docs.receiptUrl,
+          };
+          await updateExpenseById(env, sheetId, rec.id, patch, token);
+          return cors(json({ ok: true, record: { ...rec, ...patch } }));
         }
 
         if (url.pathname === "/api/orphans") {
@@ -344,23 +375,26 @@ async function computeStats(env, sheet, rec, justAppended = null) {
 }
 
 async function renderSaved(env, key, sheet, rec, justAppended = null) {
-  const [stats, setup, dash, receiptPage] = await Promise.all([
+  const [stats, setup, dash, documentsPage] = await Promise.all([
     computeStats(env, sheet, rec, justAppended),
     checkSetup(env, key, sheet),
     dashUrl(env, key),
     dashUrl(env, key, "/receipt"),
   ]);
-  const receiptUrl = receiptPage && rec.id
-    ? `${receiptPage}&id=${encodeURIComponent(rec.id)}`
-    : receiptPage;
+  const setupUrl = setup && documentsPage && rec.id
+    ? `${documentsPage}&id=${encodeURIComponent(rec.id)}`
+    : (setup ? documentsPage : null);
 
   return savedCard(rec, rec.imageUrl || null, dash, {
     id: rec.id,
     stats,
-    receiptUrl,
-    // มี setupUrl = ยังตั้งค่าไม่ครบ → ปุ่มล่างกลายเป็น "เพิ่มข้อมูลบริษัท"
-    setupUrl: setup ? receiptPage : null,
+    claimUrl: rec.claimPdfUrl || null,
+    receiptUrl: rec.receiptPdfUrl || null,
+    documentsUrl: documentsPage,
+    // มี setupUrl = ยังตั้งค่าไม่ครบ → แจ้งให้กรอก แต่รายการยังบันทึกตามปกติ
+    setupUrl,
     setupWarn: setup ? setup.warn : null,
+    docWarn: rec.documentError || null,
   });
 }
 
@@ -480,10 +514,11 @@ async function handlePostback(event, env, key) {
       { sender: pending.sender, driveLink: pending.driveLink, payerName: pending.sender },
       token
     );
+    // กันกดซ้ำทันทีหลังบันทึกแถวสำเร็จ แม้ขั้นสร้าง PDF จะมีปัญหา
     await env.KV.delete(`pending:${id}`);
 
     const d = normalizeDate(pending.record.date);
-    const rec = {
+    let rec = {
       ...toSave,
       id: rowId, _row: row,
       imageUrl: pending.driveLink,
@@ -491,7 +526,30 @@ async function handlePostback(event, env, key) {
       dateText: d.text, dateISO: d.iso,
       status: "รอเบิก", paid: false,
       type: pending.record.type || "รายจ่าย",
+      claimPdfUrl: "",
+      receiptPdfUrl: "",
     };
+
+    // กดบันทึกครั้งเดียว → สร้างใบเบิก + ใบแทนเป็น PDF → อัป Drive → เขียนลิงก์ลงชีท
+    try {
+      const settings = await readSettings(env, pending.sheetId, token);
+      if (!documentSettingsReady(settings)) {
+        rec.documentError = "บันทึกรายการแล้ว — กรอกข้อมูลบริษัทครั้งเดียว จากนั้นระบบจะสร้างใบเบิกและใบแทนให้อัตโนมัติ";
+      } else {
+        const docs = await createExpenseDocuments(env, rec, settings, token);
+        const patch = {
+          slipNo: docs.receiptNo,
+          claimPdfUrl: docs.claimUrl,
+          receiptPdfUrl: docs.receiptUrl,
+        };
+        await updateExpenseById(env, pending.sheetId, rowId, patch, token);
+        rec = { ...rec, ...patch };
+      }
+    } catch (e) {
+      console.error("auto documents", e);
+      rec.documentError = "บันทึกรายการแล้ว แต่สร้างใบเบิก/ใบแทน PDF ไม่สำเร็จ กรุณาตรวจข้อมูลบริษัทหรือ Google Drive";
+    }
+
     return reply(env, event.replyToken, await renderSaved(env, key, sheet, rec, rec));
   }
 
