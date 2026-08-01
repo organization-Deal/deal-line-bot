@@ -37,17 +37,17 @@ Extract data from this image as JSON only.
 - Transfer slips: use "จำนวนเงิน". Not "ยอดคงเหลือ" (balance), exclude fees.
 - Digits only, no commas or symbols.
 
-## VENDOR
-- Receipts: the shop/company that issued it (usually at the top).
-- Transfer slips: the DESTINATION account holder — the person the money went TO,
-  labelled "ไปยัง" / "ผู้รับเงิน" / "บัญชีปลายทาง".
-  NEVER the sender, labelled "จาก" / "ผู้โอน". The sender is the person who paid;
-  the vendor is who they paid. Getting this backwards is the most common mistake.
+## PEOPLE / ACCOUNTS
+- vendor = the person or business that RECEIVED the money.
+  • Receipts: the shop/company that issued the document (usually at the top).
+  • Transfer slips: the DESTINATION account holder, labelled "ไปยัง" / "ผู้รับเงิน" /
+    "บัญชีปลายทาง". NEVER put the sender here.
+- transferor = the person or account that SENT the money on a transfer slip,
+  labelled "จาก" / "ผู้โอน" / "บัญชีต้นทาง". For non-transfer documents return "".
 - PromptPay with only a phone number: use the display name shown next to it, else "".
 - Copy Thai names EXACTLY, character by character, only what you can clearly see.
-- If any part of the name is blurry, masked (e.g. "นาย x*** y"), or you are not
-  certain of a character, DO NOT invent or complete it. Return only the readable part,
-  or "" if unreadable, and score vendor confidence low. A guessed name is worse than a blank.
+- If any part of a name is blurry or masked, DO NOT invent or complete it. Return only
+  the readable part, or "" if unreadable, and score that field's confidence low.
 
 ## DATE
 - Return YYYY-MM-DD in the Gregorian calendar (ค.ศ.).
@@ -67,7 +67,8 @@ A clean screenshot with no surroundings gives no signal — judge from the text 
 
 ## FIELDS
 - amount   : number
-- vendor   : string (keep Thai text as printed)
+- vendor   : string — ผู้รับ/ปลายทาง (keep Thai text as printed)
+- transferor : string — ผู้โอน/ต้นทาง; only for transfer slips, else ""
 - date     : "YYYY-MM-DD" Gregorian
 - category : pick exactly one from ${JSON.stringify(CATEGORIES)}
 - docType  : pick exactly one from ${JSON.stringify(DOC_TYPES)}
@@ -84,7 +85,7 @@ A clean screenshot with no surroundings gives no signal — judge from the text 
                • the amount looks unusually large for this kind of vendor
              Do NOT flag ordinary expenses. Most receipts should return "".
 - confidence : object scoring 0.0–1.0 per field
-    { "amount":?, "vendor":?, "date":?, "category":?, "note":? }
+    { "amount":?, "vendor":?, "transferor":?, "date":?, "category":?, "note":? }
 
 ## CONFIDENCE — be honest, this drives human review
 - 1.0 = crisp and unambiguous, no chance of error
@@ -195,6 +196,7 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
 
   const amount = Number(String(data.amount).replace(/[^0-9.]/g, "")) || 0;
   const vendor = (data.vendor || "").trim();
+  const transferor = (data.transferor || "").trim();
   const c = data.confidence || {};
 
   const docType = DOC_TYPES.includes(data.docType) ? data.docType : "";
@@ -204,12 +206,16 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
 
   let vendorConf = vendor ? clamp01(c.vendor, 0.8) : 0.2;
   if (isSlip && vendor) vendorConf = Math.min(vendorConf, 0.5);
+  const transferorConf = isSlip
+    ? (transferor ? clamp01(c.transferor, 0.8) : 0.2)
+    : 1;
 
   const flag = String(data.flag || "").trim().slice(0, 90);
 
   return {
     amount,
     vendor,
+    transferor,
     date:     cleanDate(data.date),
     category: CATEGORIES.includes(data.category) ? data.category : "อื่น ๆ",
     note:     (data.note || "").trim(),
@@ -223,8 +229,9 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
     flag,
 
     confidence: {
-      amount:   amountConf,
-      vendor:   vendorConf,
+      amount:     amountConf,
+      vendor:     vendorConf,
+      transferor: transferorConf,
       date:     data.date ? clamp01(c.date, 0.8) : 0.3,
       category: clamp01(c.category, 0.7),
       note:     clamp01(c.note, 0.7),
