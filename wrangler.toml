@@ -15,6 +15,12 @@ DASHBOARD_URL = "https://deal-dashboard.organization-23c.workers.dev"
 WORKER_URL = "https://accoutingsuppor02.organization-23c.workers.dev"
 EMAIL_DOMAIN = "docs.โดเมนของมึง.com"
 EMAIL_PREFIX = "bills"
+GMAIL_INITIAL_LOOKBACK_DAYS = "45"
+GMAIL_SYNC_BATCH = "5"
+GMAIL_CRON_MAX_MESSAGES = "3"
+
+[triggers]
+crons = ["* * * * *"]
 
 [[kv_namespaces]]
 binding = "KV"
