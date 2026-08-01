@@ -249,7 +249,8 @@ export function buildRecordCard(rec = {}, opts = {}) {
 
   // กล่องเตือน: ตั้งค่าไม่ครบ (ส้ม) มาก่อน flag จาก OCR (ฟ้า)
   const notes = [
-    opts.setupUrl ? noteBox(opts.setupWarn || 'ยังตั้งค่าข้อมูลบริษัทไม่ครบ — ใบรับรองแทนใบเสร็จจะออกมาไม่สมบูรณ์', 'warn') : null,
+    opts.setupUrl ? noteBox(opts.setupWarn || 'ยังตั้งค่าข้อมูลบริษัทไม่ครบ — เอกสารอัตโนมัติอาจไม่สมบูรณ์', 'warn') : null,
+    noteBox(opts.docWarn, 'warn'),
     noteBox(opts.insight || rec.flag, 'info'),
   ].filter(Boolean);
 
@@ -298,18 +299,14 @@ export function buildRecordCard(rec = {}, opts = {}) {
       },
     });
 
-    // ลิงก์เล็ก
+    // ลิงก์เล็ก — หลักฐานต้นฉบับแยกจากเอกสารที่ระบบสร้าง
     const driveLink = opts.driveLink || rec.imageUrl;
     const links = [
       textLink('แก้ไข', { type: 'postback', label: 'แก้ไข', data: pb('edit', id) }),
     ];
     if (driveLink) {
       links.push(dot());
-      links.push(textLink('ดูบิล', { type: 'uri', label: 'ดูบิล', uri: driveLink }));
-    }
-    if (opts.receiptUrl) {
-      links.push(dot());
-      links.push(textLink('ใบแทน', { type: 'uri', label: 'ใบแทน', uri: opts.receiptUrl }, C.orange));
+      links.push(textLink('หลักฐาน', { type: 'uri', label: 'หลักฐาน', uri: driveLink }));
     }
     links.push(dot());
     links.push(textLink('เพิ่มเติม', { type: 'postback', label: 'เพิ่มเติม', data: pb('more', id) }, C.secondary));
@@ -319,24 +316,36 @@ export function buildRecordCard(rec = {}, opts = {}) {
       type: 'box', layout: 'baseline', spacing: 'sm', paddingTop: '4px', contents: links,
     });
 
-    // ปุ่มล่าง — สลับตามสถานะการตั้งค่า
+    // เอกสารอัตโนมัติ — กดบันทึกครั้งเดียวแล้วต้องเห็นใบเบิก + ใบแทนตรงนี้เลย
+    const docButtons = [];
+    if (opts.claimUrl) {
+      docButtons.push({
+        type: 'button', style: 'secondary', height: 'sm',
+        action: { type: 'uri', label: '📄 ใบเบิก', uri: opts.claimUrl },
+      });
+    }
+    if (opts.receiptUrl) {
+      docButtons.push({
+        type: 'button', style: 'primary', color: C.orange, height: 'sm',
+        action: { type: 'uri', label: '🧾 ใบแทน', uri: opts.receiptUrl },
+      });
+    }
+    if (docButtons.length) {
+      footer.contents.push({ type: 'separator', color: C.separator, margin: 'sm' });
+      footer.contents.push({ type: 'box', layout: 'horizontal', spacing: 'sm', margin: 'sm', contents: docButtons });
+    }
+
     if (opts.setupUrl) {
       footer.contents.push({ type: 'separator', color: C.separator, margin: 'sm' });
       footer.contents.push({
         type: 'button', style: 'primary', color: C.orange, height: 'sm', margin: 'sm',
-        action: { type: 'uri', label: '⚠️  เพิ่มข้อมูลบริษัท', uri: opts.setupUrl },
+        action: { type: 'uri', label: '⚠️ เพิ่มข้อมูลบริษัท', uri: opts.setupUrl },
       });
-    } else if (opts.receiptUrl) {
-      footer.contents.push({ type: 'separator', color: C.separator, margin: 'sm' });
-      footer.contents.push({
-        type: 'button', style: 'link', height: 'sm', color: C.orange,
-        action: { type: 'uri', label: '🧾 ใบแทนรายการนี้พร้อมแล้ว', uri: opts.receiptUrl },
-      });
-    } else if (opts.dashboardUrl) {
+    } else if (!docButtons.length && opts.documentsUrl) {
       footer.contents.push({ type: 'separator', color: C.separator, margin: 'sm' });
       footer.contents.push({
         type: 'button', style: 'link', height: 'sm', color: C.blue,
-        action: { type: 'uri', label: '📊 เปิดแดชบอร์ด', uri: opts.dashboardUrl },
+        action: { type: 'uri', label: '📂 ดูสถานะเอกสาร', uri: opts.documentsUrl },
       });
     }
   }
