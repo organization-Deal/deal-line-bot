@@ -138,6 +138,46 @@ function signature(name, role, signUrl = "") {
   </td>`;
 }
 
+
+function formalReplacementHeader(settings, receiptNo, issueDate) {
+  const address = esc(settings.company_address || "—").replace(/\\n|\n/g, "<br>");
+  return `<table style="width:100%;border-collapse:collapse;margin-bottom:10px">
+    <tr>
+      <td style="width:105px;vertical-align:top;text-align:left;padding-top:2px">
+        ${img(settings.logo_url, "โลโก้บริษัท", 76)}
+      </td>
+      <td style="vertical-align:top;text-align:center;padding:0 18px">
+        <div style="font-size:16pt;font-weight:700;margin-bottom:3px">${esc(settings.company_name || "—")}</div>
+        <div style="font-size:10.5pt;line-height:1.45">${address}</div>
+        ${settings.tax_id ? `<div style="font-size:10.5pt">เลขที่ประจำตัวผู้เสียภาษี : ${esc(settings.tax_id)}</div>` : ""}
+      </td>
+      <td style="width:105px"></td>
+    </tr>
+  </table>
+  <table style="width:100%;border-collapse:collapse;margin:8px 0 22px;font-size:9.5pt">
+    <tr><td style="width:105px"><b>เลขที่เอกสาร</b></td><td>: ${esc(receiptNo)}</td></tr>
+    <tr><td><b>เลขที่ชุด</b></td><td>: ${esc(receiptNo)}</td></tr>
+    <tr><td><b>วันที่สร้างเอกสาร</b></td><td>: ${esc(issueDate)}</td></tr>
+  </table>`;
+}
+
+function formalSingleSignature(name, issueDate, position = "") {
+  const pos = position ? `ตำแหน่ง ${esc(position)}` : "ผู้เบิกจ่าย";
+  return `<table style="width:100%;border-collapse:collapse;margin-top:42px">
+    <tr>
+      <td style="width:22%"></td>
+      <td style="width:56%;text-align:center;vertical-align:bottom">
+        <div style="height:34px"></div>
+        <div style="white-space:nowrap">ลงชื่อ&nbsp;&nbsp;............................................................</div>
+        <div style="margin-top:7px">(${esc(name || "—")})</div>
+        <div style="margin-top:2px">${pos}</div>
+        <div style="margin-top:2px">วันที่ ${esc(issueDate)}</div>
+      </td>
+      <td style="width:22%"></td>
+    </tr>
+  </table>`;
+}
+
 function buildClaimHtml(rec, settings, claimNo) {
   const tx = dateParts(rec.dateISO || rec.dateText || rec.date);
   const issue = dateParts(new Date().toISOString()).th;
@@ -174,33 +214,64 @@ function buildReplacementHtml(rec, settings, receiptNo) {
   const tx = dateParts(rec.dateISO || rec.dateText || rec.date);
   const issue = dateParts(new Date().toISOString()).th;
   const payer = rec.payerName || rec.sender || "—";
+  const position = rec.payerPosition || rec.position || settings.payer_position || "";
   const transferor = rec.transferor || payer;
+  const recipient = rec.vendor || "—";
   const detail = rec.note || rec.category || "ค่าใช้จ่าย";
+  const noReceiptReason = rec.noReceiptReason || "ไม่สามารถเรียกเก็บใบเสร็จรับเงินจากผู้รับได้";
+  const blankRows = Array.from({ length: 8 }, () => `
+    <tr style="height:30px">
+      <td>&nbsp;</td><td></td><td></td><td></td>
+    </tr>`).join("");
 
   return shell("ใบรับรองแทนใบเสร็จรับเงิน", `
-    ${header(settings, receiptNo, issue)}
-    <div style="text-align:center;font-size:18pt;font-weight:700;margin:18px 0 4px">ใบรับรองแทนใบเสร็จรับเงิน</div>
-    <div style="text-align:center;margin-bottom:18px">${esc(settings.company_name || "—")} (ผู้จ่ายเงิน)</div>
-    <table style="width:100%;border-collapse:collapse" border="1" cellpadding="7">
-      <thead><tr style="background:#f2f2f2">
-        <th>วัน เดือน ปี</th><th>รายละเอียดรายจ่าย</th><th>จำนวนเงิน</th><th>ผู้โอน / ต้นทาง</th><th>ผู้รับ / ปลายทาง</th>
-      </tr></thead>
-      <tbody><tr>
-        <td style="text-align:center">${esc(tx.th)}</td>
-        <td>${esc(detail)}</td>
-        <td style="text-align:right;font-weight:700">${money(rec.amount)}</td>
-        <td>${esc(transferor || "—")}</td>
-        <td>${esc(rec.vendor || "—")}</td>
-      </tr><tr>
-        <td></td><td style="text-align:right"><b>รวมทั้งสิ้น</b></td>
-        <td style="text-align:right"><b>${money(rec.amount)} บาท</b></td><td></td><td></td>
-      </tr></tbody>
+    ${formalReplacementHeader(settings, receiptNo, issue)}
+
+    <div style="text-align:center;font-size:18pt;font-weight:700;margin:0 0 5px">ใบรับรองแทนใบเสร็จรับเงิน</div>
+    <div style="text-align:center;font-size:11pt;margin-bottom:20px">
+      ${esc(settings.company_name || "—")} (ผู้ซื้อ/ผู้รับบริการ)
+    </div>
+
+    <table style="width:100%;border-collapse:collapse;table-layout:fixed;font-size:10pt" border="1" cellpadding="6">
+      <thead>
+        <tr style="height:32px">
+          <th style="width:18%;text-align:center">วัน เดือน ปี</th>
+          <th style="width:38%;text-align:center">รายละเอียดรายจ่าย</th>
+          <th style="width:18%;text-align:center">จำนวนเงิน</th>
+          <th style="width:26%;text-align:center">หมายเหตุ</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr style="height:52px">
+          <td style="text-align:center;vertical-align:middle">${esc(tx.th)}</td>
+          <td style="vertical-align:middle">${esc(detail)}</td>
+          <td style="text-align:right;vertical-align:middle">${money(rec.amount)}</td>
+          <td style="vertical-align:middle">${esc(rec.receiptNote || "")}</td>
+        </tr>
+        ${blankRows}
+      </tbody>
     </table>
-    <p style="margin-top:18px">ข้าพเจ้า ${esc(payer)} (ผู้เบิกจ่าย) ขอรับรองว่า รายจ่ายข้างต้นไม่อาจเรียกเก็บใบเสร็จรับเงินจากผู้รับได้ และได้จ่ายไปในงานของบริษัทโดยแท้</p>
-    <table style="width:100%;border-collapse:collapse;margin-top:18px"><tr>
-      ${signature(payer, "ผู้เบิกจ่าย")}
-      ${signature(settings.approver_name, "ผู้อนุมัติ", settings.approver_sign_url)}
-    </tr></table>
+
+    <table style="width:100%;border-collapse:collapse;margin-top:10px;font-size:10.5pt">
+      <tr>
+        <td style="width:58%"></td>
+        <td style="text-align:right"><b>รวมทั้งสิ้น :</b></td>
+        <td style="width:22%;text-align:right"><b>${money(rec.amount)} บาท</b></td>
+      </tr>
+    </table>
+
+    <div style="margin-top:24px;font-size:9.8pt;line-height:1.65">
+      <div><b>ข้าพเจ้า ${esc(payer)}</b> (ผู้เบิกจ่าย)${position ? ` ตำแหน่ง ${esc(position)}` : ""}</div>
+      <div style="margin-top:7px">
+        ขอรับรองว่า รายจ่ายข้างต้นนี้${esc(noReceiptReason)} และได้จ่ายไปเพื่อกิจการของบริษัทโดยแท้จริง
+      </div>
+      <div style="margin-top:4px">
+        ผู้โอน / จากบัญชี: ${esc(transferor)}&nbsp;&nbsp;&nbsp;&nbsp;ผู้รับ / ไปยัง: ${esc(recipient)}
+      </div>
+      <div style="margin-top:4px">ทั้งนี้ เพื่อใช้เป็นหลักฐานประกอบการเบิกจ่ายตามระเบียบของบริษัท</div>
+    </div>
+
+    ${formalSingleSignature(payer, issue, position)}
   `);
 }
 
