@@ -64,14 +64,46 @@ function newId() { return `em_${crypto.randomUUID().replace(/-/g, "").slice(0, 1
 
 export async function ensureEmailInboxTab(env, sheetId, token = null) {
   const t = await tokenOf(env, token);
-  const meta = await call(t, `${API}/${sheetId}?fields=sheets.properties.title`);
-  const exists = (meta.sheets || []).some(s => s.properties?.title === TAB_EMAIL);
+  const meta = await call(
+    t,
+    `${API}/${sheetId}?fields=sheets.properties(sheetId,title,gridProperties.frozenRowCount)`,
+  );
+  const sheet = (meta.sheets || []).find(s => s.properties?.title === TAB_EMAIL);
+  const exists = Boolean(sheet);
+
   if (!exists) {
+    // frozenRowCount ต้องอยู่ใต้ gridProperties ตาม Google Sheets API schema
     await call(t, `${API}/${sheetId}:batchUpdate`, {
       method: "POST",
-      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: TAB_EMAIL, frozenRowCount: 1 } } }] }),
+      body: JSON.stringify({
+        requests: [{
+          addSheet: {
+            properties: {
+              title: TAB_EMAIL,
+              gridProperties: { frozenRowCount: 1 },
+            },
+          },
+        }],
+      }),
+    });
+  } else if (Number(sheet.properties?.gridProperties?.frozenRowCount || 0) < 1) {
+    // ชีทมีอยู่แล้วแต่ยังไม่ได้ตรึงหัวตาราง
+    await call(t, `${API}/${sheetId}:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({
+        requests: [{
+          updateSheetProperties: {
+            properties: {
+              sheetId: sheet.properties.sheetId,
+              gridProperties: { frozenRowCount: 1 },
+            },
+            fields: "gridProperties.frozenRowCount",
+          },
+        }],
+      }),
     });
   }
+
   let current = [];
   try {
     const d = await call(t, rangeUrl(sheetId, `A1:${LAST_COL}1`));
