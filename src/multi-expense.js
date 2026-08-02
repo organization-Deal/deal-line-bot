@@ -1,4 +1,4 @@
-// src/multi-expense.js — v1.0
+// src/multi-expense.js — v1.8 (Apple-like LINE summary + unified review UI)
 // รับรูปหลายใบจาก LINE → OCR ทีละรูป → Durable Object จัดกลุ่มรายการอัตโนมัติ
 // ถ้า AI จับคู่ไม่ชัวร์ ผู้ใช้เปิดหน้าตรวจเอกสารแล้วจัดรูปเองก่อนบันทึก
 
@@ -76,6 +76,30 @@ function roleOf(item) {
 function primaryRole(role) { return role === "RECEIPT" || role === "TAX_INVOICE"; }
 function amountKnown(v) { return Number(v) > 0; }
 function sameAmount(a, b) { return amountKnown(a) && amountKnown(b) && Math.abs(Number(a) - Number(b)) <= AMOUNT_TOLERANCE; }
+function explicitVatItem(item) {
+  if (!item || item.role !== "TAX_INVOICE") return false;
+  const vatAmount = Number(item.vatAmount || 0);
+  const vatRate = Number(item.vatRate || 0);
+  return vatAmount > 0 || (item.vat === true && vatRate > 0);
+}
+function groupVatAmount(s, g) {
+  const item = groupItems(s, g).find(explicitVatItem);
+  if (!item || g.vat !== true) return 0;
+  const explicit = Number(item.vatAmount || g.vatAmount || 0);
+  if (explicit > 0) return explicit;
+  const rate = Number(g.vatRate || item.vatRate || 0);
+  const amount = Number(g.amount || 0);
+  return rate > 0 && amount > 0 ? amount * rate / (100 + rate) : 0;
+}
+function identityTokens(item) {
+  return [item?.vendor, item?.matchHint, item?.invoiceNo, item?.referenceNo]
+    .map(norm).filter((x) => x && x.length >= 4);
+}
+function identityOverlap(aItems, bItems) {
+  const a = aItems.flatMap(identityTokens);
+  const b = bItems.flatMap(identityTokens);
+  return a.some((x) => b.some((y) => x === y || (x.length >= 6 && y.length >= 6 && (x.includes(y) || y.includes(x)))));
+}
 
 async function hashText(text) {
   const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(text)));
@@ -210,6 +234,8 @@ function groupTemplate() {
     docType: "",
     vat: false,
     vatRate: 0,
+    vatAmount: 0,
+    manualVat: false,
     whtRate: 0,
     warning: "",
     matchConfidence: 0,
@@ -239,8 +265,12 @@ function recomputeGroup(s, g) {
   if (!g.manualNote) g.note = String(primary.note || primary.matchHint || g.note || "");
   g.type = primary.type || "รายจ่าย";
   g.docType = primary.docType || (slip.docType || "");
-  g.vat = items.some((x) => x.vat === true || x.role === "TAX_INVOICE");
-  g.vatRate = Number(items.find((x) => Number(x.vatRate) > 0)?.vatRate || 0);
+  if (!g.manualVat) {
+    const vatItem = items.find(explicitVatItem);
+    g.vat = !!vatItem;
+    g.vatRate = vatItem ? Number(vatItem.vatRate || 7) : 0;
+    g.vatAmount = vatItem ? Number(vatItem.vatAmount || 0) : 0;
+  }
   g.whtRate = Number(items.find((x) => Number(x.whtRate) > 0)?.whtRate || 0);
 
   const hasPrimary = items.some((x) => primaryRole(x.role));
@@ -262,32 +292,47 @@ function groupHasRole(s, g, role) {
 function scoreItemForGroup(s, item, g) {
   const items = groupItems(s, g);
   if (!items.length) return -999;
+
   let score = 0;
+  let hasIdentity = false;
+
   if (amountKnown(item.amount) && amountKnown(g.amount)) {
     if (!sameAmount(item.amount, g.amount) && !sameAmount(item.amount, g.payAmount)) return -999;
-    score += 70;
+    score += 42; // ยอดตรงอย่างเดียวไม่พอให้จับคู่อัตโนมัติ
   }
+
   if (item.date && g.date) {
     const dd = dateDiffDays(item.date, g.date);
-    if (dd === 0) score += 15;
+    if (dd === 0) score += 18;
     else if (dd <= 1) score += 7;
-    else if (dd > 7) score -= 15;
+    else if (dd > 7) score -= 20;
   }
+
   const iv = norm(item.vendor);
   const gv = norm(g.vendor);
   if (iv && gv) {
-    if (iv === gv) score += 18;
-    else if (iv.includes(gv) || gv.includes(iv)) score += 8;
+    if (iv === gv) { score += 30; hasIdentity = true; }
+    else if (iv.length >= 6 && gv.length >= 6 && (iv.includes(gv) || gv.includes(iv))) {
+      score += 16; hasIdentity = true;
+    } else {
+      score -= 12;
+    }
   }
-  const refs = [item.referenceNo, item.invoiceNo, item.matchHint].map(norm).filter(Boolean);
-  const groupRefs = items.flatMap((x) => [x.referenceNo, x.invoiceNo, x.matchHint]).map(norm).filter(Boolean);
-  if (refs.some((r) => groupRefs.includes(r))) score += 25;
-  const hint = norm(item.matchHint);
-  if (hint && gv && (hint === gv || hint.includes(gv) || gv.includes(hint))) score += 35;
 
-  if (item.role === "PAYSLIP" && groupHasRole(s, g, "PAYSLIP")) score -= 45;
-  if (primaryRole(item.role) && items.some((x) => primaryRole(x.role))) score -= 35;
-  if (item.role === "PROOF") score += 4;
+  const refs = [item.referenceNo, item.invoiceNo, item.matchHint].map(norm).filter((x) => x && x.length >= 4);
+  const groupRefs = items.flatMap((x) => [x.referenceNo, x.invoiceNo, x.matchHint])
+    .map(norm).filter((x) => x && x.length >= 4);
+  if (refs.some((r) => groupRefs.some((gr) => r === gr || (r.length >= 6 && gr.length >= 6 && (r.includes(gr) || gr.includes(r)))))) {
+    score += 38;
+    hasIdentity = true;
+  }
+
+  if (item.role === "PAYSLIP" && groupHasRole(s, g, "PAYSLIP")) score -= 60;
+  if (primaryRole(item.role) && items.some((x) => primaryRole(x.role))) score -= 50;
+
+  // รูปหลักฐานที่ไม่มีข้อมูลยืนยัน ห้ามแนบมั่วอัตโนมัติ
+  if (item.role === "PROOF" && !hasIdentity) return -999;
+
   return score;
 }
 
@@ -312,8 +357,8 @@ function placeItem(s, item) {
 
   const best = scored[0];
   const second = scored[1];
-  const threshold = amountKnown(item.amount) ? 65 : (item.role === "PROOF" ? 35 : 55);
-  const confident = best && best.score >= threshold && (!second || best.score - second.score >= 12);
+  const threshold = amountKnown(item.amount) ? 72 : 70;
+  const confident = best && best.score >= threshold && (!second || best.score - second.score >= 18);
   if (confident) {
     best.g.itemIds.push(item.id);
     item.groupId = best.g.id;
@@ -328,14 +373,7 @@ function placeItem(s, item) {
     return;
   }
 
-  // ถ้ามีเพียงรายการเดียว หลักฐานที่ไม่มีตัวเลขสามารถแนบให้อัตโนมัติได้อย่างปลอดภัย
-  if (item.role === "PROOF" && s.groups.length === 1) {
-    const g = s.groups[0];
-    g.itemIds.push(item.id);
-    item.groupId = g.id;
-    g.matchConfidence = Math.max(g.matchConfidence || 0, 40);
-    recomputeGroup(s, g);
-  }
+  // รูปหลักฐานที่ไม่มีข้อมูลเชื่อมโยง จะรอให้ผู้ใช้จัดเองเสมอ
 
 }
 
@@ -349,12 +387,24 @@ function mergeCompatibleGroups(s) {
         const b = recomputeGroup(s, s.groups[j]);
         if (a.manual || b.manual) continue;
         if (!sameAmount(a.amount || a.payAmount, b.amount || b.payAmount)) continue;
-        const aPrimary = groupItems(s, a).some((x) => primaryRole(x.role));
-        const bPrimary = groupItems(s, b).some((x) => primaryRole(x.role));
+
+        const aItems = groupItems(s, a);
+        const bItems = groupItems(s, b);
+        const aPrimary = aItems.some((x) => primaryRole(x.role));
+        const bPrimary = bItems.some((x) => primaryRole(x.role));
         const aSlip = groupHasRole(s, a, "PAYSLIP");
         const bSlip = groupHasRole(s, b, "PAYSLIP");
         if (!((aPrimary && bSlip && !aSlip) || (bPrimary && aSlip && !bSlip))) continue;
-        if (a.date && b.date && dateDiffDays(a.date, b.date) > 2) continue;
+
+        const identityMatched = identityOverlap(aItems, bItems);
+        const exactDate = !!a.date && !!b.date && dateDiffDays(a.date, b.date) === 0;
+        const aVendor = norm(a.vendor), bVendor = norm(b.vendor);
+        const oneSideMissingVendor = !aVendor || !bVendor;
+
+        // ป้องกันยอดเท่ากันแล้วจับมั่ว: ต้องมีชื่อ/เลขอ้างอิงตรง
+        // หรือเป็นยอดที่ตรงวันเดียวกันและฝั่งหนึ่งไม่มีชื่อจริง ๆ
+        if (!identityMatched && !(exactDate && oneSideMissingVendor)) continue;
+
         const keep = aPrimary ? a : b;
         const drop = keep.id === a.id ? b : a;
         for (const itemId of drop.itemIds) {
@@ -437,55 +487,168 @@ function summaryCard(s, env) {
   const reviewUrl = `${baseUrl(env)}/multi/review?s=${encodeURIComponent(s.sid)}&k=${encodeURIComponent(s.token)}`;
   const needs = v.counts.unassigned + v.counts.warnings;
   const total = v.groups.reduce((sum, g) => sum + Number(g.amount || 0), 0);
-  const vatTotal = v.groups.reduce((sum, g) => {
-    const rate = Number(g.vatRate || 0);
-    return sum + (rate > 0 ? (Number(g.amount || 0) * rate / (100 + rate)) : 0);
-  }, 0);
-  const preview = v.groups.slice(0, 8);
-  const rows = [];
+  const vatTotal = s.groups.reduce((sum, g) => sum + groupVatAmount(s, g), 0);
+  const preview = v.groups.slice(0, 3);
 
-  rows.push({
-    type: "text", text: `📋 ตรวจก่อนยืนยัน (${v.counts.groups} รายการ)`,
-    size: "lg", weight: "bold", color: "#FFFFFF", wrap: true,
-  });
-  rows.push({ type: "separator", margin: "lg", color: "#3A3A3C" });
+  const statusPill = {
+    type: "box",
+    layout: "horizontal",
+    flex: 0,
+    backgroundColor: needs ? "#FFF7ED" : "#F0F8F2",
+    cornerRadius: "999px",
+    paddingStart: "10px",
+    paddingEnd: "10px",
+    paddingTop: "5px",
+    paddingBottom: "5px",
+    contents: [{
+      type: "text",
+      text: needs ? `ต้องตรวจ ${needs}` : "พร้อมบันทึก",
+      size: "xxs",
+      weight: "bold",
+      color: needs ? "#9A4A00" : "#248A3D",
+      flex: 0,
+    }],
+  };
+
+  const rows = [
+    {
+      type: "box",
+      layout: "horizontal",
+      alignItems: "center",
+      contents: [
+        {
+          type: "box",
+          layout: "vertical",
+          flex: 1,
+          contents: [
+            { type: "text", text: "ชุดเอกสารพร้อมตรวจ", size: "xs", color: "#6E6E73", weight: "bold" },
+            { type: "text", text: `฿${money(total)}`, size: "3xl", color: "#1D1D1F", weight: "bold", margin: "sm" },
+            { type: "text", text: `${v.counts.groups} รายการ · ${v.counts.images} เอกสาร`, size: "xs", color: "#6E6E73", margin: "xs" },
+          ],
+        },
+        statusPill,
+      ],
+    },
+    { type: "separator", margin: "xl", color: "#E5E5EA" },
+    { type: "text", text: "รายการตัวอย่าง", size: "xxs", color: "#6E6E73", weight: "bold", margin: "lg" },
+  ];
 
   preview.forEach((g, index) => {
-    const title = g.category && g.category !== "อื่น ๆ" ? g.category : (g.vendor || "— ยังไม่ระบุหมวด");
+    const title = g.category && g.category !== "อื่น ๆ" ? g.category : (g.vendor || "ยังไม่ระบุหมวด");
     const detail = g.note || g.vendor || "ยังไม่มีรายละเอียด";
-    const payType = g.counts?.slip ? "เงินโอน" : "เอกสาร";
+    const payType = g.counts?.slip ? "เงินโอน" : "เอกสารประกอบ";
     rows.push({
-      type: "box", layout: "vertical", margin: index === 0 ? "lg" : "xl", contents: [
-        { type: "text", text: `${index + 1}. ${title}`, size: "md", weight: "bold", color: "#FFFFFF", wrap: true },
-        { type: "text", text: detail, size: "sm", color: "#D1D1D6", wrap: true, margin: "xs" },
-        { type: "text", text: `ยอด ${money(g.amount)} บ. · จ่าย:${payType} · ${g.images.length} รูป`, size: "sm", color: "#FFFFFF", weight: "bold", wrap: true, margin: "xs" },
-        ...(g.warning ? [{ type: "text", text: `⚠ ${g.warning}`, size: "xs", color: "#FFB340", wrap: true, margin: "xs" }] : []),
+      type: "box",
+      layout: "horizontal",
+      spacing: "md",
+      margin: index === 0 ? "md" : "sm",
+      backgroundColor: "#F5F5F7",
+      cornerRadius: "16px",
+      paddingAll: "12px",
+      contents: [
+        {
+          type: "box",
+          layout: "vertical",
+          width: "28px",
+          height: "28px",
+          backgroundColor: "#1D1D1F",
+          cornerRadius: "999px",
+          justifyContent: "center",
+          alignItems: "center",
+          flex: 0,
+          contents: [{ type: "text", text: String(index + 1), size: "xs", color: "#FFFFFF", weight: "bold", align: "center" }],
+        },
+        {
+          type: "box",
+          layout: "vertical",
+          flex: 1,
+          contents: [
+            {
+              type: "box",
+              layout: "horizontal",
+              spacing: "sm",
+              contents: [
+                { type: "text", text: title, size: "sm", color: "#1D1D1F", weight: "bold", wrap: true, maxLines: 2, flex: 1 },
+                { type: "text", text: `฿${money(g.amount)}`, size: "sm", color: "#1D1D1F", weight: "bold", align: "end", flex: 0 },
+              ],
+            },
+            { type: "text", text: detail, size: "xs", color: "#6E6E73", wrap: true, maxLines: 2, margin: "xs" },
+            { type: "text", text: `${payType} · ${g.images.length} รูป`, size: "xxs", color: "#8E8E93", margin: "xs" },
+          ],
+        },
       ],
     });
   });
 
   if (v.groups.length > preview.length) {
-    rows.push({ type: "text", text: `และอีก ${v.groups.length - preview.length} รายการ`, size: "sm", color: "#D1D1D6", margin: "lg" });
+    rows.push({
+      type: "text",
+      text: `ดูอีก ${v.groups.length - preview.length} รายการในหน้าตรวจเอกสาร`,
+      size: "xs",
+      color: "#6E6E73",
+      align: "center",
+      margin: "md",
+      wrap: true,
+    });
   }
 
-  rows.push({ type: "separator", margin: "xl", color: "#3A3A3C" });
-  rows.push({ type: "text", text: `รวม ${v.counts.groups} รายการ · ${money(total)} บ.`, size: "lg", weight: "bold", color: "#FFFFFF", margin: "lg", wrap: true });
-  rows.push({ type: "text", text: `VAT ${money(vatTotal)} บ. · ยอดก่อน VAT ${money(Math.max(0, total - vatTotal))} บ.`, size: "sm", color: "#D1D1D6", margin: "sm", wrap: true });
-  if (needs) rows.push({ type: "text", text: `ต้องตรวจ ${needs} จุดก่อนบันทึก`, size: "xs", color: "#FFB340", margin: "lg", wrap: true });
+  if (vatTotal > 0.005) {
+    rows.push({
+      type: "box",
+      layout: "horizontal",
+      margin: "lg",
+      contents: [
+        { type: "text", text: "VAT ตามเอกสาร", size: "xs", color: "#6E6E73", flex: 1 },
+        { type: "text", text: `฿${money(vatTotal)}`, size: "xs", color: "#1D1D1F", weight: "bold", align: "end" },
+      ],
+    });
+  }
+
+  if (needs) {
+    rows.push({
+      type: "box",
+      layout: "vertical",
+      margin: "lg",
+      backgroundColor: "#FFF7ED",
+      cornerRadius: "14px",
+      paddingAll: "12px",
+      contents: [{
+        type: "text",
+        text: "ระบบจัดกลุ่มให้แล้ว กรุณาตรวจรายการและเอกสารก่อนบันทึก",
+        size: "xs",
+        color: "#9A4A00",
+        wrap: true,
+      }],
+    });
+  }
 
   return {
     type: "flex",
-    altText: `ตรวจก่อนยืนยัน ${v.counts.groups} รายการ รวม ${money(total)} บาท`,
+    altText: `ชุดเอกสาร ${v.counts.groups} รายการ รวม ${money(total)} บาท`,
     contents: {
-      type: "bubble", size: "mega",
-      body: { type: "box", layout: "vertical", paddingAll: "20px", backgroundColor: "#242424", contents: rows },
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        paddingAll: "20px",
+        backgroundColor: "#FFFFFF",
+        contents: rows,
+      },
       footer: {
-        type: "box", layout: "vertical", spacing: "sm", paddingAll: "14px", contents: [
-          { type: "button", style: "primary", color: "#111111", height: "sm", action: { type: "uri", label: "ตรวจและยืนยัน", uri: reviewUrl } },
-          { type: "button", style: "secondary", height: "sm", action: { type: "postback", label: "ยกเลิกชุดนี้", data: `act=multi_cancel&s=${encodeURIComponent(s.sid)}` } },
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        paddingAll: "14px",
+        contents: [
+          { type: "button", style: "primary", color: "#1D1D1F", height: "sm", action: { type: "uri", label: "ตรวจและยืนยัน", uri: reviewUrl } },
+          { type: "button", style: "secondary", height: "sm", action: { type: "postback", label: "ยกเลิกชุด", data: `act=multi_cancel&s=${encodeURIComponent(s.sid)}` } },
         ],
       },
-      styles: { footer: { backgroundColor: "#FFFFFF", separator: true, separatorColor: "#E5E5EA" } },
+      styles: {
+        body: { backgroundColor: "#FFFFFF" },
+        footer: { backgroundColor: "#FFFFFF", separator: true, separatorColor: "#E5E5EA" },
+      },
     },
   };
 }
@@ -671,6 +834,13 @@ export class MultiExpenseSession {
       if (patch.date !== undefined) { g.date = String(patch.date || "").trim(); g.manualDate = true; }
       if (patch.category !== undefined && CATEGORIES.includes(patch.category)) { g.category = patch.category; g.manualCategory = true; }
       if (patch.note !== undefined) { g.note = String(patch.note || "").trim(); g.manualNote = true; }
+      if (patch.vatMode !== undefined) {
+        const rate = Number(patch.vatMode || 0);
+        g.vat = rate > 0;
+        g.vatRate = rate > 0 ? rate : 0;
+        g.vatAmount = 0;
+        g.manualVat = true;
+      }
       g.manual = true;
       recomputeGroup(s, g); await this.save(s);
       return json({ ok: true, ...publicState(s) });
@@ -721,8 +891,25 @@ export class MultiExpenseSession {
 
   async pushSummary(s) {
     if (!s.targetId) return false;
-    const ok = await push(this.env, s.targetId, summaryCard(s, this.env));
-    if (ok) { s.lastSummarySeq = s.seq; await this.save(s); }
+
+    const reviewUrl = `${baseUrl(this.env)}/multi/review?s=${encodeURIComponent(s.sid)}&k=${encodeURIComponent(s.token)}`;
+    let ok = await push(this.env, s.targetId, summaryCard(s, this.env));
+
+    // กัน Flex Message ผิด schema แล้วหายเงียบ: ส่งลิงก์ข้อความธรรมดาสำรองทันที
+    if (!ok) {
+      console.error(`[multi-summary] flex rejected; sending text fallback sid=${s.sid} seq=${s.seq}`);
+      const v = publicState(s);
+      const total = v.groups.reduce((sum, g) => sum + Number(g.amount || 0), 0);
+      ok = await push(this.env, s.targetId, textMsg(
+        `ตรวจชุดเอกสาร ${v.counts.groups} รายการ รวม ${money(total)} บาท\n` +
+        `เปิดเพื่อตรวจ จัดรูป และยืนยันบันทึก:\n${reviewUrl}`
+      ));
+    }
+
+    if (ok) {
+      s.lastSummarySeq = s.seq;
+      await this.save(s);
+    }
     return ok;
   }
 
@@ -797,8 +984,23 @@ export class MultiExpenseSession {
 
     s.status = "saving_docs";
     await this.save(s);
+
+    // แจ้ง LINE ทันทีหลังเขียนรายการลง Sheet สำเร็จ
+    // ไม่ต้องรอการสร้าง PDF เพื่อป้องกันผู้ใช้คิดว่ากดบันทึกแล้วระบบเงียบ
+    if (s.targetId) {
+      const total = s.saved.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+      try {
+        const acknowledged = await push(this.env, s.targetId, textMsg(
+          `บันทึกชุดเอกสารแล้ว ✅\n${s.saved.length} รายการ · รวม ฿${money(total)}\nกำลังสร้างใบขอเบิกและใบแทนอัตโนมัติ`
+        ));
+        if (!acknowledged) console.error(`[multi-save] immediate LINE acknowledgement rejected sid=${s.sid}`);
+      } catch (e) {
+        console.error(`[multi-save] immediate LINE acknowledgement failed sid=${s.sid}`, e);
+      }
+    }
+
     this.ctx.waitUntil(this.finishDocuments(s.sid));
-    return json({ ok: true, status: s.status, saved: s.saved, message: `บันทึก ${s.saved.length} รายการแล้ว กำลังสร้างเอกสารอัตโนมัติ` });
+    return json({ ok: true, status: s.status, saved: s.saved, message: `บันทึก ${s.saved.length} รายการแล้ว และแจ้งใน LINE แล้ว กำลังสร้างเอกสารอัตโนมัติ` });
   }
 
   async finishDocuments(expectedSid) {
@@ -831,7 +1033,17 @@ export class MultiExpenseSession {
       await this.save(s);
       if (s.targetId) {
         const total = s.saved.reduce((sum, r) => sum + Number(r.amount || 0), 0);
-        await push(this.env, s.targetId, textMsg(`บันทึกชุดเอกสารสำเร็จ ✅\n${s.saved.length} รายการ · รวม ฿${money(total)}\nรายการทั้งหมดถูกส่งเข้ารอบเบิกแล้ว`));
+        const documentCount = Number(s.saveProgress?.documents || 0);
+        const errorCount = Array.isArray(s.saveProgress?.errors) ? s.saveProgress.errors.length : 0;
+        let message = `จัดชุดเอกสารเสร็จแล้ว ✅\n${s.saved.length} รายการ · รวม ฿${money(total)}\nส่งเข้ารอบเบิกเรียบร้อย`;
+        if (documentCount > 0) message += `\nสร้าง PDF สำเร็จ ${documentCount} รายการ`;
+        if (errorCount > 0) message += `\nมี ${errorCount} รายการที่ยังสร้าง PDF ไม่สำเร็จ กรุณาตรวจใน Dashboard`;
+        try {
+          const pushed = await push(this.env, s.targetId, textMsg(message));
+          if (!pushed) console.error(`[multi-save] completion LINE message rejected sid=${s.sid}`);
+        } catch (e) {
+          console.error(`[multi-save] completion LINE message failed sid=${s.sid}`, e);
+        }
       }
     } catch (e) {
       console.error("finish multi documents", e);
@@ -856,15 +1068,15 @@ function reviewPage(sid, token, env) {
   return `<!doctype html>
 <html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ตรวจและยืนยัน</title>
 <style>
-:root{--bg:#f7f6f3;--card:#fff;--ink:#1d1d1f;--muted:#77736e;--line:#e8e4dd;--field:#f4f1ec;--accent:#9f1d1d;--danger:#b42318;--ok:#248a3d}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans Thai",sans-serif}.wrap{max-width:1160px;margin:auto;padding:34px 20px 118px}.hero{text-align:center;padding:20px 10px 30px}.eyebrow{font-size:12px;color:var(--muted);font-weight:700;letter-spacing:.04em}.total{font-size:52px;line-height:1;font-weight:850;letter-spacing:-2px;margin:10px 0 8px}.total .currency{font-size:24px;color:#a29d96;margin-right:5px}.sub{font-size:13px;color:var(--muted);line-height:1.55}.sectionTitle{font-size:13px;font-weight:800;margin:0 0 10px}.list{background:var(--card);border:1px solid var(--line);border-radius:22px;overflow:hidden}.group{padding:22px 18px;border-bottom:1px solid var(--line)}.group:last-child{border-bottom:0}.ghead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.gtitle{font-size:17px;font-weight:800}.gdesc{font-size:12px;color:var(--muted);line-height:1.5;margin-top:3px}.gamount{font-size:17px;font-weight:850;white-space:nowrap}.warn{font-size:11px;color:#b54708;margin-top:5px;text-align:right}.ready{color:var(--ok)}.fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}.field.full{grid-column:1/-1}.field label{display:block;font-size:10px;color:var(--muted);font-weight:700;margin:0 0 5px}.field input,.field select{width:100%;height:44px;border:0;border-radius:12px;padding:0 13px;background:var(--field);color:var(--ink);font:inherit;font-size:14px}.thumbs{display:flex;gap:10px;overflow:auto;padding-top:12px}.thumb{position:relative;min-width:86px;width:86px}.thumb img{display:block;width:86px;height:72px;object-fit:cover;border-radius:10px;background:#eee;border:1px solid var(--line)}.thumb select{width:86px;height:30px;border:0;background:var(--field);border-radius:9px;font-size:10px;margin-top:5px;padding:0 5px}.delete{border:0;background:transparent;color:var(--danger);font-size:12px;font-weight:750;padding:8px 0 0;cursor:pointer}.empty{padding:34px 18px;text-align:center;color:var(--muted)}.poolWrap{margin-top:28px}.pool{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.imgcard{background:#fff;border:1px solid var(--line);border-radius:16px;overflow:hidden}.imgcard img{display:block;width:100%;height:150px;object-fit:cover;background:#eee}.imgbody{padding:11px}.meta{font-size:11px;color:var(--muted);line-height:1.55;margin:6px 0 9px}.imgbody select{width:100%;height:38px;border:0;background:var(--field);border-radius:10px;padding:0 8px}.bottom{position:fixed;left:0;right:0;bottom:0;background:#ffffffee;backdrop-filter:blur(16px);border-top:1px solid var(--line);padding:12px max(18px,calc((100vw - 1120px)/2));z-index:8}.bottomInner{display:grid;grid-template-columns:minmax(160px,.7fr) minmax(260px,1.3fr);gap:10px}.btn{height:52px;border-radius:14px;border:1px solid var(--line);background:#fff;color:var(--ink);font:inherit;font-weight:800;cursor:pointer}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn:disabled{opacity:.45}.minor{display:flex;justify-content:flex-end;gap:14px;margin:12px 2px 0}.linkBtn{border:0;background:transparent;color:var(--muted);font:inherit;font-size:12px;cursor:pointer}.toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);background:#111;color:#fff;padding:11px 15px;border-radius:999px;font-size:12px;opacity:0;pointer-events:none;transition:.2s;z-index:12}.toast.on{opacity:1}.overlay{position:fixed;inset:0;background:#f7f6f3e8;display:none;place-items:center;z-index:20}.overlay.on{display:grid}.done{background:#fff;border-radius:24px;padding:30px;max-width:460px;text-align:center;box-shadow:0 20px 60px #0002}.done h2{font-size:25px}.done .btn{width:100%;margin-top:10px}
-@media(max-width:760px){.wrap{padding:22px 12px 112px}.hero{padding-top:8px}.total{font-size:44px}.fields{grid-template-columns:1fr}.pool{grid-template-columns:repeat(2,minmax(0,1fr))}.bottom{padding:10px 12px}.bottomInner{grid-template-columns:1fr 1.7fr}.group{padding:18px 14px}}@media(max-width:480px){.pool{grid-template-columns:1fr 1fr}.ghead{gap:8px}.gtitle{font-size:15px}.gamount{font-size:15px}.bottomInner{grid-template-columns:1fr 1.5fr}.btn{font-size:13px}}
-</style></head><body><div class="wrap">
-<div class="hero"><div class="eyebrow">ตรวจชุดเอกสาร</div><div class="total"><span class="currency">฿</span><span id="sumTotal">—</span></div><div class="sub" id="sumVat">กำลังโหลด</div><div class="sub" id="sumCount"></div></div>
-<div class="sectionTitle">รายการ</div><div class="list" id="groups"></div>
-<div class="poolWrap"><div class="sectionTitle">รูปที่ยังไม่ได้จัด</div><div class="pool" id="pool"></div></div>
-<div class="minor"><button class="linkBtn" onclick="reload()">โหลดข้อมูลใหม่</button><button class="linkBtn" style="color:#b42318" onclick="cancelSession()">ยกเลิกชุดนี้</button></div></div>
-<div class="bottom"><div class="bottomInner"><button class="btn" onclick="addBlank()">+ เปล่า</button><button class="btn primary" id="saveBtn" onclick="commit(false)">ยืนยันบันทึก</button></div></div>
+:root{--bg:#f5f5f7;--card:#fff;--ink:#1d1d1f;--muted:#6e6e73;--tertiary:#8e8e93;--line:#e5e5ea;--field:#f5f5f7;--soft:#fafafa;--danger:#d70015;--ok:#248a3d;--warn:#9a4a00;--warnbg:#fff7ed}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans Thai",sans-serif;-webkit-font-smoothing:antialiased}.wrap{max-width:1120px;margin:auto;padding:26px 18px 126px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:18px}.brand{font-size:11px;color:var(--muted);font-weight:700;letter-spacing:.05em}.pageTitle{font-size:28px;line-height:1.15;font-weight:800;letter-spacing:-.7px;margin-top:4px}.topStatus{font-size:12px;color:var(--muted);background:#fff;border:1px solid var(--line);border-radius:999px;padding:9px 12px;white-space:nowrap}.hero{background:var(--card);border:1px solid var(--line);border-radius:24px;padding:28px;text-align:center;box-shadow:0 14px 36px rgba(0,0,0,.04);margin-bottom:26px}.eyebrow{font-size:11px;color:var(--muted);font-weight:700;letter-spacing:.05em}.total{font-size:54px;line-height:1;font-weight:850;letter-spacing:-2px;margin:12px 0 9px}.total .currency{font-size:23px;color:var(--tertiary);margin-right:5px;vertical-align:12px}.sub{font-size:13px;color:var(--muted);line-height:1.55}.summaryPills{display:flex;justify-content:center;flex-wrap:wrap;gap:8px;margin-top:16px}.pill{font-size:11px;font-weight:700;border-radius:999px;padding:7px 10px;background:var(--field);color:var(--muted)}.pill.ok{background:#f0f8f2;color:var(--ok)}.pill.warn{background:var(--warnbg);color:var(--warn)}.sectionHead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 2px 10px}.sectionTitle{font-size:15px;font-weight:800}.sectionHint{font-size:11px;color:var(--muted)}.list{display:grid;gap:14px;background:transparent;border:0;border-radius:0;overflow:visible}.group{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:20px;box-shadow:0 8px 24px rgba(0,0,0,.025)}.ghead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}.gindex{font-size:10px;color:var(--muted);font-weight:700;letter-spacing:.04em;margin-bottom:5px}.gtitle{font-size:18px;font-weight:800;letter-spacing:-.2px}.gdesc{font-size:12px;color:var(--muted);line-height:1.5;margin-top:4px}.gamount{font-size:19px;font-weight:850;white-space:nowrap}.statusBadge{display:inline-flex;margin-top:6px;border-radius:999px;padding:5px 8px;font-size:10px;font-weight:800;background:var(--warnbg);color:var(--warn);float:right}.statusBadge.ready{background:#f0f8f2;color:var(--ok)}.fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}.field.full{grid-column:1/-1}.field label{display:block;font-size:10px;color:var(--muted);font-weight:700;margin:0 0 6px}.field input,.field select{width:100%;height:46px;border:1px solid transparent;border-radius:12px;padding:0 13px;background:var(--field);color:var(--ink);font:inherit;font-size:14px;outline:none;transition:.15s}.field input:focus,.field select:focus,.thumb select:focus,.imgbody select:focus{background:#fff;border-color:#aeb4bb;box-shadow:0 0 0 3px rgba(0,0,0,.04)}.docsHead{display:flex;align-items:center;justify-content:space-between;margin-top:17px}.docsLabel{font-size:11px;color:var(--muted);font-weight:700}.thumbs{display:flex;gap:10px;overflow:auto;padding-top:10px;padding-bottom:4px;scrollbar-width:thin}.thumb{position:relative;min-width:170px;width:170px;background:var(--soft);border:1px solid var(--line);border-radius:14px;padding:8px}.thumb img{display:block;width:152px;height:108px;object-fit:cover;border-radius:9px;background:#eee;border:1px solid var(--line);cursor:zoom-in}.thumb label{display:block;font-size:9px;color:var(--muted);font-weight:700;margin:8px 2px 4px}.thumb select{width:152px;height:35px;border:1px solid transparent;background:var(--field);border-radius:9px;font-size:11px;padding:0 7px;outline:none}.moveSelect{font-weight:700;color:var(--ink)}.groupActions{display:flex;justify-content:flex-end;margin-top:10px}.delete{border:0;background:transparent;color:var(--danger);font:inherit;font-size:11px;font-weight:700;padding:6px 0;cursor:pointer}.empty{padding:42px 18px;text-align:center;color:var(--muted);background:#fff;border:1px dashed var(--line);border-radius:18px}.poolWrap{margin-top:30px}.pool{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.imgcard{background:#fff;border:1px solid var(--line);border-radius:16px;overflow:hidden}.imgcard img{display:block;width:100%;height:160px;object-fit:cover;background:#eee}.imgbody{padding:12px}.meta{font-size:11px;color:var(--muted);line-height:1.55;margin:7px 0 10px}.ocrFail{color:var(--danger);font-weight:700}.imgbody label{display:block;font-size:10px;color:var(--muted);font-weight:700;margin:8px 0 4px}.imgbody select{width:100%;height:40px;border:1px solid transparent;background:var(--field);border-radius:10px;padding:0 8px;outline:none}.minor{display:flex;justify-content:flex-end;gap:15px;margin:14px 2px 0}.linkBtn{border:0;background:transparent;color:var(--muted);font:inherit;font-size:12px;cursor:pointer}.linkBtn.danger{color:var(--danger)}.bottom{position:fixed;left:0;right:0;bottom:0;background:rgba(255,255,255,.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid var(--line);padding:12px max(18px,calc((100vw - 1084px)/2));z-index:8}.bottomInner{display:grid;grid-template-columns:minmax(150px,.65fr) minmax(260px,1.35fr);gap:10px}.btn{height:52px;border-radius:14px;border:1px solid var(--line);background:#fff;color:var(--ink);font:inherit;font-weight:800;cursor:pointer}.btn.primary{background:var(--ink);border-color:var(--ink);color:#fff}.btn:disabled{opacity:.45}.toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);background:#1d1d1f;color:#fff;padding:11px 15px;border-radius:999px;font-size:12px;opacity:0;pointer-events:none;transition:.2s;z-index:12}.toast.on{opacity:1}.overlay{position:fixed;inset:0;background:rgba(245,245,247,.9);display:none;place-items:center;padding:20px;z-index:20}.overlay.on{display:grid}.done{background:#fff;border:1px solid var(--line);border-radius:24px;padding:30px;max-width:440px;width:100%;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.12)}.done h2{font-size:25px;margin:0 0 8px}.done .btn{width:100%;margin-top:12px}
+@media(max-width:760px){.wrap{padding:18px 12px 116px}.topbar{align-items:flex-start}.pageTitle{font-size:24px}.topStatus{font-size:10px;padding:7px 9px}.hero{padding:24px 14px}.total{font-size:46px}.fields{grid-template-columns:1fr}.pool{grid-template-columns:repeat(2,minmax(0,1fr))}.bottom{padding:10px 12px}.bottomInner{grid-template-columns:1fr 1.7fr}.group{padding:17px 14px}.thumb{min-width:154px;width:154px}.thumb img,.thumb select{width:136px}.thumb img{height:100px}}@media(max-width:480px){.pool{grid-template-columns:1fr 1fr}.ghead{gap:8px}.gtitle{font-size:16px}.gamount{font-size:16px}.bottomInner{grid-template-columns:1fr 1.45fr}.btn{font-size:13px}.topStatus{display:none}}</style></head><body><div class="wrap">
+<header class="topbar"><div><div class="brand">รับจ่ายได้หมด · DOCUMENT REVIEW</div><div class="pageTitle">ตรวจและยืนยัน</div></div><div class="topStatus" id="topStatus">กำลังโหลดข้อมูล</div></header>
+<section class="hero"><div class="eyebrow">ยอดรวมชุดเอกสาร</div><div class="total"><span class="currency">฿</span><span id="sumTotal">—</span></div><div class="sub" id="sumVat">กำลังโหลด</div><div class="sub" id="sumCount"></div><div class="summaryPills"><span class="pill ok" id="readyPill">พร้อม 0</span><span class="pill warn" id="warnPill">ต้องตรวจ 0</span><span class="pill" id="imagePill">0 เอกสาร</span></div></section>
+<div class="sectionHead"><div class="sectionTitle">รายการค่าใช้จ่าย</div><div class="sectionHint">ตรวจยอด หมวด และเอกสารก่อนบันทึก</div></div><div class="list" id="groups"></div>
+<div class="poolWrap"><div class="sectionHead"><div class="sectionTitle">รูปที่ยังไม่ได้จัด</div><div class="sectionHint">เลือกรายการปลายทางหรือสร้างรายการใหม่</div></div><div class="pool" id="pool"></div></div>
+<div class="minor"><button class="linkBtn" onclick="reload()">โหลดข้อมูลใหม่</button><button class="linkBtn danger" onclick="cancelSession()">ยกเลิกชุดนี้</button></div></div>
+<div class="bottom"><div class="bottomInner"><button class="btn" onclick="addBlank()">+ เพิ่มรายการ</button><button class="btn primary" id="saveBtn" onclick="commit(false)">บันทึกรายการ</button></div></div>
 <div class="toast" id="toast"></div><div class="overlay" id="overlay"><div class="done"><h2 id="doneTitle">กำลังบันทึก</h2><p id="doneText" class="sub">กรุณารอสักครู่</p><button class="btn primary" onclick="window.close();history.back()">กลับไป LINE</button></div></div>
 <script>
 const SID=${JSON.stringify(sid)},KEY=${JSON.stringify(token)},API=${JSON.stringify(api)};let D=null;
@@ -872,14 +1084,39 @@ const q=(s)=>document.querySelector(s);const esc=(v)=>String(v??'').replace(/[&<
 function toast(t){const e=q('#toast');e.textContent=t;e.classList.add('on');setTimeout(()=>e.classList.remove('on'),1800)}
 async function api(path,body){const r=await fetch(API+path+'?s='+encodeURIComponent(SID)+'&k='+encodeURIComponent(KEY),{method:body===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const j=await r.json().catch(()=>({error:'ระบบตอบกลับไม่ถูกต้อง'}));if(!r.ok){const e=new Error(j.error||'เกิดข้อผิดพลาด');e.data=j;throw e}return j}
 function roleOptions(cur){return (D.roles||[]).map(r=>'<option value="'+r.value+'"'+(r.value===cur?' selected':'')+'>'+esc(r.label)+'</option>').join('')}
-function groupOptions(cur){let h='<option value="unassigned">ยังไม่จัด</option><option value="new">สร้างรายการใหม่</option>';for(const g of D.groups)h+='<option value="'+g.id+'"'+(g.id===cur?' selected':'')+'>รายการ '+g.number+' · ฿'+Number(g.amount||0).toLocaleString('th-TH')+'</option>';h+='<option value="ignore">ไม่ใช้รูปนี้</option>';return h}
+function groupOptions(cur,label){let h='<option value="" selected disabled>'+esc(label||'ย้ายรูปไป...')+'</option><option value="unassigned">พักไว้ในรูปค้างจัด</option><option value="new">แยกเป็นรายการใหม่</option>';for(const g of D.groups){if(g.id!==cur)h+='<option value="'+g.id+'">ย้ายไป รายการ '+g.number+' · ฿'+Number(g.amount||0).toLocaleString('th-TH')+'</option>'}h+='<option value="ignore">ไม่ใช้รูปนี้</option>';return h}
 function titleOf(g){return g.category&&g.category!=='อื่น ๆ'?g.category:(g.vendor||'ยังไม่ระบุหมวด')}
-function vatOf(g){const r=Number(g.vatRate||0),a=Number(g.amount||0);return r>0?a*r/(100+r):0}
+function vatOf(g){if(g.vat!==true)return 0;const explicit=Number(g.vatAmount||0);if(explicit>0)return explicit;const r=Number(g.vatRate||0),a=Number(g.amount||0);return r>0?a*r/(100+r):0}
 async function reload(){try{D=await api('/state');render()}catch(e){toast(e.message)}}
-function render(){const total=D.groups.reduce((s,g)=>s+Number(g.amount||0),0);const vat=D.groups.reduce((s,g)=>s+vatOf(g),0);q('#sumTotal').textContent=total.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2});q('#sumVat').textContent='VAT '+vat.toLocaleString('th-TH',{minimumFractionDigits:2})+' บาท · ยอดก่อน VAT '+Math.max(0,total-vat).toLocaleString('th-TH',{minimumFractionDigits:2})+' บาท';q('#sumCount').textContent=D.counts.groups+' รายการ · '+(D.counts.unassigned?'ยังไม่จัด '+D.counts.unassigned+' รูป':'จัดครบแล้ว');q('#saveBtn').disabled=D.status==='saving'||D.status==='saving_docs';renderGroups();renderPool();if(D.status==='done')showDone('บันทึกสำเร็จ',D.saved.length+' รายการถูกส่งเข้ารอบเบิกแล้ว');else if(D.status==='saving_docs')showDone('บันทึกรายการแล้ว','ระบบกำลังสร้าง PDF อัตโนมัติ สามารถกลับไป LINE ได้เลย')}
-function renderGroups(){const root=q('#groups');if(!D.groups.length){root.innerHTML='<div class="empty">ยังไม่มีรายการ กด “+ เปล่า” หรือจัดรูปด้านล่างเข้ารายการ</div>';return}root.innerHTML=D.groups.map(g=>'<section class="group"><div class="ghead"><div><div class="gtitle">'+esc(titleOf(g))+'</div><div class="gdesc">'+esc(g.note||g.vendor||'ยังไม่มีรายละเอียด')+' · '+g.images.length+' รูป</div></div><div><div class="gamount">฿'+Number(g.amount||0).toLocaleString('th-TH',{minimumFractionDigits:2})+'</div><div class="warn '+(!g.warning?'ready':'')+'">'+esc(g.warning||'พร้อมบันทึก')+'</div></div></div><div class="fields"><div class="field full"><label>ชื่อรายการ</label><input value="'+esc(g.note||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{note:this.value})"></div><div class="field"><label>ยอด (บาท)</label><input type="number" step="0.01" value="'+esc(g.amount||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{amount:this.value})"></div><div class="field"><label>หมวด</label><select onchange="patchGroup(\\\''+g.id+'\\\',{category:this.value})">'+D.categories.map(c=>'<option'+(c===g.category?' selected':'')+'>'+esc(c)+'</option>').join('')+'</select></div><div class="field"><label>ผู้รับ / ร้านค้า</label><input value="'+esc(g.vendor||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{vendor:this.value})"></div><div class="field"><label>วันที่รายการ</label><input type="date" value="'+esc(g.date||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{date:this.value})"></div></div><div class="thumbs">'+g.images.map(im=>'<div class="thumb"><img src="'+esc(im.imgUrl)+'"><select onchange="changeRole(\\\''+im.id+'\\\',this.value)">'+roleOptions(im.role)+'</select><select onchange="assign(\\\''+im.id+'\\\',this.value)">'+groupOptions(g.id)+'</select></div>').join('')+'</div><button class="delete" onclick="deleteGroup(\\\''+g.id+'\\\')">ลบรายการ</button></section>').join('')}
-function renderPool(){const root=q('#pool');const list=D.items.filter(x=>!x.groupId&&!x.ignored);if(!list.length){root.innerHTML='<div class="empty" style="grid-column:1/-1">ไม่มีรูปค้างจัด 🎉</div>';return}root.innerHTML=list.map(x=>'<div class="imgcard"><img src="'+esc(x.imgUrl)+'"><div class="imgbody"><select onchange="changeRole(\\\''+x.id+'\\\',this.value)">'+roleOptions(x.role)+'</select><div class="meta">'+(x.ocrFailed?'<b style="color:#b42318">AI อ่านไม่สำเร็จ</b><br>':'')+esc(x.vendor||x.matchHint||'ไม่พบชื่อ')+'<br>ยอด '+(Number(x.amount)>0?'฿'+Number(x.amount).toLocaleString('th-TH'):'ไม่พบ')+'</div><select onchange="assign(\\\''+x.id+'\\\',this.value)">'+groupOptions('unassigned')+'</select></div></div>').join('')}
-async function assign(itemId,target){try{D=await api('/assign',{itemId,target});render();toast('จัดรูปแล้ว')}catch(e){toast(e.message)}}
+function render(){
+  const total=D.groups.reduce((s,g)=>s+Number(g.amount||0),0);
+  const vat=D.groups.reduce((s,g)=>s+vatOf(g),0);
+  const needs=Number(D.counts.warnings||0)+Number(D.counts.unassigned||0);
+  q('#sumTotal').textContent=total.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2});
+  q('#sumVat').textContent=vat>0.005?'VAT ตามเอกสาร '+vat.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})+' บาท · ยอดก่อน VAT '+Math.max(0,total-vat).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})+' บาท':'ไม่มี VAT ที่ต้องนำมาคำนวณ';
+  q('#sumCount').textContent=D.counts.groups+' รายการ · '+(D.counts.unassigned?'ยังไม่จัด '+D.counts.unassigned+' รูป':'จัดรูปครบแล้ว');
+  q('#readyPill').textContent='พร้อม '+Number(D.counts.ready||0);
+  q('#warnPill').textContent='ต้องตรวจ '+needs;
+  q('#warnPill').style.display=needs?'inline-flex':'none';
+  q('#imagePill').textContent=Number(D.counts.images||0)+' เอกสาร';
+  q('#topStatus').textContent=needs?'มี '+needs+' จุดที่ต้องตรวจ':'พร้อมบันทึก';
+  q('#saveBtn').textContent='บันทึก '+Number(D.counts.groups||0)+' รายการ';
+  q('#saveBtn').disabled=D.status==='saving'||D.status==='saving_docs'||!D.counts.groups;
+  renderGroups();renderPool();
+  if(D.status==='done')showDone('บันทึกสำเร็จ',D.saved.length+' รายการถูกส่งเข้ารอบเบิกแล้ว');
+  else if(D.status==='saving_docs')showDone('บันทึกรายการแล้ว','ระบบกำลังสร้าง PDF อัตโนมัติ สามารถกลับไป LINE ได้เลย');
+}
+function renderGroups(){
+  const root=q('#groups');
+  if(!D.groups.length){root.innerHTML='<div class="empty">ยังไม่มีรายการ กด “+ เพิ่มรายการ” หรือจัดรูปด้านล่างเข้ารายการ</div>';return}
+  root.innerHTML=D.groups.map(g=>'<section class="group"><div class="ghead"><div><div class="gindex">รายการ '+g.number+'</div><div class="gtitle">'+esc(titleOf(g))+'</div><div class="gdesc">'+esc(g.note||g.vendor||'ยังไม่มีรายละเอียด')+' · '+g.images.length+' รูป</div></div><div><div class="gamount">฿'+Number(g.amount||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})+'</div><div class="statusBadge '+(!g.warning?'ready':'')+'">'+esc(g.warning?'ตรวจข้อมูล':'พร้อมบันทึก')+'</div></div></div><div class="fields"><div class="field full"><label>ชื่อรายการ</label><input value="'+esc(g.note||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{note:this.value})"></div><div class="field"><label>ยอด (บาท)</label><input type="number" step="0.01" value="'+esc(g.amount||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{amount:this.value})"></div><div class="field"><label>หมวด</label><select onchange="patchGroup(\\\''+g.id+'\\\',{category:this.value})">'+D.categories.map(c=>'<option'+(c===g.category?' selected':'')+'>'+esc(c)+'</option>').join('')+'</select></div><div class="field"><label>ผู้รับ / ร้านค้า</label><input value="'+esc(g.vendor||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{vendor:this.value})"></div><div class="field"><label>วันที่รายการ</label><input type="date" value="'+esc(g.date||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{date:this.value})"></div><div class="field"><label>VAT</label><select onchange="patchGroup(\\\''+g.id+'\\\',{vatMode:this.value})"><option value="0"'+(!(g.vat===true&&Number(g.vatRate)>0)?' selected':'')+'>ไม่มี VAT</option><option value="7"'+(g.vat===true&&Number(g.vatRate)===7?' selected':'')+'>VAT 7%</option></select></div></div><div class="docsHead"><div class="docsLabel">เอกสารในรายการ · '+g.images.length+' รูป</div></div><div class="thumbs">'+g.images.map(im=>'<div class="thumb"><a href="'+esc(im.imgUrl)+'" target="_blank" rel="noopener"><img src="'+esc(im.imgUrl)+'"></a><label>ประเภทเอกสาร</label><select onchange="changeRole(\\\''+im.id+'\\\',this.value)">'+roleOptions(im.role)+'</select><label>ย้ายรูปไป</label><select class="moveSelect" onchange="assign(\\\''+im.id+'\\\',this.value)">'+groupOptions(g.id,'เลือกปลายทาง')+'</select></div>').join('')+'</div><div class="groupActions"><button class="delete" onclick="deleteGroup(\\\''+g.id+'\\\')">ลบรายการ</button></div></section>').join('')
+}
+function renderPool(){
+  const root=q('#pool');const list=D.items.filter(x=>!x.groupId&&!x.ignored);
+  if(!list.length){root.innerHTML='<div class="empty" style="grid-column:1/-1">ไม่มีรูปค้างจัด</div>';return}
+  root.innerHTML=list.map(x=>'<div class="imgcard"><a href="'+esc(x.imgUrl)+'" target="_blank" rel="noopener"><img src="'+esc(x.imgUrl)+'"></a><div class="imgbody"><label>ประเภทเอกสาร</label><select onchange="changeRole(\\\''+x.id+'\\\',this.value)">'+roleOptions(x.role)+'</select><div class="meta">'+(x.ocrFailed?'<span class="ocrFail">AI อ่านไม่สำเร็จ</span><br>':'')+esc(x.vendor||x.matchHint||'ไม่พบชื่อ')+'<br>ยอด '+(Number(x.amount)>0?'฿'+Number(x.amount).toLocaleString('th-TH'):'ไม่พบ')+'</div><label>จัดรูปเข้า</label><select class="moveSelect" onchange="assign(\\\''+x.id+'\\\',this.value)">'+groupOptions('','เลือกรายการปลายทาง')+'</select></div></div>').join('')
+}
+async function assign(itemId,target){if(!target)return;try{D=await api('/assign',{itemId,target});render();toast('ย้ายรูปแล้ว')}catch(e){toast(e.message)}}
 async function changeRole(itemId,role){try{D=await api('/role',{itemId,role});render()}catch(e){toast(e.message)}}
 async function patchGroup(groupId,patch){try{D=await api('/group',{groupId,patch});render()}catch(e){toast(e.message)}}
 async function addBlank(){try{D=await api('/new-group',{});render();window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});toast('เพิ่มรายการเปล่าแล้ว')}catch(e){toast(e.message)}}
