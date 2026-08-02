@@ -624,15 +624,25 @@ export async function getBatchDashboard(env, sheetId, token = null) {
     total: rows.reduce((sum, b) => sum + (Number(b.total) || 0), 0),
   });
   const active = batches.filter((b) => !["จ่ายแล้ว", "ยกเลิก", "ตีกลับ"].includes(b.status));
-  const enriched = batches.map((b) => ({
-    ...b,
-    workflowStep: b.status === "จ่ายแล้ว" ? "paid"
-      : b.status === "รออนุมัติ" ? "approval"
-      : b.peakStatus !== "บันทึกแล้ว" ? "peak"
-      : b.transferStatus !== "ตั้งโอนแล้ว" ? "transfer"
-      : !b.paymentSlipUrl ? "slip"
-      : "paid",
-  }));
+  const enriched = batches.map((b) => {
+    const profile = payerProfile(settings, b.payerId, b.payerName);
+    const missing = missingProfileFields(profile);
+    return {
+      ...b,
+      bank: profile.bank || "",
+      accountNo: profile.accountNo || "",
+      accountName: profile.accountName || "",
+      accountMasked: maskAccount(profile.accountNo),
+      profileComplete: missing.length === 0,
+      missingProfileFields: missing,
+      workflowStep: b.status === "จ่ายแล้ว" ? "paid"
+        : b.status === "รออนุมัติ" ? "approval"
+        : b.peakStatus !== "บันทึกแล้ว" ? "peak"
+        : b.transferStatus !== "ตั้งโอนแล้ว" ? "transfer"
+        : !b.paymentSlipUrl ? "slip"
+        : "paid",
+    };
+  });
   return {
     ok: true,
     version: BATCH_VERSION,
