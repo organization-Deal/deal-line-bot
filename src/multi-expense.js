@@ -1,4 +1,4 @@
-// src/multi-expense.js — v1.5 (manual image move + safer matching + strict VAT)
+// src/multi-expense.js — v1.6 (LINE card hotfix + fallback summary)
 // รับรูปหลายใบจาก LINE → OCR ทีละรูป → Durable Object จัดกลุ่มรายการอัตโนมัติ
 // ถ้า AI จับคู่ไม่ชัวร์ ผู้ใช้เปิดหน้าตรวจเอกสารแล้วจัดรูปเองก่อนบันทึก
 
@@ -506,7 +506,7 @@ function summaryCard(s, env) {
     rows.push({
       type: "box", layout: "vertical", margin: index === 0 ? "lg" : "xl", contents: [
         {
-          type: "box", layout: "horizontal", alignItems: "baseline", contents: [
+          type: "box", layout: "horizontal", contents: [
             { type: "text", text: `${index + 1}. ${title}`, size: "md", weight: "bold", color: "#111111", flex: 1, wrap: true },
             { type: "text", text: `฿${money(g.amount)}`, size: "md", weight: "bold", color: "#111111", align: "end", flex: 0 },
           ],
@@ -806,8 +806,25 @@ export class MultiExpenseSession {
 
   async pushSummary(s) {
     if (!s.targetId) return false;
-    const ok = await push(this.env, s.targetId, summaryCard(s, this.env));
-    if (ok) { s.lastSummarySeq = s.seq; await this.save(s); }
+
+    const reviewUrl = `${baseUrl(this.env)}/multi/review?s=${encodeURIComponent(s.sid)}&k=${encodeURIComponent(s.token)}`;
+    let ok = await push(this.env, s.targetId, summaryCard(s, this.env));
+
+    // กัน Flex Message ผิด schema แล้วหายเงียบ: ส่งลิงก์ข้อความธรรมดาสำรองทันที
+    if (!ok) {
+      console.error(`[multi-summary] flex rejected; sending text fallback sid=${s.sid} seq=${s.seq}`);
+      const v = publicState(s);
+      const total = v.groups.reduce((sum, g) => sum + Number(g.amount || 0), 0);
+      ok = await push(this.env, s.targetId, textMsg(
+        `ตรวจชุดเอกสาร ${v.counts.groups} รายการ รวม ${money(total)} บาท\n` +
+        `เปิดเพื่อตรวจ จัดรูป และยืนยันบันทึก:\n${reviewUrl}`
+      ));
+    }
+
+    if (ok) {
+      s.lastSummarySeq = s.seq;
+      await this.save(s);
+    }
     return ok;
   }
 
