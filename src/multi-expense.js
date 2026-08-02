@@ -371,7 +371,7 @@ function mergeCompatibleGroups(s) {
 }
 
 function refreshAll(s) {
-  s.groups = s.groups.filter((g) => g.itemIds.some((id) => s.items[id] && !s.items[id].ignored));
+  s.groups = s.groups.filter((g) => g.manualEmpty === true || g.itemIds.some((id) => s.items[id] && !s.items[id].ignored));
   s.groups.forEach((g) => recomputeGroup(s, g));
   mergeCompatibleGroups(s);
   s.groups.forEach((g) => recomputeGroup(s, g));
@@ -436,34 +436,56 @@ function summaryCard(s, env) {
   const v = publicState(s);
   const reviewUrl = `${baseUrl(env)}/multi/review?s=${encodeURIComponent(s.sid)}&k=${encodeURIComponent(s.token)}`;
   const needs = v.counts.unassigned + v.counts.warnings;
+  const total = v.groups.reduce((sum, g) => sum + Number(g.amount || 0), 0);
+  const vatTotal = v.groups.reduce((sum, g) => {
+    const rate = Number(g.vatRate || 0);
+    return sum + (rate > 0 ? (Number(g.amount || 0) * rate / (100 + rate)) : 0);
+  }, 0);
+  const preview = v.groups.slice(0, 8);
+  const rows = [];
+
+  rows.push({
+    type: "text", text: `📋 ตรวจก่อนยืนยัน (${v.counts.groups} รายการ)`,
+    size: "lg", weight: "bold", color: "#FFFFFF", wrap: true,
+  });
+  rows.push({ type: "separator", margin: "lg", color: "#3A3A3C" });
+
+  preview.forEach((g, index) => {
+    const title = g.category && g.category !== "อื่น ๆ" ? g.category : (g.vendor || "— ยังไม่ระบุหมวด");
+    const detail = g.note || g.vendor || "ยังไม่มีรายละเอียด";
+    const payType = g.counts?.slip ? "เงินโอน" : "เอกสาร";
+    rows.push({
+      type: "box", layout: "vertical", margin: index === 0 ? "lg" : "xl", contents: [
+        { type: "text", text: `${index + 1}. ${title}`, size: "md", weight: "bold", color: "#FFFFFF", wrap: true },
+        { type: "text", text: detail, size: "sm", color: "#D1D1D6", wrap: true, margin: "xs" },
+        { type: "text", text: `ยอด ${money(g.amount)} บ. · จ่าย:${payType} · ${g.images.length} รูป`, size: "sm", color: "#FFFFFF", weight: "bold", wrap: true, margin: "xs" },
+        ...(g.warning ? [{ type: "text", text: `⚠ ${g.warning}`, size: "xs", color: "#FFB340", wrap: true, margin: "xs" }] : []),
+      ],
+    });
+  });
+
+  if (v.groups.length > preview.length) {
+    rows.push({ type: "text", text: `และอีก ${v.groups.length - preview.length} รายการ`, size: "sm", color: "#D1D1D6", margin: "lg" });
+  }
+
+  rows.push({ type: "separator", margin: "xl", color: "#3A3A3C" });
+  rows.push({ type: "text", text: `รวม ${v.counts.groups} รายการ · ${money(total)} บ.`, size: "lg", weight: "bold", color: "#FFFFFF", margin: "lg", wrap: true });
+  rows.push({ type: "text", text: `VAT ${money(vatTotal)} บ. · ยอดก่อน VAT ${money(Math.max(0, total - vatTotal))} บ.`, size: "sm", color: "#D1D1D6", margin: "sm", wrap: true });
+  if (needs) rows.push({ type: "text", text: `ต้องตรวจ ${needs} จุดก่อนบันทึก`, size: "xs", color: "#FFB340", margin: "lg", wrap: true });
+
   return {
     type: "flex",
-    altText: `รับเอกสาร ${v.counts.images} รูป พบ ${v.counts.groups} รายการ`,
+    altText: `ตรวจก่อนยืนยัน ${v.counts.groups} รายการ รวม ${money(total)} บาท`,
     contents: {
       type: "bubble", size: "mega",
-      body: {
-        type: "box", layout: "vertical", paddingAll: "22px", contents: [
-          { type: "box", layout: "baseline", contents: [
-            { type: "text", text: "ชุดเอกสารล่าสุด", size: "xs", color: "#6E6E73", weight: "bold", flex: 1 },
-            { type: "text", text: needs ? "ต้องตรวจ" : "พร้อมบันทึก", size: "xs", color: needs ? "#B54708" : "#248A3D", weight: "bold", align: "end", flex: 1 },
-          ] },
-          { type: "text", text: `${v.counts.groups} รายการ`, size: "3xl", weight: "bold", color: "#111111", margin: "md" },
-          { type: "text", text: `รับแล้ว ${v.counts.images} รูป · AI จัดเข้ารายการ ${v.counts.images - v.counts.unassigned} รูป${v.counts.failed ? ` · อ่านไม่สำเร็จ ${v.counts.failed} รูป` : ""}`, size: "sm", color: "#6E6E73", margin: "sm", wrap: true },
-          { type: "box", layout: "horizontal", spacing: "sm", margin: "xl", contents: [
-            metricBox("พร้อม", String(v.counts.ready)),
-            metricBox("มีคำเตือน", String(v.counts.warnings)),
-            metricBox("ยังไม่จัด", String(v.counts.unassigned)),
-          ] },
-          { type: "text", text: "ส่งรูปเพิ่มต่อได้เลย ระบบจะรวมเข้าชุดเดิมอัตโนมัติ", size: "xs", color: "#6E6E73", wrap: true, margin: "lg" },
-        ],
-      },
+      body: { type: "box", layout: "vertical", paddingAll: "20px", backgroundColor: "#242424", contents: rows },
       footer: {
         type: "box", layout: "vertical", spacing: "sm", paddingAll: "14px", contents: [
-          { type: "button", style: "primary", color: "#111111", height: "sm", action: { type: "uri", label: needs ? "ตรวจและจัดรูป" : "ตรวจและบันทึก", uri: reviewUrl } },
+          { type: "button", style: "primary", color: "#111111", height: "sm", action: { type: "uri", label: "ตรวจและยืนยัน", uri: reviewUrl } },
           { type: "button", style: "secondary", height: "sm", action: { type: "postback", label: "ยกเลิกชุดนี้", data: `act=multi_cancel&s=${encodeURIComponent(s.sid)}` } },
         ],
       },
-      styles: { body: { backgroundColor: "#FFFFFF" }, footer: { backgroundColor: "#FFFFFF", separator: true, separatorColor: "#E5E5EA" } },
+      styles: { footer: { backgroundColor: "#FFFFFF", separator: true, separatorColor: "#E5E5EA" } },
     },
   };
 }
@@ -612,7 +634,7 @@ export class MultiExpenseSession {
       else {
         const g = s.groups.find((x) => x.id === b.target);
         if (!g) return json({ error: "ไม่พบรายการปลายทาง" }, 404);
-        g.itemIds.push(item.id); g.manual = true; item.groupId = g.id; recomputeGroup(s, g);
+        g.itemIds.push(item.id); g.manual = true; g.manualEmpty = false; item.groupId = g.id; recomputeGroup(s, g);
       }
       refreshAll(s); await this.save(s);
       return json({ ok: true, ...publicState(s) });
@@ -625,6 +647,16 @@ export class MultiExpenseSession {
       item.role = b.role;
       item.manualRole = true;
       refreshAll(s); await this.save(s);
+      return json({ ok: true, ...publicState(s) });
+    }
+
+    if (url.pathname === "/new-group" && request.method === "POST") {
+      const g = groupTemplate();
+      g.manual = true;
+      g.manualEmpty = true;
+      g.category = "อื่น ๆ";
+      s.groups.push(g);
+      await this.save(s);
       return json({ ok: true, ...publicState(s) });
     }
 
@@ -822,30 +854,40 @@ function invalidPage() {
 function reviewPage(sid, token, env) {
   const api = `${baseUrl(env)}/multi/api`;
   return `<!doctype html>
-<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>จัดชุดเอกสาร</title>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>ตรวจและยืนยัน</title>
 <style>
-:root{--bg:#f5f5f7;--card:#fff;--ink:#111;--muted:#6e6e73;--line:#e5e5ea;--soft:#f2f2f7;--ok:#248a3d;--warn:#b54708;--red:#b42318}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans Thai",sans-serif}.wrap{max-width:1180px;margin:auto;padding:24px 18px 70px}.top{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:22px}.eyebrow{font-size:11px;color:var(--muted);font-weight:800;letter-spacing:.08em;text-transform:uppercase}h1{font-size:34px;letter-spacing:-1px;margin:6px 0 5px}.sub{color:var(--muted);font-size:14px}.stats{display:flex;gap:8px;flex-wrap:wrap}.pill{background:#fff;border:1px solid var(--line);border-radius:999px;padding:8px 12px;font-size:12px}.layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:18px}.panel{background:var(--card);border:1px solid #0000000a;border-radius:24px;box-shadow:0 14px 38px #0000000c;padding:20px}.panel h2{font-size:18px;margin:0 0 4px}.hint{font-size:12px;color:var(--muted);line-height:1.55}.group{border:1px solid var(--line);border-radius:18px;margin-top:15px;overflow:hidden;background:#fff}.ghead{display:flex;justify-content:space-between;gap:12px;padding:15px 16px;background:#fafafa;border-bottom:1px solid var(--line)}.gtitle{font-size:15px;font-weight:800}.warning{font-size:11px;color:var(--warn);font-weight:700;text-align:right}.ready{color:var(--ok)}.fields{display:grid;grid-template-columns:1.1fr 1.5fr 1fr;gap:10px;padding:14px 16px}.field label{display:block;font-size:10px;color:var(--muted);font-weight:800;margin:0 0 5px}.field input,.field select{width:100%;height:40px;border:1px solid var(--line);border-radius:10px;padding:0 10px;background:#fff;color:#111;font:inherit;font-size:13px}.field.wide{grid-column:span 2}.thumbs{display:flex;gap:10px;overflow-x:auto;padding:0 16px 15px}.thumb{min-width:146px;width:146px;border:1px solid var(--line);border-radius:13px;overflow:hidden;background:#fafafa;padding-bottom:7px}.thumb img{display:block;width:146px;height:96px;object-fit:cover;background:#eee}.thumb .t{font-size:10px;padding:7px 7px 4px;color:#3a3a3c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.thumb select{width:calc(100% - 12px);height:30px;margin:4px 6px 0;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:10px;padding:0 5px}.pool{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px}.imgcard{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#fff}.imgcard img{width:100%;height:150px;object-fit:cover;background:#eee}.imgbody{padding:11px}.meta{font-size:11px;color:var(--muted);line-height:1.55;margin-bottom:8px}.imgbody select{width:100%;height:38px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:0 8px}.actions{position:sticky;top:18px}.summary{background:#111;color:#fff;border-radius:20px;padding:20px;margin-bottom:12px}.summary .big{font-size:30px;font-weight:850;letter-spacing:-1px}.summary .small{font-size:12px;color:#c7c7cc;margin-top:4px}.btn{width:100%;height:48px;border:0;border-radius:13px;font-weight:800;font-size:14px;cursor:pointer;background:#111;color:#fff}.btn.secondary{background:#fff;color:#111;border:1px solid var(--line);margin-top:9px}.btn.danger{color:var(--red)}.note{font-size:11px;color:var(--muted);line-height:1.6;margin-top:12px}.empty{padding:28px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:16px;margin-top:14px}.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#111;color:#fff;padding:11px 15px;border-radius:999px;font-size:12px;opacity:0;pointer-events:none;transition:.2s}.toast.on{opacity:1}.overlay{position:fixed;inset:0;background:#f5f5f7e8;display:none;place-items:center;z-index:10}.overlay.on{display:grid}.done{background:#fff;border-radius:24px;padding:30px;max-width:460px;text-align:center;box-shadow:0 20px 60px #0002}.done h2{font-size:25px}.link{color:#0066cc;text-decoration:none}.roleRow{display:flex;gap:6px;align-items:center;margin-bottom:8px}.roleRow select{flex:1}
-@media(max-width:850px){.layout{grid-template-columns:1fr}.actions{position:static;order:-1}.fields{grid-template-columns:1fr 1fr}.pool{grid-template-columns:1fr 1fr}}@media(max-width:560px){.wrap{padding:18px 12px 55px}.top{display:block}h1{font-size:29px}.fields{grid-template-columns:1fr}.field.wide{grid-column:auto}.pool{grid-template-columns:1fr}.panel{padding:16px;border-radius:20px}}
+:root{--bg:#f7f6f3;--card:#fff;--ink:#1d1d1f;--muted:#77736e;--line:#e8e4dd;--field:#f4f1ec;--accent:#9f1d1d;--danger:#b42318;--ok:#248a3d}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans Thai",sans-serif}.wrap{max-width:1160px;margin:auto;padding:34px 20px 118px}.hero{text-align:center;padding:20px 10px 30px}.eyebrow{font-size:12px;color:var(--muted);font-weight:700;letter-spacing:.04em}.total{font-size:52px;line-height:1;font-weight:850;letter-spacing:-2px;margin:10px 0 8px}.total .currency{font-size:24px;color:#a29d96;margin-right:5px}.sub{font-size:13px;color:var(--muted);line-height:1.55}.sectionTitle{font-size:13px;font-weight:800;margin:0 0 10px}.list{background:var(--card);border:1px solid var(--line);border-radius:22px;overflow:hidden}.group{padding:22px 18px;border-bottom:1px solid var(--line)}.group:last-child{border-bottom:0}.ghead{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}.gtitle{font-size:17px;font-weight:800}.gdesc{font-size:12px;color:var(--muted);line-height:1.5;margin-top:3px}.gamount{font-size:17px;font-weight:850;white-space:nowrap}.warn{font-size:11px;color:#b54708;margin-top:5px;text-align:right}.ready{color:var(--ok)}.fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}.field.full{grid-column:1/-1}.field label{display:block;font-size:10px;color:var(--muted);font-weight:700;margin:0 0 5px}.field input,.field select{width:100%;height:44px;border:0;border-radius:12px;padding:0 13px;background:var(--field);color:var(--ink);font:inherit;font-size:14px}.thumbs{display:flex;gap:10px;overflow:auto;padding-top:12px}.thumb{position:relative;min-width:86px;width:86px}.thumb img{display:block;width:86px;height:72px;object-fit:cover;border-radius:10px;background:#eee;border:1px solid var(--line)}.thumb select{width:86px;height:30px;border:0;background:var(--field);border-radius:9px;font-size:10px;margin-top:5px;padding:0 5px}.delete{border:0;background:transparent;color:var(--danger);font-size:12px;font-weight:750;padding:8px 0 0;cursor:pointer}.empty{padding:34px 18px;text-align:center;color:var(--muted)}.poolWrap{margin-top:28px}.pool{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.imgcard{background:#fff;border:1px solid var(--line);border-radius:16px;overflow:hidden}.imgcard img{display:block;width:100%;height:150px;object-fit:cover;background:#eee}.imgbody{padding:11px}.meta{font-size:11px;color:var(--muted);line-height:1.55;margin:6px 0 9px}.imgbody select{width:100%;height:38px;border:0;background:var(--field);border-radius:10px;padding:0 8px}.bottom{position:fixed;left:0;right:0;bottom:0;background:#ffffffee;backdrop-filter:blur(16px);border-top:1px solid var(--line);padding:12px max(18px,calc((100vw - 1120px)/2));z-index:8}.bottomInner{display:grid;grid-template-columns:minmax(160px,.7fr) minmax(260px,1.3fr);gap:10px}.btn{height:52px;border-radius:14px;border:1px solid var(--line);background:#fff;color:var(--ink);font:inherit;font-weight:800;cursor:pointer}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn:disabled{opacity:.45}.minor{display:flex;justify-content:flex-end;gap:14px;margin:12px 2px 0}.linkBtn{border:0;background:transparent;color:var(--muted);font:inherit;font-size:12px;cursor:pointer}.toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%);background:#111;color:#fff;padding:11px 15px;border-radius:999px;font-size:12px;opacity:0;pointer-events:none;transition:.2s;z-index:12}.toast.on{opacity:1}.overlay{position:fixed;inset:0;background:#f7f6f3e8;display:none;place-items:center;z-index:20}.overlay.on{display:grid}.done{background:#fff;border-radius:24px;padding:30px;max-width:460px;text-align:center;box-shadow:0 20px 60px #0002}.done h2{font-size:25px}.done .btn{width:100%;margin-top:10px}
+@media(max-width:760px){.wrap{padding:22px 12px 112px}.hero{padding-top:8px}.total{font-size:44px}.fields{grid-template-columns:1fr}.pool{grid-template-columns:repeat(2,minmax(0,1fr))}.bottom{padding:10px 12px}.bottomInner{grid-template-columns:1fr 1.7fr}.group{padding:18px 14px}}@media(max-width:480px){.pool{grid-template-columns:1fr 1fr}.ghead{gap:8px}.gtitle{font-size:15px}.gamount{font-size:15px}.bottomInner{grid-template-columns:1fr 1.5fr}.btn{font-size:13px}}
 </style></head><body><div class="wrap">
-<div class="top"><div><div class="eyebrow">Document matching</div><h1>จัดชุดเอกสาร</h1><div class="sub">AI จับคู่สลิป ใบเสร็จ และหลักฐานให้ก่อน คุณแก้เฉพาะรูปที่ยังไม่แน่ใจ</div></div><div class="stats" id="stats"></div></div>
-<div class="layout"><main class="panel"><h2>รายการที่ AI แยกได้</h2><div class="hint">ตรวจยอดและเอกสารของแต่ละรายการก่อนบันทึก</div><div id="groups"></div><div style="height:18px"></div><h2>รูปที่ยังไม่ได้จัด</h2><div class="hint">เลือกรายการปลายทาง หรือสร้างเป็นรายการใหม่</div><div id="pool"></div></main>
-<aside class="actions"><div class="summary"><div class="big" id="sumGroups">—</div><div class="small" id="sumText">กำลังโหลด</div></div><div class="panel"><button class="btn" id="saveBtn" onclick="commit(false)">บันทึกทั้งหมด</button><button class="btn secondary" onclick="reload()">โหลดข้อมูลใหม่</button><button class="btn secondary danger" onclick="cancelSession()">ยกเลิกชุดนี้</button><div class="note">รูปที่เลือก “ไม่ใช้” จะไม่ถูกบันทึก แต่ไฟล์ต้นฉบับยังอยู่ใน Google Drive</div></div></aside></div></div>
-<div class="toast" id="toast"></div><div class="overlay" id="overlay"><div class="done"><h2 id="doneTitle">กำลังบันทึก</h2><p id="doneText" class="sub">กรุณารอสักครู่</p><button class="btn" onclick="window.close();history.back()">กลับไป LINE</button></div></div>
+<div class="hero"><div class="eyebrow">ตรวจชุดเอกสาร</div><div class="total"><span class="currency">฿</span><span id="sumTotal">—</span></div><div class="sub" id="sumVat">กำลังโหลด</div><div class="sub" id="sumCount"></div></div>
+<div class="sectionTitle">รายการ</div><div class="list" id="groups"></div>
+<div class="poolWrap"><div class="sectionTitle">รูปที่ยังไม่ได้จัด</div><div class="pool" id="pool"></div></div>
+<div class="minor"><button class="linkBtn" onclick="reload()">โหลดข้อมูลใหม่</button><button class="linkBtn" style="color:#b42318" onclick="cancelSession()">ยกเลิกชุดนี้</button></div></div>
+<div class="bottom"><div class="bottomInner"><button class="btn" onclick="addBlank()">+ เปล่า</button><button class="btn primary" id="saveBtn" onclick="commit(false)">ยืนยันบันทึก</button></div></div>
+<div class="toast" id="toast"></div><div class="overlay" id="overlay"><div class="done"><h2 id="doneTitle">กำลังบันทึก</h2><p id="doneText" class="sub">กรุณารอสักครู่</p><button class="btn primary" onclick="window.close();history.back()">กลับไป LINE</button></div></div>
 <script>
-const SID=${JSON.stringify(sid)}, KEY=${JSON.stringify(token)}, API=${JSON.stringify(api)};let D=null;
+const SID=${JSON.stringify(sid)},KEY=${JSON.stringify(token)},API=${JSON.stringify(api)};let D=null;
 const q=(s)=>document.querySelector(s);const esc=(v)=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 function toast(t){const e=q('#toast');e.textContent=t;e.classList.add('on');setTimeout(()=>e.classList.remove('on'),1800)}
 async function api(path,body){const r=await fetch(API+path+'?s='+encodeURIComponent(SID)+'&k='+encodeURIComponent(KEY),{method:body===undefined?'GET':'POST',headers:{'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const j=await r.json().catch(()=>({error:'ระบบตอบกลับไม่ถูกต้อง'}));if(!r.ok){const e=new Error(j.error||'เกิดข้อผิดพลาด');e.data=j;throw e}return j}
-async function reload(){try{D=await api('/state');render()}catch(e){toast(e.message)}}
 function roleOptions(cur){return (D.roles||[]).map(r=>'<option value="'+r.value+'"'+(r.value===cur?' selected':'')+'>'+esc(r.label)+'</option>').join('')}
 function groupOptions(cur){let h='<option value="unassigned">ยังไม่จัด</option><option value="new">สร้างรายการใหม่</option>';for(const g of D.groups)h+='<option value="'+g.id+'"'+(g.id===cur?' selected':'')+'>รายการ '+g.number+' · ฿'+Number(g.amount||0).toLocaleString('th-TH')+'</option>';h+='<option value="ignore">ไม่ใช้รูปนี้</option>';return h}
-function render(){q('#stats').innerHTML='<span class="pill">'+D.counts.images+' รูป</span><span class="pill">'+D.counts.groups+' รายการ</span><span class="pill">'+D.counts.unassigned+' ยังไม่จัด</span>';q('#sumGroups').textContent=D.counts.groups+' รายการ';q('#sumText').textContent='พร้อม '+D.counts.ready+' · คำเตือน '+D.counts.warnings+' · ยังไม่จัด '+D.counts.unassigned;q('#saveBtn').disabled=D.status==='saving'||D.status==='saving_docs';renderGroups();renderPool();if(D.status==='done'){showDone('บันทึกสำเร็จ',D.saved.length+' รายการถูกส่งเข้ารอบเบิกแล้ว')}else if(D.status==='saving_docs'){showDone('บันทึกรายการแล้ว','ระบบกำลังสร้าง PDF อัตโนมัติ สามารถกลับไป LINE ได้เลย')}}
-function renderGroups(){const root=q('#groups');if(!D.groups.length){root.innerHTML='<div class="empty">ยังไม่พบรายการ ส่งรูปเพิ่มหรือจัดรูปจากกองด้านล่าง</div>';return}root.innerHTML=D.groups.map(g=>'<section class="group"><div class="ghead"><div class="gtitle">รายการ '+g.number+' · ฿'+Number(g.amount||0).toLocaleString('th-TH',{minimumFractionDigits:2})+'</div><div class="warning '+(!g.warning?'ready':'')+'">'+esc(g.warning||'เอกสารพร้อม')+'</div></div><div class="fields"><div class="field"><label>จำนวนเงิน</label><input type="number" step="0.01" value="'+esc(g.amount||'')+'" onchange="patchGroup(\\''+g.id+'\\',{amount:this.value})"></div><div class="field"><label>ผู้รับ / ร้านค้า</label><input value="'+esc(g.vendor||'')+'" onchange="patchGroup(\\''+g.id+'\\',{vendor:this.value})"></div><div class="field"><label>วันที่รายการ</label><input type="date" value="'+esc(g.date||'')+'" onchange="patchGroup(\\''+g.id+'\\',{date:this.value})"></div><div class="field"><label>หมวด</label><select onchange="patchGroup(\\''+g.id+'\\',{category:this.value})">'+D.categories.map(c=>'<option'+(c===g.category?' selected':'')+'>'+esc(c)+'</option>').join('')+'</select></div><div class="field wide"><label>รายละเอียด</label><input value="'+esc(g.note||'')+'" onchange="patchGroup(\\''+g.id+'\\',{note:this.value})"></div></div><div class="thumbs">'+g.images.map(im=>'<div class="thumb"><img src="'+esc(im.imgUrl)+'"><div class="t">'+esc(im.roleLabel)+'</div><select onchange="changeRole(\\''+im.id+'\\',this.value)">'+roleOptions(im.role)+'</select><select onchange="assign(\\''+im.id+'\\',this.value)">'+groupOptions(g.id)+'</select></div>').join('')+'</div></section>').join('')}
-function renderPool(){const root=q('#pool');const list=D.items.filter(x=>!x.groupId&&!x.ignored);if(!list.length){root.innerHTML='<div class="empty">ไม่มีรูปค้างจัด</div>';return}root.className='pool';root.innerHTML=list.map(x=>'<div class="imgcard"><img src="'+esc(x.imgUrl)+'"><div class="imgbody"><div class="roleRow"><select onchange="changeRole(\\''+x.id+'\\',this.value)">'+roleOptions(x.role)+'</select></div><div class="meta">'+(x.ocrFailed?'<b style="color:#B42318">AI อ่านไม่สำเร็จ — จัดรูปเอง</b><br>':'')+esc(x.vendor||x.matchHint||'ไม่พบชื่อ')+'<br>ยอด '+(Number(x.amount)>0?'฿'+Number(x.amount).toLocaleString('th-TH'):'ไม่พบ')+' · '+esc(x.date||'ไม่มีวันที่')+'</div><select onchange="assign(\\''+x.id+'\\',this.value)">'+groupOptions('unassigned')+'</select></div></div>').join('')}
-async function assign(itemId,target){try{D=await api('/assign',{itemId,target});render();toast('จัดรูปแล้ว')}catch(e){toast(e.message)}}async function changeRole(itemId,role){try{D=await api('/role',{itemId,role});render()}catch(e){toast(e.message)}}async function patchGroup(groupId,patch){try{D=await api('/group',{groupId,patch});render()}catch(e){toast(e.message)}}
+function titleOf(g){return g.category&&g.category!=='อื่น ๆ'?g.category:(g.vendor||'ยังไม่ระบุหมวด')}
+function vatOf(g){const r=Number(g.vatRate||0),a=Number(g.amount||0);return r>0?a*r/(100+r):0}
+async function reload(){try{D=await api('/state');render()}catch(e){toast(e.message)}}
+function render(){const total=D.groups.reduce((s,g)=>s+Number(g.amount||0),0);const vat=D.groups.reduce((s,g)=>s+vatOf(g),0);q('#sumTotal').textContent=total.toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2});q('#sumVat').textContent='VAT '+vat.toLocaleString('th-TH',{minimumFractionDigits:2})+' บาท · ยอดก่อน VAT '+Math.max(0,total-vat).toLocaleString('th-TH',{minimumFractionDigits:2})+' บาท';q('#sumCount').textContent=D.counts.groups+' รายการ · '+(D.counts.unassigned?'ยังไม่จัด '+D.counts.unassigned+' รูป':'จัดครบแล้ว');q('#saveBtn').disabled=D.status==='saving'||D.status==='saving_docs';renderGroups();renderPool();if(D.status==='done')showDone('บันทึกสำเร็จ',D.saved.length+' รายการถูกส่งเข้ารอบเบิกแล้ว');else if(D.status==='saving_docs')showDone('บันทึกรายการแล้ว','ระบบกำลังสร้าง PDF อัตโนมัติ สามารถกลับไป LINE ได้เลย')}
+function renderGroups(){const root=q('#groups');if(!D.groups.length){root.innerHTML='<div class="empty">ยังไม่มีรายการ กด “+ เปล่า” หรือจัดรูปด้านล่างเข้ารายการ</div>';return}root.innerHTML=D.groups.map(g=>'<section class="group"><div class="ghead"><div><div class="gtitle">'+esc(titleOf(g))+'</div><div class="gdesc">'+esc(g.note||g.vendor||'ยังไม่มีรายละเอียด')+' · '+g.images.length+' รูป</div></div><div><div class="gamount">฿'+Number(g.amount||0).toLocaleString('th-TH',{minimumFractionDigits:2})+'</div><div class="warn '+(!g.warning?'ready':'')+'">'+esc(g.warning||'พร้อมบันทึก')+'</div></div></div><div class="fields"><div class="field full"><label>ชื่อรายการ</label><input value="'+esc(g.note||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{note:this.value})"></div><div class="field"><label>ยอด (บาท)</label><input type="number" step="0.01" value="'+esc(g.amount||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{amount:this.value})"></div><div class="field"><label>หมวด</label><select onchange="patchGroup(\\\''+g.id+'\\\',{category:this.value})">'+D.categories.map(c=>'<option'+(c===g.category?' selected':'')+'>'+esc(c)+'</option>').join('')+'</select></div><div class="field"><label>ผู้รับ / ร้านค้า</label><input value="'+esc(g.vendor||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{vendor:this.value})"></div><div class="field"><label>วันที่รายการ</label><input type="date" value="'+esc(g.date||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{date:this.value})"></div></div><div class="thumbs">'+g.images.map(im=>'<div class="thumb"><img src="'+esc(im.imgUrl)+'"><select onchange="changeRole(\\\''+im.id+'\\\',this.value)">'+roleOptions(im.role)+'</select><select onchange="assign(\\\''+im.id+'\\\',this.value)">'+groupOptions(g.id)+'</select></div>').join('')+'</div><button class="delete" onclick="deleteGroup(\\\''+g.id+'\\\')">ลบรายการ</button></section>').join('')}
+function renderPool(){const root=q('#pool');const list=D.items.filter(x=>!x.groupId&&!x.ignored);if(!list.length){root.innerHTML='<div class="empty" style="grid-column:1/-1">ไม่มีรูปค้างจัด 🎉</div>';return}root.innerHTML=list.map(x=>'<div class="imgcard"><img src="'+esc(x.imgUrl)+'"><div class="imgbody"><select onchange="changeRole(\\\''+x.id+'\\\',this.value)">'+roleOptions(x.role)+'</select><div class="meta">'+(x.ocrFailed?'<b style="color:#b42318">AI อ่านไม่สำเร็จ</b><br>':'')+esc(x.vendor||x.matchHint||'ไม่พบชื่อ')+'<br>ยอด '+(Number(x.amount)>0?'฿'+Number(x.amount).toLocaleString('th-TH'):'ไม่พบ')+'</div><select onchange="assign(\\\''+x.id+'\\\',this.value)">'+groupOptions('unassigned')+'</select></div></div>').join('')}
+async function assign(itemId,target){try{D=await api('/assign',{itemId,target});render();toast('จัดรูปแล้ว')}catch(e){toast(e.message)}}
+async function changeRole(itemId,role){try{D=await api('/role',{itemId,role});render()}catch(e){toast(e.message)}}
+async function patchGroup(groupId,patch){try{D=await api('/group',{groupId,patch});render()}catch(e){toast(e.message)}}
+async function addBlank(){try{D=await api('/new-group',{});render();window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});toast('เพิ่มรายการเปล่าแล้ว')}catch(e){toast(e.message)}}
+async function deleteGroup(groupId){if(!confirm('ลบรายการนี้และนำรูปกลับไปกองรูปค้างจัด?'))return;try{D=await api('/delete-group',{groupId});render()}catch(e){toast(e.message)}}
 async function commit(force){try{q('#saveBtn').disabled=true;const r=await api('/commit',{force});D={...D,...r};showDone('บันทึกรายการแล้ว',r.message||'กำลังสร้างเอกสารอัตโนมัติ');setTimeout(reload,1800)}catch(e){q('#saveBtn').disabled=false;if(e.data&&e.data.code==='duplicates'){if(confirm('พบรายการที่อาจเบิกซ้ำ '+e.data.duplicates.length+' รายการ\\nต้องการบันทึกต่อหรือไม่?'))return commit(true)}if(e.data&&e.data.code==='profile_required'&&e.data.profileUrl){if(confirm(e.message+'\\nเปิดหน้ากรอกข้อมูลตอนนี้หรือไม่?'))location.href=e.data.profileUrl;return}alert(e.message)}}
-async function cancelSession(){if(!confirm('ยกเลิกชุดเอกสารนี้?'))return;try{await api('/cancel',{});showDone('ยกเลิกแล้ว','รูปต้นฉบับยังอยู่ใน Google Drive')}catch(e){toast(e.message)}}function showDone(t,x){q('#doneTitle').textContent=t;q('#doneText').textContent=x;q('#overlay').classList.add('on')}
+async function cancelSession(){if(!confirm('ยกเลิกชุดเอกสารนี้?'))return;try{await api('/cancel',{});showDone('ยกเลิกแล้ว','รูปต้นฉบับยังอยู่ใน Google Drive')}catch(e){toast(e.message)}}
+function showDone(t,x){q('#doneTitle').textContent=t;q('#doneText').textContent=x;q('#overlay').classList.add('on')}
 reload();setInterval(()=>{if(D&&['saving','saving_docs'].includes(D.status))reload()},3000);
 </script></body></html>`;
 }
+
