@@ -1,4 +1,4 @@
-// src/ocr.js — v3.0 (Gemini)
+// src/ocr.js — v3.1 (Gemini, strict VAT)
 // อ่านบิล/ใบเสร็จ/สลิปโอนเงิน แล้วคืนเป็น field เหมือน v2.x เป๊ะ
 //
 // เครื่องยนต์ OCR = Gemini 2.0 Flash (ถูกสุด + อ่านไทยแม่นพอ ๆ กับ Sonnet)
@@ -91,8 +91,9 @@ A clean screenshot with no surroundings gives no signal — judge from the text 
 - matchHint: string
 - type     : "รายจ่าย" (expense) or "รายรับ" (income — money received, or a receipt we issued to a customer)
 - note     : short Thai summary of what was paid for, max 60 chars, don't repeat the amount
-- vat      : true if VAT/ภาษีมูลค่าเพิ่ม appears as a separate line, or a 13-digit tax ID is present
+- vat      : true ONLY when VAT/ภาษีมูลค่าเพิ่ม is explicitly shown as a separate amount/rate on the document. A tax ID alone is NOT enough.
 - vatRate  : percent number (usually 7). If vat is false, use 0
+- vatAmount: explicit VAT amount printed on the document. If absent, use 0
 - whtRate  : withholding tax percent if stated on the document, else 0
 - flag     : ONE short Thai sentence (max 70 chars) warning the bookkeeper, or "" if nothing is odd.
              Raise it only for something a human should actually look at:
@@ -331,8 +332,9 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
     referenceNo: String(data.referenceNo || "").trim().slice(0, 100),
     matchHint:   String(data.matchHint || "").trim().slice(0, 80),
     type:     data.type === "รายรับ" ? "รายรับ" : "รายจ่าย",
-    vat:      data.vat === true,
-    vatRate:  Number(data.vatRate) || 0,
+    vat:      data.vat === true && (Number(data.vatAmount) > 0 || Number(data.vatRate) > 0),
+    vatRate:  data.vat === true ? (Number(data.vatRate) || 0) : 0,
+    vatAmount:data.vat === true ? (Number(data.vatAmount) || 0) : 0,
     whtRate:  Number(data.whtRate) || 0,
 
     flag,
