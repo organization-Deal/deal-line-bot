@@ -14,7 +14,7 @@ import { push, textMsg } from "./line.js";
 
 const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
 export const TAB_BATCHES = "รอบเบิก";
-export const BATCH_VERSION = "REIMBURSEMENT_BATCH_V1_20260802";
+export const BATCH_VERSION = "REIMBURSEMENT_BATCH_V2_20260802";
 
 export const BATCH_SCHEMA = [
   { col: "A", key: "createdAt", header: "สร้างเมื่อ" },
@@ -124,9 +124,10 @@ function payerName(rec = {}) {
 }
 
 function isEligible(rec) {
-  if (!rec || rec.status === STATUS_DELETED) return false;
+  if (!rec || !String(rec.id || "").trim() || rec.status === STATUS_DELETED) return false;
   if (rec.type === "รายรับ" || rec.type === "income") return false;
   if (rec.paid) return false;
+  if (!(Number(rec.amount) > 0)) return false;
   // ป้องกันข้อมูลเก่าก่อนติดตั้งฟีเจอร์ถูกดึงเข้ารอบแบบไม่ตั้งใจ
   // รายการใหม่จากโค้ดชุดนี้จะมี batchType / batchStatus ตั้งแต่ตอนบันทึก
   const enrolled = String(rec.batchType || rec.batchStatus || rec.urgentRequestedAt || "").trim();
@@ -154,6 +155,21 @@ function payerProfile(settings = {}, key, name) {
     (key && norm(m.lineUserId || m.payerId) === norm(key)) ||
     (name && norm(m.name) === norm(name))
   ) || { name };
+}
+
+function missingProfileFields(profile = {}) {
+  const missing = [];
+  if (!String(profile.name || "").trim()) missing.push("ชื่อผู้เบิก");
+  if (!String(profile.bank || "").trim()) missing.push("ธนาคาร");
+  if (!String(profile.accountNo || "").trim()) missing.push("เลขบัญชี");
+  if (!String(profile.accountName || "").trim()) missing.push("ชื่อบัญชี");
+  return missing;
+}
+
+function maskAccount(value) {
+  const raw = String(value || "").replace(/\s+/g, "");
+  if (!raw) return "";
+  return raw.length <= 4 ? raw : `••••${raw.slice(-4)}`;
 }
 
 function batchRowToObject(values, row) {
@@ -280,7 +296,10 @@ async function nextRunNo(env, sheetId, token, type = "ปกติ") {
 
 function groupItems(items) {
   const map = new Map();
-  for (const item of items) {
+  const ordered = [...items].sort((a, b) =>
+    String(a.createdAt || a.dateISO || "").localeCompare(String(b.createdAt || b.dateISO || ""))
+  );
+  for (const item of ordered) {
     const key = payerKey(item);
     if (!map.has(key)) map.set(key, { key, name: payerName(item), items: [] });
     map.get(key).items.push(item);
@@ -306,13 +325,27 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
   const runNo = options.runNo || await nextRunNo(env, sheetId, token, type);
   const groups = groupItems(eligible);
   const created = [];
+  const blocked = [];
   let totalAll = 0;
   let itemCount = 0;
+  let peopleCreated = 0;
 
   for (let g = 0; g < groups.length; g++) {
     const group = groups[g];
-    const chunks = splitEvery(group.items, maxItems);
     const profile = payerProfile(settings, group.key, group.name);
+    const missing = missingProfileFields(profile);
+    if (missing.length) {
+      blocked.push({
+        payerKey: group.key,
+        payerName: group.name,
+        itemCount: group.items.length,
+        total: group.items.reduce((sum, r) => sum + (Number(r.amount) || 0), 0),
+        missing,
+      });
+      continue;
+    }
+    peopleCreated += 1;
+    const chunks = splitEvery(group.items, maxItems);
 
     for (let p = 0; p < chunks.length; p++) {
       const items = chunks[p];
@@ -383,8 +416,21 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
     }
   }
 
-  console.log(`[batch] tenant=${tenant} run=${runNo} type=${type} docs=${created.length} items=${itemCount} total=${totalAll}`);
-  return { ok: true, runNo, batches: created, itemCount, total: totalAll, people: groups.length };
+  console.log(`[batch] tenant=${tenant} run=${runNo} type=${type} docs=${created.length} items=${itemCount} total=${totalAll} blocked=${blocked.length}`);
+  if (!created.length && blocked.length) {
+    return {
+      ok: false,
+      reason: "missing_payer_profile",
+      message: "ยังสร้างรอบไม่ได้ เพราะข้อมูลบัญชีผู้เบิกไม่ครบ",
+      runNo: "",
+      batches: [],
+      itemCount: 0,
+      total: 0,
+      people: 0,
+      blocked,
+    };
+  }
+  return { ok: true, runNo: created.length ? runNo : "", batches: created, itemCount, total: totalAll, people: peopleCreated, blocked };
 }
 
 async function acquireBatchLock(env, tenant) {
@@ -441,7 +487,11 @@ export async function requestUrgentBatch(env, tenant, sheetId, token, expenseIds
     });
   } catch (error) {
     for (const r of records) {
-      await updateExpenseById(env, sheetId, r.id, { batchStatus: "รอเข้ารอบ" }, token).catch(() => {});
+      await updateExpenseById(env, sheetId, r.id, {
+        batchType: "ปกติ",
+        batchStatus: "รอเข้ารอบ",
+        urgentRequestedAt: "",
+      }, token).catch(() => {});
     }
     throw error;
   }
@@ -454,20 +504,36 @@ export async function getBatchDashboard(env, sheetId, token = null) {
     readSettings(env, sheetId, token),
   ]);
   const pending = expenses.filter(isEligible);
-  const groups = groupItems(pending).map((g) => ({
-    payerKey: g.key,
-    payerName: g.name,
-    itemCount: g.items.length,
-    total: g.items.reduce((sum, r) => sum + (Number(r.amount) || 0), 0),
-    urgentCount: g.items.filter((r) => r.batchType === "ด่วน" || r.batchStatus === "ขอเบิกด่วน").length,
-    oldestCreatedAt: g.items.map((r) => r.createdAt).filter(Boolean).sort()[0] || "",
-    items: g.items.map((r) => ({
-      id: r.id, dateISO: r.dateISO, createdAt: r.createdAt, vendor: r.vendor,
-      note: r.note, amount: r.amount, category: r.category,
-      batchType: r.batchType || "ปกติ", batchStatus: r.batchStatus || "รอเข้ารอบ",
-      imageUrl: r.imageUrl, claimPdfUrl: r.claimPdfUrl, receiptPdfUrl: r.receiptPdfUrl,
-    })),
-  }));
+  const groups = groupItems(pending).map((g) => {
+    const profile = payerProfile(settings, g.key, g.name);
+    const missing = missingProfileFields(profile);
+    return {
+      payerKey: g.key,
+      payerName: g.name,
+      itemCount: g.items.length,
+      total: g.items.reduce((sum, r) => sum + (Number(r.amount) || 0), 0),
+      urgentCount: g.items.filter((r) => r.batchType === "ด่วน" || r.batchStatus === "ขอเบิกด่วน").length,
+      oldestCreatedAt: g.items.map((r) => r.createdAt).filter(Boolean).sort()[0] || "",
+      profileComplete: missing.length === 0,
+      missingProfileFields: missing,
+      bank: profile.bank || "",
+      accountMasked: maskAccount(profile.accountNo),
+      items: g.items.map((r) => ({
+        id: r.id, dateISO: r.dateISO, createdAt: r.createdAt, vendor: r.vendor,
+        note: r.note, amount: r.amount, category: r.category,
+        batchType: r.batchType || "ปกติ", batchStatus: r.batchStatus || "รอเข้ารอบ",
+        imageUrl: r.imageUrl, claimPdfUrl: r.claimPdfUrl, receiptPdfUrl: r.receiptPdfUrl,
+      })),
+    };
+  });
+  const summarize = (status) => {
+    const rows = batches.filter((b) => b.status === status);
+    return {
+      count: rows.length,
+      itemCount: rows.reduce((sum, b) => sum + (Number(b.itemCount) || 0), 0),
+      total: rows.reduce((sum, b) => sum + (Number(b.total) || 0), 0),
+    };
+  };
   return {
     ok: true,
     version: BATCH_VERSION,
@@ -487,6 +553,12 @@ export async function getBatchDashboard(env, sheetId, token = null) {
       groups,
     },
     batches,
+    summary: {
+      awaitingApproval: summarize("รออนุมัติ"),
+      approved: summarize("อนุมัติแล้ว"),
+      paid: summarize("จ่ายแล้ว"),
+      canceled: summarize("ยกเลิก"),
+    },
   };
 }
 
@@ -528,7 +600,11 @@ function dueNow(settings = {}, now = bangkokParts()) {
   const weekday = Number(settings.batch_weekday ?? 1);
   const hour = Number(settings.batch_hour ?? 11);
   const minute = Number(settings.batch_minute ?? 0);
-  return enabled && now.weekday === weekday && now.hour === hour && now.minute === minute;
+  const current = now.hour * 60 + now.minute;
+  const target = hour * 60 + minute;
+  // Cron อาจช้ากว่าเวลาที่ตั้งไว้ได้ จึงให้รันครั้งแรกหลังเวลานัดในวันนั้น
+  // แทนการบังคับว่าต้องตรงนาทีเป๊ะ ซึ่งทำให้หลุดรอบได้ง่าย
+  return enabled && now.weekday === weekday && current >= target;
 }
 
 async function dashboardBatchUrl(env, tenant) {
@@ -558,14 +634,21 @@ export async function runScheduledReimbursementBatches(env) {
     }
     if (!dueNow(settings, now)) continue;
 
-    const slot = `${now.isoDate}-${String(now.hour).padStart(2, "0")}${String(now.minute).padStart(2, "0")}`;
-    const runKey = `batch:scheduled:${tenant}:${slot}`;
+    // หนึ่งธุรกิจรันได้สูงสุด 1 ครั้งต่อวันปิดรอบ แม้ Cron จะเรียกทุกนาที
+    const runKey = `batch:scheduled:${tenant}:${now.isoDate}`;
     if (await env.KV.get(runKey)) continue;
-    await env.KV.put(runKey, "running", { expirationTtl: 14 * 86400 });
+    await env.KV.put(runKey, "running", { expirationTtl: 21 * 86400 });
 
     try {
       const out = await createReimbursementBatches(env, tenant, sheetId, token, { type: "ปกติ", settings });
-      await env.KV.put(runKey, JSON.stringify({ ok: true, runNo: out.runNo, itemCount: out.itemCount }), { expirationTtl: 14 * 86400 });
+      if (!out.ok) {
+        await env.KV.put(runKey, JSON.stringify({ ok: false, reason: out.reason, blocked: out.blocked || [] }), { expirationTtl: 21 * 86400 });
+        const details = (out.blocked || []).slice(0, 3).map((x) => `• ${x.payerName}: ${(x.missing || []).join(", ")}`).join("\n");
+        await push(env, tenant, textMsg(`ยังปิดรอบเบิกอัตโนมัติไม่ได้ ⚠️\nข้อมูลบัญชีผู้เบิกไม่ครบ\n${details || out.message || "เปิดหน้า ทีมของฉัน เพื่อตรวจข้อมูล"}`)).catch(() => {});
+        results.push({ tenant, ...out });
+        continue;
+      }
+      await env.KV.put(runKey, JSON.stringify({ ok: true, runNo: out.runNo, itemCount: out.itemCount }), { expirationTtl: 21 * 86400 });
       results.push({ tenant, ...out });
       if (out.itemCount > 0) {
         const url = await dashboardBatchUrl(env, tenant);
@@ -574,6 +657,7 @@ export async function runScheduledReimbursementBatches(env) {
           `รอบ ${out.runNo}`,
           `${out.people} คน · ${out.itemCount} รายการ`,
           `รวม ฿${Number(out.total || 0).toLocaleString("th-TH", { minimumFractionDigits: 2 })}`,
+          out.blocked?.length ? `ยังไม่รวม ${out.blocked.length} คน เพราะข้อมูลบัญชีไม่ครบ` : "",
           url ? `\nตรวจและอนุมัติรอบเบิก:\n${url}` : "",
         ].filter(Boolean).join("\n");
         await push(env, tenant, textMsg(line)).catch((e) => console.warn("batch notify", tenant, e.message));
