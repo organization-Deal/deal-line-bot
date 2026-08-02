@@ -127,10 +127,15 @@ export function fileIdFromUrl(url) {
 
 /** แตกช่องแนบไฟล์ (คั่นด้วย ,) เป็น array */
 function splitUrls(v) {
+  if (Array.isArray(v)) return v.map((x) => String(x || "").trim()).filter(Boolean);
   return String(v || "")
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+function joinUrls(v) {
+  return [...new Set(splitUrls(v))].join(", ");
 }
 
 /** ลิงก์หลักฐานทั้งหมดของแถวเดียว รวมคอลัมน์ G ด้วย */
@@ -239,7 +244,8 @@ export async function appendExpense(env, sheetId, r, meta = {}, token = null) {
   const d = normalizeDate(r.date);
 
   // รูปที่ส่งมาพร้อมบิล → ลงช่องตามประเภทเอกสารที่ OCR อ่านได้
-  const link = meta.driveLink || "";
+  // multi-document flow ส่งไฟล์หลายใบผ่าน r.attReceipt/r.attTax/r.attSlip/r.attOther ได้โดยตรง
+  const link = meta.driveLink || r.imageUrl || "";
   const byDoc = {
     "ใบเสร็จรับเงิน": "attReceipt",
     "ใบกำกับภาษี":   "attTax",
@@ -269,10 +275,10 @@ export async function appendExpense(env, sheetId, r, meta = {}, token = null) {
     vat:         r.vat ? "TRUE" : "",
     whtRate:     r.whtRate || "",
     slipNo:      "",
-    attReceipt:  "",
-    attTax:      "",
-    attSlip:     "",
-    attOther:    "",
+    attReceipt:  joinUrls(r.attReceipt),
+    attTax:      joinUrls(r.attTax),
+    attSlip:     joinUrls(r.attSlip),
+    attOther:    joinUrls(r.attOther),
     claimPdfUrl: "",
     receiptPdfUrl: "",
     imageHash:       r.imageHash || "",
@@ -288,7 +294,11 @@ export async function appendExpense(env, sheetId, r, meta = {}, token = null) {
     batchCreatedAt:      r.batchCreatedAt || "",
     urgentRequestedAt:   r.urgentRequestedAt || "",
   };
-  if (slot) full[slot] = link;
+  if (slot && link) full[slot] = joinUrls([full[slot], link]);
+  if (!full.imageUrl) {
+    full.imageUrl = splitUrls(full.attReceipt)[0] || splitUrls(full.attTax)[0] ||
+      splitUrls(full.attSlip)[0] || splitUrls(full.attOther)[0] || "";
+  }
 
   const values = SCHEMA.map((s) => full[s.key] ?? "");
   const url = rangeUrl(sheetId, tab, `A:${LAST_COL}`,
@@ -376,15 +386,14 @@ function dayDiff(a, b) {
  *   - ยอด + วัน ตรงกัน และผู้โอน/รายละเอียดคล้ายกัน
  *   - ยอด + ผู้รับ ตรงกันภายใน 7 วัน
  */
-export async function findDuplicateExpenses(env, sheetId, candidate = {}, token = null, opts = {}) {
-  const all = await readExpenses(env, sheetId, token);
+export function findDuplicateExpensesInRecords(all = [], candidate = {}, opts = {}) {
   const excludeId = String(opts.excludeId || candidate.id || "").trim();
   const amount = Number(candidate.amount) || 0;
   const iso = dateIsoOf(candidate);
   const vendor = normalizeIdentity(candidate.vendor);
   const transferor = normalizeIdentity(candidate.transferor);
   const note = normalizeText(candidate.note);
-  const imageHash = String(candidate.imageHash || "").trim();
+  const imageHashes = new Set(splitUrls(candidate.imageHash));
 
   const matches = [];
 
@@ -399,7 +408,8 @@ export async function findDuplicateExpenses(env, sheetId, candidate = {}, token 
     const sameVendor = !!vendor && vendor === normalizeIdentity(rec.vendor);
     const sameTransferor = !!transferor && transferor === normalizeIdentity(rec.transferor);
     const sameNote = !!note && note === normalizeText(rec.note);
-    const sameImage = !!imageHash && imageHash === String(rec.imageHash || "").trim();
+    const recHashes = splitUrls(rec.imageHash);
+    const sameImage = imageHashes.size > 0 && recHashes.some((h) => imageHashes.has(h));
 
     let score = 0;
     let reason = "";
@@ -449,6 +459,12 @@ export async function findDuplicateExpenses(env, sheetId, candidate = {}, token 
     level: top.length ? (high ? "high" : "medium") : "none",
     matches: top,
   };
+}
+
+
+export async function findDuplicateExpenses(env, sheetId, candidate = {}, token = null, opts = {}) {
+  const all = await readExpenses(env, sheetId, token);
+  return findDuplicateExpensesInRecords(all, candidate, opts);
 }
 
 export async function findRowById(env, sheetId, id, token = null) {

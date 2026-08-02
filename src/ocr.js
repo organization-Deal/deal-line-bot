@@ -65,13 +65,30 @@ If the photo shows surroundings beyond the paper, use them:
   office desk, stationery, printer             → วัสดุ & อุปกรณ์สำนักงาน
 A clean screenshot with no surroundings gives no signal — judge from the text only.
 
+## DOCUMENT ROLE — used to match many images into many expense items
+- role: pick exactly one:
+  • "RECEIPT" = receipt, cash bill, invoice, or ordinary purchase document
+  • "TAX_INVOICE" = full/abbreviated tax invoice with VAT/tax ID
+  • "PAYSLIP" = bank transfer slip, PromptPay slip, card/payment confirmation
+  • "PROOF" = evidence of use/delivery/service, photo of item/site/person, but not a receipt or payment slip
+  • "OTHER" = unrelated or impossible to classify
+- taxId: seller tax ID, digits only, else ""
+- invoiceNo: receipt/invoice/document number, else ""
+- referenceNo: bank transaction/reference number, order number, booking number, or other identifier useful for matching, else ""
+- matchHint: short visible entity/place/project/name useful for pairing this image with another image, max 50 chars, else ""
+
 ## FIELDS
-- amount   : number
+- amount   : number. For PROOF/OTHER with no monetary total, use 0
 - vendor   : string — ผู้รับ/ปลายทาง (keep Thai text as printed)
 - transferor : string — ผู้โอน/ต้นทาง; only for transfer slips, else ""
 - date     : "YYYY-MM-DD" Gregorian
 - category : pick exactly one from ${JSON.stringify(CATEGORIES)}
 - docType  : pick exactly one from ${JSON.stringify(DOC_TYPES)}
+- role     : "RECEIPT" | "TAX_INVOICE" | "PAYSLIP" | "PROOF" | "OTHER"
+- taxId    : string
+- invoiceNo: string
+- referenceNo: string
+- matchHint: string
 - type     : "รายจ่าย" (expense) or "รายรับ" (income — money received, or a receipt we issued to a customer)
 - note     : short Thai summary of what was paid for, max 60 chars, don't repeat the amount
 - vat      : true if VAT/ภาษีมูลค่าเพิ่ม appears as a separate line, or a 13-digit tax ID is present
@@ -201,6 +218,14 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
 
   const docType = DOC_TYPES.includes(data.docType) ? data.docType : "";
   const isSlip = docType === "สลิปโอนเงิน";
+  const allowedRoles = new Set(["RECEIPT", "TAX_INVOICE", "PAYSLIP", "PROOF", "OTHER"]);
+  let role = allowedRoles.has(data.role) ? data.role : "";
+  if (!role) {
+    if (isSlip) role = "PAYSLIP";
+    else if (docType === "ใบกำกับภาษี") role = "TAX_INVOICE";
+    else if (["ใบเสร็จรับเงิน", "บิลเงินสด", "ใบแจ้งหนี้"].includes(docType)) role = "RECEIPT";
+    else role = amount > 0 ? "RECEIPT" : "OTHER";
+  }
 
   const amountConf = amount > 0 ? clamp01(c.amount, 0.9) : 0.2;
 
@@ -221,6 +246,11 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
     note:     (data.note || "").trim(),
 
     docType,
+    role,
+    taxId:       String(data.taxId || "").replace(/\D/g, "").slice(0, 13),
+    invoiceNo:   String(data.invoiceNo || "").trim().slice(0, 80),
+    referenceNo: String(data.referenceNo || "").trim().slice(0, 100),
+    matchHint:   String(data.matchHint || "").trim().slice(0, 80),
     type:     data.type === "รายรับ" ? "รายรับ" : "รายจ่าย",
     vat:      data.vat === true,
     vatRate:  Number(data.vatRate) || 0,
