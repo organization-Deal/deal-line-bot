@@ -173,6 +173,85 @@ async function askGemini(env, imageBase64, mediaType) {
   return text;
 }
 
+async function askClaude(env, imageBase64, mediaType) {
+  if (!env.CLAUDE_KEY) throw new Error("CLAUDE_KEY ยังไม่ได้ตั้ง");
+
+  const model = env.CLAUDE_MODEL || "claude-sonnet-4-5";
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": env.CLAUDE_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 1400,
+      temperature: 0,
+      messages: [{
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: {
+              type: "base64",
+              media_type: mediaType,
+              data: imageBase64,
+            },
+          },
+          { type: "text", text: PROMPT },
+        ],
+      }],
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error("Claude OCR error: " + res.status + " " + body.slice(0, 300));
+  }
+
+  const json = await res.json();
+  const text = (json.content || [])
+    .filter((x) => x && x.type === "text")
+    .map((x) => x.text || "")
+    .join("\n")
+    .trim();
+
+  if (!text) throw new Error("Claude: empty response " + JSON.stringify(json).slice(0, 300));
+  console.log(`[ocr] engine=claude model=${model}`);
+  return text;
+}
+
+async function askVision(env, imageBase64, mediaType) {
+  const errors = [];
+
+  // ใช้ Gemini ก่อนเพื่อลดต้นทุน ถ้าพังให้ fallback ไป Claude ที่ระบบเดิมใช้อยู่
+  if (env.GEMINI_KEY) {
+    try {
+      const text = await askVision(env, imageBase64, mediaType);
+      console.log("[ocr] engine=gemini");
+      return text;
+    } catch (e) {
+      errors.push(String(e?.message || e));
+      console.warn("[ocr] Gemini failed, fallback Claude:", e?.message || e);
+    }
+  }
+
+  if (env.CLAUDE_KEY) {
+    try {
+      return await askClaude(env, imageBase64, mediaType);
+    } catch (e) {
+      errors.push(String(e?.message || e));
+      console.warn("[ocr] Claude failed:", e?.message || e);
+    }
+  }
+
+  if (!env.GEMINI_KEY && !env.CLAUDE_KEY) {
+    throw new Error("OCR key missing: ต้องมี GEMINI_KEY หรือ CLAUDE_KEY อย่างน้อยหนึ่งตัว");
+  }
+  throw new Error("OCR engines failed: " + errors.join(" | ").slice(0, 700));
+}
+
 function cleanDate(raw) {
   const today = () => new Date().toISOString().slice(0, 10);
   if (!raw) return today();
@@ -201,12 +280,12 @@ function clamp01(v, fallback = 0.8) {
 }
 
 export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
-  let text = await askGemini(env, imageBase64, mediaType);
+  let text = await askVision(env, imageBase64, mediaType);
   let data = parseJson(text);
 
   if (!data) {
     console.warn("OCR: JSON เพี้ยน ลองใหม่");
-    text = await askGemini(env, imageBase64, mediaType);
+    text = await askVision(env, imageBase64, mediaType);
     data = parseJson(text);
   }
   if (!data) throw new Error("OCR returned non-JSON: " + text.slice(0, 300));

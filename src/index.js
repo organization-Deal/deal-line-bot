@@ -793,16 +793,56 @@ async function handleImage(event, env, key, mode = "reply") {
     return respond(await renderSaved(env, key, sheet, out.record));
   }
 
-  // OCR, อัป Drive และสร้างลายนิ้วมือไฟล์ทำพร้อมกัน
-  const [driveLink, record, imageHash] = await Promise.all([
+  // อัป Drive และสร้างลายนิ้วมือทำพร้อมกัน ส่วน OCR แยกจับ error
+  // เพื่อให้รูปไม่หายจากชุดแม้ AI อ่านไม่สำเร็จ — ผู้ใช้ยังจัดรูปเองได้
+  const [driveLink, imageHash] = await Promise.all([
     drivePromise,
-    ocrReceipt(env, base64, mediaType),
     sha256Base64(base64),
   ]);
   if (!driveLink) throw new Error("Drive upload failed");
 
+  let record;
+  let ocrFailed = false;
+  let ocrError = "";
+  try {
+    record = await ocrReceipt(env, base64, mediaType);
+  } catch (e) {
+    ocrFailed = true;
+    ocrError = String(e?.message || e).slice(0, 500);
+    console.error(`[multi-ocr-failed] tenant=${key} messageId=${event.message.id || ""}`, e);
+    record = {
+      amount: 0,
+      vendor: "",
+      transferor: "",
+      date: "",
+      category: "อื่น ๆ",
+      note: "AI อ่านรูปไม่สำเร็จ — กรุณาจัดรูปและกรอกข้อมูลเอง",
+      docType: "อื่น ๆ",
+      role: "OTHER",
+      taxId: "",
+      invoiceNo: "",
+      referenceNo: "",
+      matchHint: "AI อ่านไม่สำเร็จ",
+      type: "รายจ่าย",
+      vat: false,
+      vatRate: 0,
+      whtRate: 0,
+      flag: "AI อ่านรูปไม่สำเร็จ กรุณาตรวจและจัดรูปด้วยตนเอง",
+      confidence: {
+        amount: 0,
+        vendor: 0,
+        transferor: 0,
+        date: 0,
+        category: 0,
+        note: 0,
+      },
+    };
+  }
+
   const item = {
     ...record,
+    ocrFailed,
+    ocrError,
     id: `img_${event.message.id || crypto.randomUUID().slice(0, 8)}`,
     lineMessageId: event.message.id || "",
     driveUrl: driveLink,
