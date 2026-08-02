@@ -26,9 +26,19 @@ crons = ["* * * * *"]
 binding = "KV"
 id = "19ef27ff24a044acb0bf6856ae733636"
 
+[[durable_objects.bindings]]
+name = "MULTI_SESSIONS"
+class_name = "MultiExpenseSession"
+
+[[migrations]]
+tag = "multi_documents_v1"
+new_sqlite_classes = ["MultiExpenseSession"]
+
+
 # --- secrets (ตั้งด้วย: npx wrangler secret put <NAME>) ---
 # LINE_CHANNEL_SECRET
 # LINE_ACCESS_TOKEN
 # CLAUDE_KEY
 # GOOGLE_SA_EMAIL
 # GOOGLE_SA_PRIVATE_KEY
+
