@@ -711,6 +711,45 @@ export class MultiExpenseSession {
 
   async fetch(request) {
     const url = new URL(request.url);
+
+    // ใช้ Durable Object ตัวเดิมเป็น coordinator สำหรับรอบเบิก
+    // เพื่อไม่ใช้ KV writes ซึ่ง Free plan มีโควตารายวันต่ำ
+    if (url.pathname === "/batch-coordinator/acquire" && request.method === "POST") {
+      const b = await parseBody(request);
+      const now = Date.now();
+      const ttlMs = Math.max(30_000, Math.min(10 * 60 * 1000, Number(b.ttlMs || 5 * 60 * 1000)));
+      const current = await this.ctx.storage.get("batchLock");
+      if (current?.expiresAt > now) return json({ ok: false, error: "มีการสร้างรอบกำลังทำงานอยู่ กรุณารอสักครู่" }, 409);
+      const token = crypto.randomUUID();
+      await this.ctx.storage.put("batchLock", { token, expiresAt: now + ttlMs });
+      return json({ ok: true, token });
+    }
+
+    if (url.pathname === "/batch-coordinator/release" && request.method === "POST") {
+      const b = await parseBody(request);
+      const current = await this.ctx.storage.get("batchLock");
+      if (current?.token === b.token) await this.ctx.storage.delete("batchLock");
+      return json({ ok: true });
+    }
+
+    if (url.pathname === "/batch-coordinator/claim-schedule" && request.method === "POST") {
+      const b = await parseBody(request);
+      const slot = String(b.slot || "");
+      if (!slot) return json({ ok: false, error: "missing schedule slot" }, 400);
+      const last = await this.ctx.storage.get("batchScheduleSlot");
+      if (last === slot) return json({ ok: true, claimed: false });
+      await this.ctx.storage.put("batchScheduleSlot", slot);
+      return json({ ok: true, claimed: true });
+    }
+
+    if (url.pathname === "/batch-coordinator/release-schedule" && request.method === "POST") {
+      const b = await parseBody(request);
+      const slot = String(b.slot || "");
+      const last = await this.ctx.storage.get("batchScheduleSlot");
+      if (!slot || last === slot) await this.ctx.storage.delete("batchScheduleSlot");
+      return json({ ok: true });
+    }
+
     let s = await this.load();
 
     if (url.pathname === "/touch") {

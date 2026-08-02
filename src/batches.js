@@ -14,7 +14,10 @@ import { push, textMsg } from "./line.js";
 
 const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
 export const TAB_BATCHES = "รอบเบิก";
-export const BATCH_VERSION = "REIMBURSEMENT_BATCH_V2_20260802";
+export const BATCH_VERSION = "REIMBURSEMENT_BATCH_V3_DO_LOCK_20260802";
+
+const LOCAL_BATCH_LOCKS = new Map();
+const LOCAL_SCHEDULE_CLAIMS = new Set();
 
 export const BATCH_SCHEMA = [
   { col: "A", key: "createdAt", header: "สร้างเมื่อ" },
@@ -433,24 +436,65 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
   return { ok: true, runNo: created.length ? runNo : "", batches: created, itemCount, total: totalAll, people: peopleCreated, blocked };
 }
 
+function batchCoordinatorStub(env, tenant) {
+  if (!env.MULTI_SESSIONS) return null;
+  const id = env.MULTI_SESSIONS.idFromName(`batch-coordinator:${tenant}`);
+  return env.MULTI_SESSIONS.get(id);
+}
+
+async function coordinatorCall(stub, path, body = {}) {
+  const res = await stub.fetch(`https://batch.local${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data.message || data.error || `batch coordinator ${res.status}`);
+  return data;
+}
+
 async function acquireBatchLock(env, tenant) {
-  const key = `batch:lock:${tenant}`;
-  const now = Date.now();
-  const existing = await env.KV.get(key, "json").catch(() => null);
-  if (existing && now - Number(existing.at || 0) < 5 * 60 * 1000) {
-    throw new Error("มีการปิดรอบของธุรกิจนี้กำลังทำงานอยู่ กรุณารอสักครู่");
+  const stub = batchCoordinatorStub(env, tenant);
+  if (stub) {
+    const out = await coordinatorCall(stub, "/batch-coordinator/acquire", { ttlMs: 5 * 60 * 1000 });
+    return { mode: "durable", stub, token: out.token };
   }
+
+  // Fallback สำหรับกรณี binding ยังไม่พร้อม: กันกดซ้ำภายใน isolate โดยไม่เขียน KV
+  const now = Date.now();
+  const existing = LOCAL_BATCH_LOCKS.get(tenant);
+  if (existing && existing.expiresAt > now) throw new Error("มีการปิดรอบของธุรกิจนี้กำลังทำงานอยู่ กรุณารอสักครู่");
   const token = crypto.randomUUID();
-  await env.KV.put(key, JSON.stringify({ token, at: now }), { expirationTtl: 600 });
-  const verify = await env.KV.get(key, "json").catch(() => null);
-  if (!verify || verify.token !== token) throw new Error("มีคำสั่งปิดรอบอื่นเริ่มพร้อมกัน กรุณาลองใหม่");
-  return { key, token };
+  LOCAL_BATCH_LOCKS.set(tenant, { token, expiresAt: now + 5 * 60 * 1000 });
+  return { mode: "local", tenant, token };
 }
 
 async function releaseBatchLock(env, lock) {
   if (!lock) return;
-  const current = await env.KV.get(lock.key, "json").catch(() => null);
-  if (current && current.token === lock.token) await env.KV.delete(lock.key);
+  if (lock.mode === "durable") {
+    await coordinatorCall(lock.stub, "/batch-coordinator/release", { token: lock.token }).catch(() => {});
+    return;
+  }
+  const current = LOCAL_BATCH_LOCKS.get(lock.tenant);
+  if (current?.token === lock.token) LOCAL_BATCH_LOCKS.delete(lock.tenant);
+}
+
+async function claimScheduledRun(env, tenant, slot) {
+  const stub = batchCoordinatorStub(env, tenant);
+  if (stub) return coordinatorCall(stub, "/batch-coordinator/claim-schedule", { slot });
+  const key = `${tenant}:${slot}`;
+  if (LOCAL_SCHEDULE_CLAIMS.has(key)) return { ok: true, claimed: false };
+  LOCAL_SCHEDULE_CLAIMS.add(key);
+  return { ok: true, claimed: true, key };
+}
+
+async function releaseScheduledRun(env, tenant, slot) {
+  const stub = batchCoordinatorStub(env, tenant);
+  if (stub) {
+    await coordinatorCall(stub, "/batch-coordinator/release-schedule", { slot }).catch(() => {});
+    return;
+  }
+  LOCAL_SCHEDULE_CLAIMS.delete(`${tenant}:${slot}`);
 }
 
 export async function createReimbursementBatches(env, tenant, sheetId, token, options = {}) {
@@ -634,21 +678,19 @@ export async function runScheduledReimbursementBatches(env) {
     }
     if (!dueNow(settings, now)) continue;
 
-    // หนึ่งธุรกิจรันได้สูงสุด 1 ครั้งต่อวันปิดรอบ แม้ Cron จะเรียกทุกนาที
-    const runKey = `batch:scheduled:${tenant}:${now.isoDate}`;
-    if (await env.KV.get(runKey)) continue;
-    await env.KV.put(runKey, "running", { expirationTtl: 21 * 86400 });
+    // หนึ่งธุรกิจรันได้สูงสุด 1 ครั้งต่อวัน โดยใช้ Durable Object แทน KV write
+    const scheduleSlot = now.isoDate;
+    const claim = await claimScheduledRun(env, tenant, scheduleSlot);
+    if (!claim.claimed) continue;
 
     try {
       const out = await createReimbursementBatches(env, tenant, sheetId, token, { type: "ปกติ", settings });
       if (!out.ok) {
-        await env.KV.put(runKey, JSON.stringify({ ok: false, reason: out.reason, blocked: out.blocked || [] }), { expirationTtl: 21 * 86400 });
         const details = (out.blocked || []).slice(0, 3).map((x) => `• ${x.payerName}: ${(x.missing || []).join(", ")}`).join("\n");
         await push(env, tenant, textMsg(`ยังปิดรอบเบิกอัตโนมัติไม่ได้ ⚠️\nข้อมูลบัญชีผู้เบิกไม่ครบ\n${details || out.message || "เปิดหน้า ทีมของฉัน เพื่อตรวจข้อมูล"}`)).catch(() => {});
         results.push({ tenant, ...out });
         continue;
       }
-      await env.KV.put(runKey, JSON.stringify({ ok: true, runNo: out.runNo, itemCount: out.itemCount }), { expirationTtl: 21 * 86400 });
       results.push({ tenant, ...out });
       if (out.itemCount > 0) {
         const url = await dashboardBatchUrl(env, tenant);
@@ -663,7 +705,7 @@ export async function runScheduledReimbursementBatches(env) {
         await push(env, tenant, textMsg(line)).catch((e) => console.warn("batch notify", tenant, e.message));
       }
     } catch (e) {
-      await env.KV.delete(runKey);
+      await releaseScheduledRun(env, tenant, scheduleSlot);
       console.error("scheduled batch", tenant, e);
       await push(env, tenant, textMsg(`ปิดรอบเบิกไม่สำเร็จ ❌\n${String(e.message || e).slice(0, 180)}\nเปิด Dashboard แล้วกดปิดรอบด้วยตนเอง`)).catch(() => {});
       results.push({ tenant, ok: false, error: String(e) });
