@@ -1,7 +1,7 @@
-import { getUserToken } from "./oauth.js";
+import { getUserToken, buildConnectUrl } from "./oauth.js";
 import { readSettings, writeSettings } from "./sheets.js";
 
-const SESSION_TTL = 15 * 60;
+const SESSION_TTL = 30 * 60;
 
 function esc(v) {
   return String(v ?? "")
@@ -118,6 +118,33 @@ function invalidPage(message = "ลิงก์หมดอายุหรือ
   });
 }
 
+
+function reconnectPage(env, url, tenant, message = "สิทธิ์ Google หมดอายุหรือเชื่อมต่อไม่สมบูรณ์") {
+  const connectUrl = buildConnectUrl(env, url.origin, tenant);
+  return new Response(pageShell(`<div class="card success">
+    <div class="check" style="background:#fff4e5;color:#b54708">!</div>
+    <h1>${esc(message)}</h1>
+    <p>ระบบยังเขียนข้อมูลลง Google Sheet ไม่ได้ ให้เชื่อม Google ใหม่หนึ่งครั้ง แล้วกลับมาเปิดลิงก์กรอกข้อมูลเดิมอีกครั้ง</p>
+    <a class="btn" style="display:grid;place-items:center;text-decoration:none" href="${esc(connectUrl)}">เชื่อม Google ใหม่</a>
+    <button class="btn secondary" onclick="location.reload()">ลองอีกครั้ง</button>
+  </div>`, "เชื่อม Google ใหม่"), {
+    status: 401,
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+function saveErrorPage(message = "บันทึกข้อมูลไม่สำเร็จ") {
+  return new Response(pageShell(`<div class="card success">
+    <div class="check" style="background:#fff0ef;color:#b42318">!</div>
+    <h1>บันทึกข้อมูลไม่สำเร็จ</h1>
+    <p>${esc(message)}<br>ข้อมูลที่กรอกยังไม่ถูกลบ สามารถย้อนกลับแล้วลองบันทึกใหม่ได้</p>
+    <button class="btn" onclick="history.back()">กลับไปแก้ไข</button>
+  </div>`, "บันทึกไม่สำเร็จ"), {
+    status: 500,
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
 function formPage(session, profile = {}, error = "") {
   const bankOptions = ["SCB", "KBANK", "KTB", "BBL", "BAY", "TTB", "GSB", "CIMB", "UOB", "KKP", "LH BANK", "อื่น ๆ"];
   const currentBank = String(profile.bank || "").trim();
@@ -161,6 +188,11 @@ export async function handleMemberOnboarding(request, env, url) {
   const sheetId = await env.KV.get(`tenant:${session.tenant}`) || env.DEFAULT_SHEET_ID;
   if (!sheetId) return invalidPage("ยังไม่พบ Google Sheet ของบริษัท");
   const userToken = await getUserToken(env, session.tenant);
+  if (!userToken) {
+    console.error("member onboarding: missing Google user token", { tenant: session.tenant });
+    return reconnectPage(env, url, session.tenant);
+  }
+
   const settings = await readSettings(env, sheetId, userToken);
   const existing = findMemberProfile(settings, {
     lineUserId: session.lineUserId,
@@ -208,10 +240,27 @@ export async function handleMemberOnboarding(request, env, url) {
   if (idx >= 0) members[idx] = { ...members[idx], ...profile };
   else members.push(profile);
 
-  await writeSettings(env, sheetId, {
-    ...settings,
-    team_members: JSON.stringify(members),
-  }, userToken);
+  try {
+    await writeSettings(env, sheetId, {
+      ...settings,
+      team_members: JSON.stringify(members),
+    }, userToken);
+  } catch (error) {
+    console.error("member onboarding save failed", {
+      tenant: session.tenant,
+      sheetId,
+      lineUserId: session.lineUserId,
+      message: error?.message || String(error),
+      stack: error?.stack || "",
+    });
+
+    const msg = String(error?.message || error || "");
+    if (/401|403|invalid_grant|unauthorized|permission|insufficient/i.test(msg)) {
+      return reconnectPage(env, url, session.tenant, "สิทธิ์ Google ใช้งานไม่ได้");
+    }
+    return saveErrorPage(msg.slice(0, 220) || "เกิดข้อผิดพลาดระหว่างเขียนข้อมูลลง Google Sheet");
+  }
+
   await env.KV.delete(`member-onboard:${sessionToken}`);
 
   return new Response(successPage(profile.name), {
