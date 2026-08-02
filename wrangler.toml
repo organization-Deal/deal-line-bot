@@ -37,11 +37,9 @@ id = "19ef27ff24a044acb0bf6856ae733636"
 name = "MULTI_SESSIONS"
 class_name = "MultiExpenseSession"
 
-# รูปแบบใหม่ที่ Cloudflare แนะนำสำหรับ Durable Object ใหม่
-# ใช้แทน [[migrations]] — ห้ามใส่ทั้ง exports และ migrations พร้อมกัน
-[exports.MultiExpenseSession]
-type = "durable-object"
-storage = "sqlite"
+[[migrations]]
+tag = "multi_documents_v1"
+new_sqlite_classes = ["MultiExpenseSession"]
 
 # Secrets ที่ต้องมีใน Cloudflare (ห้ามใส่ค่าจริงในไฟล์นี้)
 # ADMIN_KEY
