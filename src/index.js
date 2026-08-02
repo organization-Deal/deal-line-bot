@@ -29,6 +29,7 @@ import {
 import {
   ensureBatchTab, getBatchDashboard, createReimbursementBatches,
   requestUrgentBatch, updateReimbursementBatchStatus,
+  updateReimbursementBatchWorkflow, uploadReimbursementPaymentSlip,
   runScheduledReimbursementBatches,
 } from "./batches.js";
 import {
@@ -330,6 +331,20 @@ export default {
         if (url.pathname === "/api/batch-status" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
           const out = await updateReimbursementBatchStatus(env, sheetId, b.batchId, b.status, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/batch-workflow" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/batch-payment-slip" && request.method === "POST") {
+          const form = await request.formData();
+          const batchId = String(form.get("batchId") || "");
+          const file = form.get("file");
+          const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token);
           return cors(json(out, out.ok ? 200 : 400));
         }
 
