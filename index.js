@@ -36,8 +36,14 @@ import {
   getMemberProfile, memberProfileComplete, missingMemberFields,
   findMemberProfile,
 } from "./member-profile.js";
+import {
+  MultiExpenseSession, touchMultiSession, addMultiImage,
+  forceMultiSummary, cancelMultiSession, handleMultiHttp,
+} from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v2.1_MEMBER_PROFILE";
+export { MultiExpenseSession } from "./multi-expense.js";
+
+const VERSION = "DEAL_LINE_BOT_v2.2_MULTI_DOCUMENT";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -139,6 +145,10 @@ export default {
 
     if (url.pathname === "/member/onboard") {
       return handleMemberOnboarding(request, env, url);
+    }
+
+    if (url.pathname.startsWith("/multi/")) {
+      return handleMultiHttp(request, env, url);
     }
 
     /* ══════════════ admin ══════════════ */
@@ -425,11 +435,38 @@ export default {
       const isConfirm = postbackAct === "confirm" || postbackAct === "confirm_force";
 
       if (isImage) {
-        // ตอบรับทันที ไม่ถือ replyToken รอ OCR/Drive
-        await reply(env, event.replyToken, textMsg("รับรูปแล้วครับ กำลังอ่านบิลและบันทึกหลักฐาน… ⏳"));
+        // Session ต่อผู้ส่ง 1 คนในแต่ละบริษัท รองรับส่งรูปหลายใบพร้อมกันโดยไม่ตอบสแปมทุกภาพ
+        const userId = event.source?.userId || key;
+        const attachingExisting = event.source?.userId
+          ? await env.KV.get(`attach:${event.source.userId}`)
+          : null;
+        if (attachingExisting) {
+          await reply(env, event.replyToken, textMsg("รับรูปหลักฐานแล้วครับ กำลังแนบเข้ารายการ… ⏳"));
+          ctx.waitUntil(runHeavyTask(
+            () => handleImage(event, env, key, "push"),
+            env, event, "แนบหลักฐาน", 30000
+          ));
+          continue;
+        }
+        let touched = { isNew: true };
+        try {
+          touched = await touchMultiSession(env, {
+            tenant: key,
+            userId,
+            targetId: lineTarget(event.source),
+          });
+        } catch (e) {
+          console.warn("multi touch", e.message);
+        }
+        if (touched.isNew) {
+          await reply(env, event.replyToken, textMsg(
+            `รับชุดเอกสารแล้วครับ ส่งรูปต่อได้เรื่อย ๆ ทั้งสลิป ใบเสร็จ และหลักฐานการใช้เงิน
+ระบบจะจัดกลุ่มให้อัตโนมัติหลังรูปหยุดไหล ⏳`
+          ));
+        }
         ctx.waitUntil(runHeavyTask(
           () => handleImage(event, env, key, "push"),
-          env, event, "อ่านบิล", 25000
+          env, event, "อ่านรูปชุด", 40000
         ));
         continue;
       }
@@ -764,30 +801,30 @@ async function handleImage(event, env, key, mode = "reply") {
   ]);
   if (!driveLink) throw new Error("Drive upload failed");
 
-  const candidate = { ...record, imageHash };
-  const duplicateCheck = await findDuplicateExpenses(
-    env, sheet.sheetId, candidate, sheet.token
-  );
+  const item = {
+    ...record,
+    id: `img_${event.message.id || crypto.randomUUID().slice(0, 8)}`,
+    lineMessageId: event.message.id || "",
+    driveUrl: driveLink,
+    imgUrl: (() => {
+      const m = String(driveLink).match(/\/d\/([a-zA-Z0-9_-]{20,})/);
+      return m ? `https://lh3.googleusercontent.com/d/${m[1]}` : driveLink;
+    })(),
+    imageHash,
+    mediaType,
+  };
 
-  console.log(
-    `[duplicate] tenant=${key} level=${duplicateCheck.level} matches=${duplicateCheck.matches.length}`
-  );
+  const out = await addMultiImage(env, {
+    tenant: key,
+    userId: uid || key,
+    targetId: lineTarget(event.source),
+    displayName: sender,
+    sheetId: sheet.sheetId,
+  }, item);
+  console.log(`[multi-image] tenant=${key} groups=${out.counts?.groups || 0} images=${out.counts?.images || 0} unassigned=${out.counts?.unassigned || 0}`);
+  // Durable Object จะ debounce แล้ว push การ์ดสรุปเพียงครั้งเดียวหลังรูปหยุดไหล
+  return out;
 
-  const id = crypto.randomUUID().slice(0, 8);
-  await env.KV.put(
-    `pending:${id}`,
-    JSON.stringify({
-      record: candidate,
-      driveLink,
-      imageHash,
-      duplicateCheck,
-      sheetId: sheet.sheetId,
-      sender,
-    }),
-    { expirationTtl: 3600 }
-  );
-
-  return respond(confirmCard(id, candidate, { driveLink, duplicateCheck }));
 }
 
 /* ───────────────────────── postback ───────────────────────── */
@@ -936,6 +973,15 @@ async function handlePostback(event, env, key, mode = "reply") {
     return respond(await renderSaved(env, key, sheet, rec, rec));
   }
 
+  if (act === "multi_cancel") {
+    try {
+      await cancelMultiSession(env, key, uid || key);
+      return respond(textMsg("ยกเลิกชุดเอกสารแล้วครับ"));
+    } catch (e) {
+      return respond(textMsg("ยกเลิกชุดไม่สำเร็จ: " + String(e.message || e).slice(0, 120)));
+    }
+  }
+
   const sheet = await resolveSheet(env, event.source);
   if (!sheet) return respond(connectMsg(env, key));
 
@@ -1077,6 +1123,24 @@ async function handleText(event, env, key) {
     return reply(env, event.replyToken, textMsg(`tenant key ของที่นี่คือ:\n${key}`));
   }
 
+  if (/^(จัดบิล|จัดเอกสาร|จบชุด|ตรวจชุด)$/i.test(text)) {
+    try {
+      await forceMultiSummary(env, key, uid || key);
+      return reply(env, event.replyToken, textMsg("ส่งการ์ดตรวจชุดเอกสารล่าสุดให้แล้วครับ"));
+    } catch (e) {
+      return reply(env, event.replyToken, textMsg("ยังไม่มีชุดเอกสารที่กำลังจัดอยู่ครับ"));
+    }
+  }
+
+  if (/^(ยกเลิกชุด|ทิ้งชุด)$/i.test(text)) {
+    try {
+      await cancelMultiSession(env, key, uid || key);
+      return reply(env, event.replyToken, textMsg("ยกเลิกชุดเอกสารแล้วครับ รูปยังอยู่ใน Google Drive"));
+    } catch (e) {
+      return reply(env, event.replyToken, textMsg("ยังไม่มีชุดเอกสารให้ยกเลิกครับ"));
+    }
+  }
+
   if (/^migrate$/i.test(text)) {
     const sheet = await resolveSheet(env, event.source);
     if (!sheet) return reply(env, event.replyToken, connectMsg(env, key));
@@ -1169,8 +1233,10 @@ ${url}` : "")
 
   if (/^(ช่วย|help|คำสั่ง)$/i.test(text)) {
     return reply(env, event.replyToken, textMsg(
-      "ปกติแค่ส่งรูปบิลก็พอครับ ที่เหลือกดจากการ์ดได้เลย 📒\n\n" +
+      "ส่งรูปหลายใบต่อกันได้เลย ทั้งสลิป ใบเสร็จ และหลักฐาน ระบบจะจับคู่ให้เป็นหลายรายการอัตโนมัติ 📒\n\n" +
       "คำสั่งเสริม (ถ้าอยากใช้):\n" +
+      "• จัดบิล — เรียกการ์ดตรวจชุดล่าสุดทันที\n" +
+      "• ยกเลิกชุด — ทิ้งชุดที่กำลังจัด\n" +
       "• แดชบอร์ด — เปิดหน้ารวมทุกอย่าง\n" +
       "• ตั้งค่า — กรอกข้อมูลบริษัท\n" +
       "• อีเมล — เชื่อม Gmail และดูใบเสร็จ/ใบกำกับอัตโนมัติ\n" +
