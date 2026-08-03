@@ -59,6 +59,8 @@ export const SCHEMA = [
   { col: "AK", key: "batchPart",           header: "ส่วนเอกสารรอบเบิก" },
   { col: "AL", key: "batchCreatedAt",      header: "สร้างรอบเบิกเมื่อ" },
   { col: "AM", key: "urgentRequestedAt",   header: "ขอเบิกด่วนเมื่อ" },
+  { col: "AN", key: "reimbursementSlipUrl", header: "หลักฐานโอนคืน" },
+  { col: "AO", key: "reimbursedAt",         header: "โอนคืนเมื่อ" },
 ];
 
 const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "AM"
@@ -148,6 +150,7 @@ export function allAttachments(rec) {
   if (rec.claimPdfUrl) out.push({ type: "claimPdfUrl", label: "ใบเบิก PDF", url: rec.claimPdfUrl });
   if (rec.receiptPdfUrl) out.push({ type: "receiptPdfUrl", label: "ใบแทน PDF", url: rec.receiptPdfUrl });
   if (rec.batchClaimPdfUrl) out.push({ type: "batchClaimPdfUrl", label: "ใบขอเบิกรวม PDF", url: rec.batchClaimPdfUrl });
+  if (rec.reimbursementSlipUrl) out.push({ type: "reimbursementSlipUrl", label: "หลักฐานโอนคืน", url: rec.reimbursementSlipUrl });
   return out;
 }
 
@@ -293,6 +296,8 @@ export async function appendExpense(env, sheetId, r, meta = {}, token = null) {
     batchPart:           r.batchPart || "",
     batchCreatedAt:      r.batchCreatedAt || "",
     urgentRequestedAt:   r.urgentRequestedAt || "",
+    reimbursementSlipUrl: r.reimbursementSlipUrl || "",
+    reimbursedAt:         r.reimbursedAt || "",
   };
   if (slot && link) full[slot] = joinUrls([full[slot], link]);
   if (!full.imageUrl) {
