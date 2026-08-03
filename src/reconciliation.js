@@ -2,15 +2,22 @@
 // Statement 1 รายการ ↔ ใบเบิกหลัก 1 ใบ
 
 import { getAccessToken } from "./google-auth.js";
+import { readSettings } from "./sheets.js";
 import {
   ensureBatchTab,
   listBatches,
   updateBatchReconciliations,
 } from "./batches.js";
+import {
+  listPaymentChannels,
+  findPaymentChannel,
+  channelDisplay,
+  sourceAccountMatchesChannel,
+} from "./payment-channels.js";
 
 const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
 export const TAB_RECONCILIATION = "กระทบยอดธนาคาร";
-export const RECONCILIATION_VERSION = "BANK_RECONCILIATION_V1_20260803";
+export const RECONCILIATION_VERSION = "BANK_RECONCILIATION_V2_FINANCE_CHANNELS_20260803";
 
 const SCHEMA = [
   { col: "A", key: "importedAt", header: "นำเข้าเมื่อ" },
@@ -31,6 +38,8 @@ const SCHEMA = [
   { col: "P", key: "note", header: "หมายเหตุ" },
   { col: "Q", key: "rawJson", header: "ข้อมูลต้นฉบับ" },
   { col: "R", key: "updatedAt", header: "อัปเดตล่าสุด" },
+  { col: "S", key: "sourceChannelId", header: "รหัสช่องทางการเงิน" },
+  { col: "T", key: "sourceChannelLabel", header: "ชื่อช่องทางการเงิน" },
 ];
 
 const HEADER = SCHEMA.map((x) => x.header);
@@ -279,6 +288,10 @@ function decorateRows(rows, paidBatches) {
         paidAt: linkedBatch.paidAt || linkedBatch.paymentSlipAt || "",
         paymentSlipUrl: linkedBatch.paymentSlipUrl || "",
         pdfUrl: linkedBatch.pdfUrl || "",
+        paymentChannelId: linkedBatch.paymentChannelId || "",
+        paymentChannelLabel: linkedBatch.paymentChannelLabel || "",
+        paymentChannelBank: linkedBatch.paymentChannelBank || "",
+        paymentChannelNumber: linkedBatch.paymentChannelNumber || "",
       } : null,
       suggestion,
     };
@@ -310,17 +323,55 @@ function summarize(rows, paidBatches) {
   };
 }
 
-export async function getReconciliationDashboard(env, sheetId, token = null) {
+export async function getReconciliationDashboard(env, sheetId, token = null, options = {}) {
   const t = await authToken(env, token);
-  const [rows, batches] = await Promise.all([
+  const [rows, batches, settings] = await Promise.all([
     listReconciliationRows(env, sheetId, t, { createIfMissing: true }),
     listBatches(env, sheetId, t),
+    readSettings(env, sheetId, t),
   ]);
-  const paidBatches = batches.filter(isPaidBatch);
-  const decorated = decorateRows(rows, paidBatches);
+  const channels = listPaymentChannels(settings);
+  const activeChannels = channels.filter((channel) => channel.active);
+  const requestedId = String(options.channelId || "").trim();
+  const selectedChannel = findPaymentChannel(settings, requestedId, { activeOnly: true })
+    || activeChannels.find((channel) => channel.isDefault)
+    || activeChannels[0]
+    || null;
+  const allPaidBatches = batches.filter(isPaidBatch);
+  const unassignedPaidBatches = allPaidBatches.filter((batch) => !String(batch.paymentChannelId || "").trim());
+  const channelRows = selectedChannel
+    ? rows.filter((row) => sourceAccountMatchesChannel(row, selectedChannel))
+    : [];
+  const paidBatches = selectedChannel
+    ? allPaidBatches.filter((batch) => String(batch.paymentChannelId || "") === String(selectedChannel.id))
+    : [];
+  const decorated = decorateRows(channelRows, paidBatches);
+  const accountOverview = channels.map((channel) => {
+    const accountRows = rows.filter((row) => sourceAccountMatchesChannel(row, channel));
+    const accountBatches = allPaidBatches.filter((batch) => String(batch.paymentChannelId || "") === String(channel.id));
+    const reconciledBatchIds = new Set(accountRows
+      .filter((row) => String(row.status || "") === "กระทบยอดแล้ว" && row.batchId)
+      .map((row) => String(row.batchId)));
+    const reconciledCount = accountBatches.filter((batch) =>
+      String(batch.reconcileStatus || "") === "กระทบยอดแล้ว" || reconciledBatchIds.has(String(batch.id || ""))
+    ).length;
+    return {
+      ...channel,
+      display: channelDisplay(channel),
+      statementCount: accountRows.length,
+      paidBatchCount: accountBatches.length,
+      reconciledCount,
+      waitingCount: Math.max(0, accountBatches.length - reconciledCount),
+      paidTotal: accountBatches.reduce((sum, batch) => sum + Number(batch.total || 0), 0),
+    };
+  });
   return {
     ok: true,
     version: RECONCILIATION_VERSION,
+    paymentChannels: channels,
+    accountOverview,
+    selectedChannel,
+    selectedChannelId: selectedChannel?.id || "",
     rows: decorated,
     paidBatches: paidBatches.map((batch) => ({
       id: batch.id,
@@ -332,6 +383,17 @@ export async function getReconciliationDashboard(env, sheetId, token = null) {
       pdfUrl: batch.pdfUrl || "",
       reconcileStatus: batch.reconcileStatus || "",
       reconciliationId: batch.reconciliationId || "",
+      paymentChannelId: batch.paymentChannelId || "",
+      paymentChannelLabel: batch.paymentChannelLabel || "",
+      paymentChannelBank: batch.paymentChannelBank || "",
+      paymentChannelNumber: batch.paymentChannelNumber || "",
+    })),
+    unassignedPaidBatches: unassignedPaidBatches.map((batch) => ({
+      id: batch.id,
+      docId: batch.docId || batch.runNo || batch.id,
+      payerName: batch.payerName || "",
+      total: Number(batch.total || 0),
+      paidAt: batch.paidAt || batch.paymentSlipAt || "",
     })),
     summary: summarize(decorated, paidBatches),
   };
@@ -349,6 +411,8 @@ function normalizedImportRow(input = {}) {
     description: String(input.description || input.detail || input.memo || "").trim(),
     reference: String(input.reference || input.ref || "").trim(),
     sourceAccount: String(input.sourceAccount || "").trim(),
+    sourceChannelId: String(input.sourceChannelId || input.channelId || "").trim(),
+    sourceChannelLabel: String(input.sourceChannelLabel || "").trim(),
     raw: input.raw && typeof input.raw === "object" ? input.raw : input,
   };
 }
@@ -356,10 +420,15 @@ function normalizedImportRow(input = {}) {
 export async function importReconciliationRows(env, sheetId, payload = {}, token = null) {
   const t = await authToken(env, token);
   await ensureReconciliationTab(env, sheetId, t);
+  const settings = await readSettings(env, sheetId, t);
+  const channel = findPaymentChannel(settings, payload.sourceChannelId || payload.channelId, { activeOnly: true });
+  if (!channel) {
+    return { ok: false, reason: "payment_channel_required", message: "กรุณาเลือกช่องทางการเงินที่ต้องการกระทบยอดก่อนนำเข้า Statement" };
+  }
   const existing = await listReconciliationRows(env, sheetId, t);
   const existingFingerprints = new Set(existing.map((row) => String(row.fingerprint || "")).filter(Boolean));
   const sourceFile = String(payload.fileName || "statement").trim().slice(0, 180);
-  const defaultAccount = String(payload.sourceAccount || "").trim().slice(0, 120);
+  const defaultAccount = channelDisplay(channel).slice(0, 120);
   const inputRows = Array.isArray(payload.rows) ? payload.rows.slice(0, 5000) : [];
   const now = new Date().toISOString();
   const appendValues = [];
@@ -377,13 +446,15 @@ export async function importReconciliationRows(env, sheetId, payload = {}, token
       skippedIncoming++;
       continue;
     }
-    row.sourceAccount = row.sourceAccount || defaultAccount;
+    row.sourceAccount = defaultAccount;
+    row.sourceChannelId = channel.id;
+    row.sourceChannelLabel = channel.label;
     const identityParts = [
       row.transactionDate,
       row.amount.toFixed(2),
       normalizeText(row.description),
       normalizeText(row.reference),
-      normalizeText(row.sourceAccount),
+      normalizeText(channel.id),
     ];
     // ถ้าธนาคารไม่มีเลขอ้างอิง ให้ใช้ชื่อไฟล์+เลขแถวช่วยแยก
     // เพื่อไม่ตัดรายการจริงสองรายการที่ยอด/วัน/รายละเอียดเหมือนกันทิ้ง
@@ -415,6 +486,8 @@ export async function importReconciliationRows(env, sheetId, payload = {}, token
       note: "",
       rawJson: JSON.stringify(row.raw || {}),
       updatedAt: now,
+      sourceChannelId: channel.id,
+      sourceChannelLabel: channel.label,
     };
     appendValues.push(SCHEMA.map((column) => full[column.key] ?? ""));
   }
@@ -433,6 +506,8 @@ export async function importReconciliationRows(env, sheetId, payload = {}, token
     skippedIncoming,
     skippedDuplicate,
     sourceFile,
+    sourceChannelId: channel.id,
+    sourceChannelLabel: channel.label,
   };
 }
 
@@ -489,6 +564,30 @@ function validatePairs(rows, paidBatches, pairs, { force = false } = {}) {
       errors.push({ reconciliationId, batchId, reason: "batch_already_reconciled" });
       continue;
     }
+    let rowChannelId = String(row.sourceChannelId || "").trim();
+    const batchChannelId = String(batch.paymentChannelId || "").trim();
+    if (!batchChannelId) {
+      errors.push({ reconciliationId, batchId, reason: "payment_channel_missing_on_batch" });
+      continue;
+    }
+    // รองรับ Statement รุ่นก่อนที่มีชื่อบัญชีแต่ยังไม่มี sourceChannelId
+    if (!rowChannelId) {
+      const source = normalizeText(row.sourceAccount || "");
+      const candidates = [batch.paymentChannelLabel, batch.paymentChannelBank, batch.paymentChannelNumber]
+        .map(normalizeText).filter(Boolean);
+      const digits = String(batch.paymentChannelNumber || "").replace(/\D/g, "");
+      const legacyMatches = !!source && (candidates.some((value) => source.includes(value) || value.includes(source))
+        || (digits.length >= 4 && source.includes(digits.slice(-4))));
+      if (legacyMatches) rowChannelId = batchChannelId;
+    }
+    if (!rowChannelId) {
+      errors.push({ reconciliationId, batchId, reason: "payment_channel_missing_on_statement" });
+      continue;
+    }
+    if (rowChannelId !== batchChannelId) {
+      errors.push({ reconciliationId, batchId, reason: "payment_channel_mismatch", rowChannelId, batchChannelId });
+      continue;
+    }
     const amountDiff = Math.abs(Number(row.amount || 0) - Number(batch.total || 0));
     if (!force && amountDiff > 0.01) {
       errors.push({ reconciliationId, batchId, reason: "amount_mismatch", amountDiff });
@@ -496,7 +595,14 @@ function validatePairs(rows, paidBatches, pairs, { force = false } = {}) {
     }
     usedStatements.add(reconciliationId);
     usedBatches.add(batchId);
-    valid.push({ row, batch, note: String(pair.note || "").trim(), score: Number(pair.score || 100) });
+    valid.push({
+      row,
+      batch,
+      note: String(pair.note || "").trim(),
+      score: Number(pair.score || 100),
+      sourceChannelId: rowChannelId,
+      sourceChannelLabel: row.sourceChannelLabel || batch.paymentChannelLabel || batch.paymentChannelBank || "",
+    });
   }
   return { valid, errors };
 }
@@ -524,7 +630,7 @@ export async function confirmReconciliationMatches(env, sheetId, payload = {}, t
 
   await updateBatchReconciliations(env, sheetId, batchChanges, t, batches);
   try {
-    await updateStatementRows(t, sheetId, valid.map(({ row, batch, note, score }) => ({
+    await updateStatementRows(t, sheetId, valid.map(({ row, batch, note, score, sourceChannelId, sourceChannelLabel }) => ({
       row,
       patch: {
         status: "กระทบยอดแล้ว",
@@ -534,6 +640,8 @@ export async function confirmReconciliationMatches(env, sheetId, payload = {}, t
         matchedAt: now,
         matchedBy,
         note,
+        sourceChannelId,
+        sourceChannelLabel,
         updatedAt: now,
       },
     })));

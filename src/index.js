@@ -49,7 +49,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v2.3_ACCOUNTING_WORKFLOW";
+const VERSION = "DEAL_LINE_BOT_v2.4_FINANCE_CHANNEL_RECONCILIATION";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -349,14 +349,16 @@ export default {
         if (url.pathname === "/api/batch-payment-slip" && request.method === "POST") {
           const form = await request.formData();
           const batchId = String(form.get("batchId") || "");
+          const paymentChannelId = String(form.get("paymentChannelId") || "");
           const file = form.get("file");
-          const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token);
+          const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token, { paymentChannelId });
           return cors(json(out, out.ok ? 200 : 400));
         }
 
         /* กระทบยอดธนาคาร — Statement ↔ ใบเบิกที่จ่ายแล้ว */
         if (url.pathname === "/api/reconciliation") {
-          return cors(json(await getReconciliationDashboard(env, sheetId, token)));
+          const channelId = String(url.searchParams.get("channelId") || "");
+          return cors(json(await getReconciliationDashboard(env, sheetId, token, { channelId })));
         }
 
         if (url.pathname === "/api/reconciliation-import" && request.method === "POST") {

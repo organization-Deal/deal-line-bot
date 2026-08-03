@@ -14,11 +14,17 @@ import { createBatchClaimPdf } from "./batch-documents.js";
 import { uploadFile } from "./drive.js";
 import { push, textMsg } from "./line.js";
 import { buildReimbursementCorrectionCard } from "./card.js";
+import {
+  listPaymentChannels,
+  findPaymentChannel,
+  channelDisplay,
+  channelSnapshot,
+} from "./payment-channels.js";
 
 const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
 const DRIVE = "https://www.googleapis.com/drive/v3";
 export const TAB_BATCHES = "รอบเบิก";
-export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V4_RECONCILIATION_20260803";
+export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V5_FINANCE_CHANNELS_20260803";
 
 const LOCAL_BATCH_LOCKS = new Map();
 const LOCAL_SCHEDULE_CLAIMS = new Set();
@@ -60,11 +66,21 @@ export const BATCH_SCHEMA = [
   { col: "AG", key: "reconciliationId", header: "รหัสรายการธนาคาร" },
   { col: "AH", key: "reconciledAt", header: "กระทบยอดเมื่อ" },
   { col: "AI", key: "reconciliationNote", header: "หมายเหตุกระทบยอด" },
+  { col: "AJ", key: "paymentChannelId", header: "รหัสช่องทางที่จ่าย" },
+  { col: "AK", key: "paymentChannelLabel", header: "ชื่อช่องทางที่จ่าย" },
+  { col: "AL", key: "paymentChannelType", header: "ประเภทช่องทางที่จ่าย" },
+  { col: "AM", key: "paymentChannelBank", header: "ธนาคาร/ผู้ให้บริการที่จ่าย" },
+  { col: "AN", key: "paymentChannelNumber", header: "เลขบัญชีต้นทาง" },
+  { col: "AO", key: "paymentChannelName", header: "ชื่อบัญชีต้นทาง" },
 ];
 
 const LAST_COL = BATCH_SCHEMA[BATCH_SCHEMA.length - 1].col;
 const BATCH_HEADER = BATCH_SCHEMA.map((x) => x.header);
 const COL = Object.fromEntries(BATCH_SCHEMA.map((x) => [x.key, x.col]));
+
+function columnNumber(a1 = "A") {
+  return String(a1 || "A").toUpperCase().split("").reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0);
+}
 
 function tabName(env) {
   return env.SHEET_TAB || "รายจ่าย";
@@ -216,8 +232,10 @@ function batchRowToObject(values, row) {
 
 export async function ensureBatchTab(env, sheetId, token = null) {
   const t = await authToken(env, token);
-  const meta = await call(t, `${SHEETS}/${sheetId}?fields=sheets.properties`);
-  const exists = (meta.sheets || []).some((s) => s.properties?.title === TAB_BATCHES);
+  const requiredColumns = columnNumber(LAST_COL);
+  const meta = await call(t, `${SHEETS}/${sheetId}?fields=sheets.properties(sheetId,title,gridProperties(columnCount,frozenRowCount))`);
+  const sheet = (meta.sheets || []).find((s) => s.properties?.title === TAB_BATCHES);
+  const exists = !!sheet;
   if (!exists) {
     await call(t, `${SHEETS}/${sheetId}:batchUpdate`, {
       method: "POST",
@@ -226,12 +244,28 @@ export async function ensureBatchTab(env, sheetId, token = null) {
           addSheet: {
             properties: {
               title: TAB_BATCHES,
-              gridProperties: { frozenRowCount: 1 },
+              gridProperties: { frozenRowCount: 1, columnCount: requiredColumns },
             },
           },
         }],
       }),
     });
+  } else {
+    const currentColumns = Number(sheet.properties?.gridProperties?.columnCount || 0);
+    const numericSheetId = sheet.properties?.sheetId;
+    if (numericSheetId != null && currentColumns > 0 && currentColumns < requiredColumns) {
+      await call(t, `${SHEETS}/${sheetId}:batchUpdate`, {
+        method: "POST",
+        body: JSON.stringify({
+          requests: [{
+            updateSheetProperties: {
+              properties: { sheetId: numericSheetId, gridProperties: { columnCount: requiredColumns, frozenRowCount: 1 } },
+              fields: "gridProperties.columnCount,gridProperties.frozenRowCount",
+            },
+          }],
+        }),
+      });
+    }
   }
   await call(t, rangeUrl(sheetId, TAB_BATCHES, `A1:${LAST_COL}1`, "?valueInputOption=USER_ENTERED"), {
     method: "PUT",
@@ -293,6 +327,16 @@ async function appendBatch(env, sheetId, batch, token = null) {
     rejectionReason: batch.rejectionReason || "",
     auditLog: batch.auditLog || JSON.stringify([{ at: new Date().toISOString(), action: "created", detail: batch.note || "สร้างใบเบิกหลัก" }]),
     updatedAt: batch.updatedAt || new Date().toISOString(),
+    reconcileStatus: batch.reconcileStatus || "",
+    reconciliationId: batch.reconciliationId || "",
+    reconciledAt: batch.reconciledAt || "",
+    reconciliationNote: batch.reconciliationNote || "",
+    paymentChannelId: batch.paymentChannelId || "",
+    paymentChannelLabel: batch.paymentChannelLabel || "",
+    paymentChannelType: batch.paymentChannelType || "",
+    paymentChannelBank: batch.paymentChannelBank || "",
+    paymentChannelNumber: batch.paymentChannelNumber || "",
+    paymentChannelName: batch.paymentChannelName || "",
   };
   const values = BATCH_SCHEMA.map((s) => full[s.key] ?? "");
   const out = await call(t, rangeUrl(sheetId, TAB_BATCHES, `A:${LAST_COL}`, ":append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"), {
@@ -663,6 +707,8 @@ export async function getBatchDashboard(env, sheetId, token = null) {
     listBatches(env, sheetId, token),
     readSettings(env, sheetId, token),
   ]);
+  const paymentChannels = listPaymentChannels(settings);
+  const paymentChannelById = new Map(paymentChannels.map((channel) => [String(channel.id), channel]));
   const pending = expenses.filter(isEligible);
   const itemView = (r = {}) => ({
     id: r.id, dateISO: r.dateISO, dateText: r.dateText, createdAt: r.createdAt,
@@ -721,6 +767,15 @@ export async function getBatchDashboard(env, sheetId, token = null) {
       missingProfileFields: missing,
       items,
       workflowStep,
+      paymentChannel: paymentChannelById.get(String(b.paymentChannelId || "")) || (b.paymentChannelId ? {
+        id: b.paymentChannelId,
+        label: b.paymentChannelLabel || b.paymentChannelBank || "ช่องทางที่จ่าย",
+        type: b.paymentChannelType || "bank",
+        bank: b.paymentChannelBank || "",
+        number: b.paymentChannelNumber || "",
+        name: b.paymentChannelName || "",
+        active: false,
+      } : null),
       documentReady: !!b.pdfUrl && items.length > 0 && items.every((r) => r.imageUrl || r.attReceipt || r.attTax || r.attSlip || r.attOther),
     };
   });
@@ -729,6 +784,7 @@ export async function getBatchDashboard(env, sheetId, token = null) {
   return {
     ok: true,
     version: BATCH_VERSION,
+    paymentChannels,
     settings: {
       enabled: String(settings.batch_enabled || "FALSE").toUpperCase() === "TRUE",
       weekday: Number(settings.batch_weekday ?? 1),
@@ -914,6 +970,25 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
     return out;
   }
 
+  if (action === "assign_payment_channel") {
+    const current = String(rec.status || "");
+    const closed = ["ยกเลิก", "ไม่อนุมัติ", "rejected", "Rejected"].includes(current);
+    if (closed || (current === "จ่ายแล้ว" && String(rec.reconcileStatus || "") === "กระทบยอดแล้ว")) {
+      return { ok: false, reason: "batch_closed", message: "ใบเบิกนี้ปิดงานหรือกระทบยอดแล้ว จึงเปลี่ยนบัญชีที่จ่ายไม่ได้" };
+    }
+    const settings = await readSettings(env, sheetId, token);
+    const channel = findPaymentChannel(settings, payload.paymentChannelId || payload.channelId, { activeOnly: true });
+    if (!channel) return { ok: false, reason: "payment_channel_not_found", message: "ไม่พบช่องทางการเงิน หรือช่องทางนี้ถูกปิดใช้งาน" };
+    const snapshot = channelSnapshot(channel);
+    const patch = {
+      ...snapshot,
+      updatedAt: now,
+      auditLog: auditJson(rec, "payment_channel_assigned", { channelId: channel.id, channel: channelDisplay(channel) }),
+    };
+    const out = await updateBatchRow(env, sheetId, batchId, patch, token, rec);
+    return { ...out, paymentChannel: channel };
+  }
+
   if (action === "peak_recorded") return { ok: false, reason: "peak_removed", message: "ตัดขั้น PEAK ออกจาก Flow แล้ว" };
 
   if (action === "transfer_set") {
@@ -1038,10 +1113,20 @@ async function attachRepaymentProofToExpenses(env, sheetId, itemIds, slipUrl, pa
   return updateExpensesByIdPatches(env, sheetId, patches, token);
 }
 
-export async function uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token = null) {
+export async function uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token = null, options = {}) {
   const rec = await findBatch(env, sheetId, batchId, token);
   if (!rec) return { ok: false, reason: "not_found", message: "ไม่พบใบเบิก" };
   const currentStatus = String(rec.status || "");
+  const settings = await readSettings(env, sheetId, token);
+  const channels = listPaymentChannels(settings, { activeOnly: true });
+  const requestedChannelId = String(options.paymentChannelId || rec.paymentChannelId || "").trim();
+  const paymentChannel = findPaymentChannel(settings, requestedChannelId, { activeOnly: true });
+  if (!channels.length) {
+    return { ok: false, reason: "payment_channels_required", message: "กรุณาสร้างช่องทางการเงินของบริษัทก่อนบันทึกการจ่าย" };
+  }
+  if (!paymentChannel) {
+    return { ok: false, reason: "payment_channel_required", message: "กรุณาเลือกบัญชีหรือช่องทางการเงินที่ใช้โอนรายการนี้" };
+  }
   if (["ต้องแก้ไข", "ตีกลับ", "รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(currentStatus)) {
     return { ok: false, reason: "review_required", message: "ต้องให้เอกสารผ่านก่อนแนบหลักฐานการโอน" };
   }
@@ -1067,8 +1152,11 @@ export async function uploadReimbursementPaymentSlip(env, sheetId, batchId, file
     status: "จ่ายแล้ว", approvedAt: rec.approvedAt || now, paidAt: now,
     transferStatus: "ตั้งโอนแล้ว", transferAt: rec.transferAt || now,
     paymentSlipUrl: slipUrl, paymentSlipAt: now,
+    ...channelSnapshot(paymentChannel),
     lineNotifyStatus: "กำลังแจ้ง", updatedAt: now,
-    auditLog: auditJson(rec, "payment_slip_uploaded", { slipUrl, mediaType }),
+    auditLog: auditJson(rec, "payment_slip_uploaded", {
+      slipUrl, mediaType, paymentChannelId: paymentChannel.id, paymentChannel: channelDisplay(paymentChannel),
+    }),
   };
   let out = await updateBatchRow(env, sheetId, batchId, paidPatch, token, rec);
   if (!out.ok) return out;
@@ -1082,6 +1170,7 @@ export async function uploadReimbursementPaymentSlip(env, sheetId, batchId, file
   }, token, paidRecord);
   return {
     ok: true, batchId, status: "จ่ายแล้ว", paymentSlipUrl: slipUrl, lineNotifyStatus: notice.status,
+    paymentChannel,
     record: notifyUpdate.ok ? notifyUpdate.record : out.record,
     warning: notifyUpdate.ok ? "" : "บันทึกสถานะแจ้ง LINE ไม่สำเร็จ แต่ใบเบิกถูกปิดและแนบหลักฐานแล้ว",
   };
