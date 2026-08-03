@@ -826,11 +826,10 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
         : "รอบนี้ไม่ได้อยู่ในสถานะรอโอนเงิน";
       return { ok: false, reason: "batch_not_payable", message };
     }
-    const reference = String(payload.reference || "").trim();
     const patch = {
       status: "รอหลักฐานการโอน",
-      transferStatus: "ตั้งโอนแล้ว", transferRef: reference, transferAt: now,
-      updatedAt: now, auditLog: auditJson(rec, "transfer_set", { reference }),
+      transferStatus: "ตั้งโอนแล้ว", transferRef: "", transferAt: now,
+      updatedAt: now, auditLog: auditJson(rec, "transfer_set", {}),
     };
     const out = await updateBatchRow(env, sheetId, batchId, patch, token);
     if (out.ok) await patchBatchExpenses(env, sheetId, rec.itemIds, { paid: false, batchStatus: "รอหลักฐานการโอน" }, token);
