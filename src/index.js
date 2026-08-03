@@ -33,6 +33,11 @@ import {
   runScheduledReimbursementBatches,
 } from "./batches.js";
 import {
+  ensureReconciliationTab, getReconciliationDashboard,
+  importReconciliationRows, confirmReconciliationMatches,
+  unlinkReconciliationMatch, ignoreReconciliationRow,
+} from "./reconciliation.js";
+import {
   createMemberOnboardingUrl, handleMemberOnboarding,
   getMemberProfile, memberProfileComplete, missingMemberFields,
   findMemberProfile,
@@ -189,7 +194,8 @@ export default {
         const settings = await ensureSettingsTab(env, sheetId, token);
         const emailInbox = await ensureEmailInboxTab(env, sheetId, token);
         const batchTab = await ensureBatchTab(env, sheetId, token);
-        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox, batchTab });
+        const reconciliationTab = await ensureReconciliationTab(env, sheetId, token);
+        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox, batchTab, reconciliationTab });
       } catch (e) {
         console.error("migrate", e);
         return json({ error: String(e) }, 500);
@@ -345,6 +351,35 @@ export default {
           const batchId = String(form.get("batchId") || "");
           const file = form.get("file");
           const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        /* กระทบยอดธนาคาร — Statement ↔ ใบเบิกที่จ่ายแล้ว */
+        if (url.pathname === "/api/reconciliation") {
+          return cors(json(await getReconciliationDashboard(env, sheetId, token)));
+        }
+
+        if (url.pathname === "/api/reconciliation-import" && request.method === "POST") {
+          const body = await request.json().catch(() => ({}));
+          const out = await importReconciliationRows(env, sheetId, body, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/reconciliation-confirm" && request.method === "POST") {
+          const body = await request.json().catch(() => ({}));
+          const out = await confirmReconciliationMatches(env, sheetId, body, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/reconciliation-unlink" && request.method === "POST") {
+          const body = await request.json().catch(() => ({}));
+          const out = await unlinkReconciliationMatch(env, sheetId, body.reconciliationId || body.id, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/reconciliation-ignore" && request.method === "POST") {
+          const body = await request.json().catch(() => ({}));
+          const out = await ignoreReconciliationRow(env, sheetId, body.reconciliationId || body.id, body.note || "", token);
           return cors(json(out, out.ok ? 200 : 400));
         }
 

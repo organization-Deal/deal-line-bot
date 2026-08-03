@@ -18,7 +18,7 @@ import { buildReimbursementCorrectionCard } from "./card.js";
 const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
 const DRIVE = "https://www.googleapis.com/drive/v3";
 export const TAB_BATCHES = "รอบเบิก";
-export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V3_DIRECT_PAYMENT_20260803";
+export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V4_RECONCILIATION_20260803";
 
 const LOCAL_BATCH_LOCKS = new Map();
 const LOCAL_SCHEDULE_CLAIMS = new Set();
@@ -56,6 +56,10 @@ export const BATCH_SCHEMA = [
   { col: "AC", key: "rejectionReason", header: "เหตุผลตีกลับ" },
   { col: "AD", key: "auditLog", header: "ประวัติการทำรายการ" },
   { col: "AE", key: "updatedAt", header: "อัปเดตล่าสุด" },
+  { col: "AF", key: "reconcileStatus", header: "สถานะกระทบยอด" },
+  { col: "AG", key: "reconciliationId", header: "รหัสรายการธนาคาร" },
+  { col: "AH", key: "reconciledAt", header: "กระทบยอดเมื่อ" },
+  { col: "AI", key: "reconciliationNote", header: "หมายเหตุกระทบยอด" },
 ];
 
 const LAST_COL = BATCH_SCHEMA[BATCH_SCHEMA.length - 1].col;
@@ -315,6 +319,55 @@ async function updateBatchRow(env, sheetId, batchId, patch, token = null, knownR
     body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),
   });
   return { ok: true, record: { ...rec, ...patch } };
+}
+
+
+/**
+ * อัปเดตสถานะกระทบยอดหลายใบเบิกด้วย Google Sheets batchUpdate ครั้งเดียว
+ * ใช้จาก reconciliation.js เพื่อลด read/write quota
+ */
+export async function updateBatchReconciliations(env, sheetId, changes = [], token = null, knownBatches = null) {
+  const t = await authToken(env, token);
+  const batches = Array.isArray(knownBatches) ? knownBatches : await listBatches(env, sheetId, t);
+  const byId = new Map(batches.map((batch) => [String(batch.id || ""), batch]));
+  const now = new Date().toISOString();
+  const data = [];
+  const updated = [];
+  const errors = [];
+
+  for (const change of Array.isArray(changes) ? changes : []) {
+    const batchId = String(change?.batchId || "");
+    const rec = byId.get(batchId);
+    if (!rec) {
+      errors.push({ batchId, reason: "not_found" });
+      continue;
+    }
+    const patch = {
+      reconcileStatus: String(change.reconcileStatus || ""),
+      reconciliationId: String(change.reconciliationId || ""),
+      reconciledAt: String(change.reconciledAt || ""),
+      reconciliationNote: String(change.reconciliationNote || ""),
+      updatedAt: now,
+    };
+    const action = patch.reconcileStatus === "กระทบยอดแล้ว" ? "bank_reconciled" : "bank_reconciliation_unlinked";
+    patch.auditLog = auditJson(rec, action, {
+      reconciliationId: patch.reconciliationId,
+      note: patch.reconciliationNote,
+    });
+    for (const [key, value] of Object.entries(patch)) {
+      if (!COL[key]) continue;
+      data.push({ range: `${TAB_BATCHES}!${COL[key]}${rec._row}`, values: [[value ?? ""]] });
+    }
+    updated.push(batchId);
+  }
+
+  if (data.length) {
+    await call(t, `${SHEETS}/${sheetId}/values:batchUpdate`, {
+      method: "POST",
+      body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),
+    });
+  }
+  return { ok: errors.length === 0, updated, errors };
 }
 
 function auditJson(rec, action, detail = {}) {
