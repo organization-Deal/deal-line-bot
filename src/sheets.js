@@ -102,7 +102,13 @@ async function call(t, url, options = {}) {
     },
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`Sheets ${res.status}: ${text.slice(0, 300)}`);
+  if (!res.ok) {
+    const err = new Error(`Sheets ${res.status}: ${text.slice(0, 300)}`);
+    err.status = res.status;
+    err.retryAfter = Number(res.headers.get("retry-after") || 0) || 0;
+    err.isQuota = res.status === 429 || /RESOURCE_EXHAUSTED|Quota exceeded/i.test(text);
+    throw err;
+  }
   return text ? JSON.parse(text) : {};
 }
 
@@ -497,16 +503,11 @@ export async function getExpenseById(env, sheetId, id, token = null) {
 
 /* ══════════════════════════ แก้ไข ══════════════════════════ */
 
-export async function updateExpenseById(env, sheetId, id, patch, token = null) {
-  const t = await authToken(env, token);
-  const tab = tabName(env);
-  const row = await findRowById(env, sheetId, id, t);
-  if (!row) return { ok: false, reason: "not_found" };
-
+function patchDataForExpenseRow(tab, row, patch = {}) {
   const boolKeys = ["paid", "needSlip", "vat"];
   const data = [];
 
-  for (const [key, raw] of Object.entries(patch)) {
+  for (const [key, raw] of Object.entries(patch || {})) {
     if (key === "date") continue;
     const col = COL_OF[key];
     if (!col) continue;
@@ -517,17 +518,75 @@ export async function updateExpenseById(env, sheetId, id, patch, token = null) {
   if (patch.date !== undefined) {
     const d = normalizeDate(patch.date);
     data.push({ range: `${tab}!${COL_OF.dateText}${row}`, values: [[d.text]] });
-    data.push({ range: `${tab}!${COL_OF.dateISO}${row}`,  values: [[d.iso]] });
+    data.push({ range: `${tab}!${COL_OF.dateISO}${row}`, values: [[d.iso]] });
+  }
+  return data;
+}
+
+/**
+ * อัปเดตหลายรายการด้วย Google Sheets read 1 ครั้ง + batchUpdate 1 ครั้ง
+ * patches รับ Map / object / array ของ [id, patch]
+ */
+export async function updateExpensesByIdPatches(env, sheetId, patches, token = null) {
+  const entries = patches instanceof Map
+    ? [...patches.entries()]
+    : Array.isArray(patches)
+      ? patches
+      : Object.entries(patches || {});
+
+  const normalized = entries
+    .map(([id, patch]) => [String(id || "").trim(), patch || {}])
+    .filter(([id]) => id);
+
+  if (!normalized.length) return { ok: false, reason: "nothing_to_update", updatedIds: [], missingIds: [] };
+
+  const t = await authToken(env, token);
+  const tab = tabName(env);
+  const wanted = new Set(normalized.map(([id]) => id));
+  const idData = await call(t, rangeUrl(sheetId, tab, `${COL_OF.id}2:${COL_OF.id}`));
+  const rowById = new Map();
+
+  for (let i = 0; i < (idData.values || []).length; i++) {
+    const id = String(idData.values[i]?.[0] || "").trim();
+    if (id && wanted.has(id)) rowById.set(id, i + 2);
   }
 
-  if (!data.length) return { ok: false, reason: "nothing_to_update" };
+  const data = [];
+  const updatedIds = [];
+  const missingIds = [];
+
+  for (const [id, patch] of normalized) {
+    const row = rowById.get(id);
+    if (!row) {
+      missingIds.push(id);
+      continue;
+    }
+    const rowData = patchDataForExpenseRow(tab, row, patch);
+    if (rowData.length) {
+      data.push(...rowData);
+      updatedIds.push(id);
+    }
+  }
+
+  if (!data.length) return { ok: false, reason: "not_found", updatedIds, missingIds };
 
   await call(t, `${API}/${sheetId}/values:batchUpdate`, {
     method: "POST",
     body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),
   });
 
-  return { ok: true, row };
+  return { ok: true, updatedIds, missingIds };
+}
+
+export async function updateExpensesByIds(env, sheetId, ids, patch, token = null) {
+  const unique = [...new Set((Array.isArray(ids) ? ids : [ids]).map((id) => String(id || "").trim()).filter(Boolean))];
+  return updateExpensesByIdPatches(env, sheetId, unique.map((id) => [id, patch]), token);
+}
+
+export async function updateExpenseById(env, sheetId, id, patch, token = null) {
+  const out = await updateExpensesByIdPatches(env, sheetId, [[id, patch]], token);
+  if (!out.ok) return { ok: false, reason: out.reason || "not_found" };
+  return { ok: true, id: String(id) };
 }
 
 /* ══════════════════════ หลักฐานแนบ ══════════════════════ */
@@ -668,6 +727,7 @@ export async function readSettings(env, sheetId, token = null) {
     }
     return out;
   } catch (e) {
+    if (e?.status === 429 || e?.isQuota) throw e;
     console.warn("readSettings:", e.message);
     return { ...DEFAULT_SETTINGS };
   }

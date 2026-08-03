@@ -429,6 +429,16 @@ export default {
         return cors(json({ error: "unknown endpoint" }, 404));
       } catch (e) {
         console.error(url.pathname, e);
+        const quotaExceeded = e?.status === 429 || e?.isQuota || /Sheets 429|RESOURCE_EXHAUSTED|Quota exceeded/i.test(String(e?.message || e));
+        if (quotaExceeded) {
+          const res = json({
+            error: "sheets_rate_limited",
+            message: "Google Sheets ถูกเรียกถี่เกินไป ระบบหยุดยิงซ้ำแล้ว กรุณารอประมาณ 1 นาทีแล้วลองใหม่",
+            retryAfterSeconds: Math.max(60, Number(e?.retryAfter || 0)),
+          }, 429);
+          res.headers.set("Retry-After", String(Math.max(60, Number(e?.retryAfter || 0))));
+          return cors(res);
+        }
         return cors(json({ error: String(e) }, 500));
       }
     }
