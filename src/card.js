@@ -11,7 +11,7 @@
 //   act=confirm  act=cancel  act=edit  act=fix&f=
 //   act=paid     act=delete  act=attach  act=more  act=back
 
-export const CARD_VERSION = '5.1_BATCH';
+export const CARD_VERSION = '5.2_ACCOUNTING_WORKFLOW';
 
 /* ───────────────────── Apple-like palette ───────────────────── */
 const C = {
@@ -296,21 +296,29 @@ export function buildRecordCard(rec = {}, opts = {}) {
       : isIncome ? 'รายรับ' : 'รายจ่าย';
 
   const batchState = String(rec.batchStatus || '').trim();
+  const batchLabel = {
+    'รวมรอบแล้ว': 'ฝ่ายบัญชีกำลังตรวจ',
+    'รออนุมัติ': 'ฝ่ายบัญชีกำลังตรวจ',
+    'รอตรวจเอกสาร': 'ฝ่ายบัญชีกำลังตรวจ',
+    'ต้องแก้ไข': 'ต้องแก้ไข',
+    'ตีกลับ': 'ต้องแก้ไข',
+    'อนุมัติแล้ว': 'รอโอนเงิน',
+    'รอจ่าย': 'รอโอนเงิน',
+    'รอโอนเงิน': 'รอโอนเงิน',
+    'รอหลักฐานการโอน': 'โอนแล้ว · รอหลักฐาน',
+  };
   const statusText = mode === 'confirm'
     ? 'รอตรวจสอบ'
     : rec.paid || batchState === 'จ่ายแล้ว'
       ? 'จ่ายแล้ว'
-      : batchState === 'รวมรอบแล้ว' || batchState === 'อนุมัติแล้ว'
-        ? batchState
-        : batchState === 'ขอเบิกด่วน'
-          ? 'กำลังทำรอบด่วน'
-          : 'บันทึกแล้ว';
+      : batchLabel[batchState]
+        || (batchState === 'ขอเบิกด่วน' ? 'กำลังทำรอบด่วน' : 'บันทึกแล้ว');
 
   const statusTone = mode === 'confirm'
     ? 'warning'
-    : rec.paid || batchState === 'จ่ายแล้ว' || batchState === 'อนุมัติแล้ว'
+    : rec.paid || batchState === 'จ่ายแล้ว'
       ? 'success'
-      : batchState === 'ขอเบิกด่วน'
+      : ['ต้องแก้ไข', 'ตีกลับ', 'ขอเบิกด่วน', 'รอหลักฐานการโอน'].includes(batchState)
         ? 'warning'
         : 'info';
 
@@ -438,17 +446,30 @@ export function buildRecordCard(rec = {}, opts = {}) {
       ],
     });
   } else {
-    footerContents.push({
-      type: 'button',
-      style: rec.paid ? 'secondary' : 'primary',
-      color: rec.paid ? undefined : C.green,
-      height: 'sm',
-      action: {
-        type: 'postback',
-        label: rec.paid ? '✓ จ่ายแล้ว' : 'ทำเครื่องหมายว่าจ่ายแล้ว',
-        data: pb('paid', id),
-      },
-    });
+    const waitingCorrection = ['ต้องแก้ไข', 'ตีกลับ'].includes(batchState);
+    if (waitingCorrection) {
+      footerContents.push({
+        type: 'button', style: 'primary', color: C.blue, height: 'sm',
+        action: { type: 'postback', label: 'ส่งกลับให้ฝ่ายบัญชีตรวจ', data: pb('batch_resubmit', id) },
+      });
+    } else if (rec.batchDocId) {
+      footerContents.push({
+        type: 'button', style: 'secondary', height: 'sm',
+        action: { type: 'postback', label: statusText, data: pb('back', id) },
+      });
+    } else {
+      footerContents.push({
+        type: 'button',
+        style: rec.paid ? 'secondary' : 'primary',
+        color: rec.paid ? undefined : C.green,
+        height: 'sm',
+        action: {
+          type: 'postback',
+          label: rec.paid ? '✓ จ่ายแล้ว' : 'ทำเครื่องหมายว่าจ่ายแล้ว',
+          data: pb('paid', id),
+        },
+      });
+    }
 
     const driveLink = opts.driveLink || rec.imageUrl;
     const quickLinks = [
@@ -631,6 +652,48 @@ export function buildMoreCard(rec = {}, opts = {}) {
   };
 }
 
+
+/* ───────────────── reimbursement correction card ───────────────── */
+
+export function buildReimbursementCorrectionCard(rec = {}, opts = {}) {
+  const id = opts.id ?? rec.id ?? '';
+  const title = has(rec.vendor) ? String(rec.vendor) : (has(rec.note) ? String(rec.note) : 'รายการเบิก');
+  const reason = has(opts.reason) ? String(opts.reason) : 'กรุณาตรวจและแก้ไขข้อมูลหรือเอกสาร';
+  return {
+    type: 'flex',
+    altText: `รายการเบิกต้องแก้ไข: ${title}`,
+    contents: {
+      type: 'bubble', size: 'mega',
+      body: {
+        type: 'box', layout: 'vertical', paddingAll: '22px',
+        contents: [
+          { type: 'box', layout: 'horizontal', contents: [
+            statusPill('ต้องแก้ไข', 'warning'), { type: 'filler' },
+            has(opts.position) ? { type: 'text', text: String(opts.position), size: 'xxs', color: C.secondary, flex: 0 } : null,
+          ].filter(Boolean) },
+          { type: 'text', text: title, size: 'lg', weight: 'bold', color: C.label, wrap: true, margin: 'lg' },
+          { type: 'text', text: `฿${money(rec.amount)}`, size: '3xl', weight: 'bold', color: C.label, margin: 'sm' },
+          noteCard(reason, 'warn'),
+          groupedCard([
+            infoRow('วันที่', formatDateTH(rec.dateISO || rec.dateText || rec.date)),
+            infoRow('หมวด', rec.category),
+            infoRow('ใบเบิก', opts.batchId),
+          ]),
+        ].filter(Boolean),
+      },
+      footer: {
+        type: 'box', layout: 'vertical', spacing: 'sm', paddingAll: '16px',
+        contents: [
+          { type: 'button', style: 'primary', color: C.blue, height: 'sm', action: { type: 'postback', label: 'เปิดรายการเพื่อแก้ไข', data: pb('back', id) } },
+          { type: 'button', style: 'secondary', height: 'sm', action: { type: 'postback', label: 'แนบเอกสารเพิ่ม', data: pb('attach', id, { t: 'attOther' }) } },
+          { type: 'button', style: 'link', height: 'sm', color: C.blue, action: { type: 'postback', label: 'ส่งกลับตรวจ', data: pb('batch_resubmit', id) } },
+        ],
+      },
+      styles: { body: { backgroundColor: C.white }, footer: { backgroundColor: C.white, separator: true, separatorColor: C.separator } },
+    },
+  };
+}
+
 export const buildConfirmCard = (rec, opts = {}) =>
   buildRecordCard(rec, { ...opts, mode: 'confirm' });
 
@@ -642,6 +705,7 @@ export default {
   buildConfirmCard,
   buildSavedCard,
   buildMoreCard,
+  buildReimbursementCorrectionCard,
   formatDateTH,
   normalizeDate,
   money,

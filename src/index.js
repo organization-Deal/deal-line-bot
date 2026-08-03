@@ -44,7 +44,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v2.2_MULTI_DOCUMENT";
+const VERSION = "DEAL_LINE_BOT_v2.3_ACCOUNTING_WORKFLOW";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -1040,10 +1040,29 @@ async function handlePostback(event, env, key, mode = "reply") {
   const sheet = await resolveSheet(env, event.source);
   if (!sheet) return respond(connectMsg(env, key));
 
+  if (act === "batch_resubmit") {
+    const rec = await getExpenseById(env, sheet.sheetId, id, sheet.token);
+    if (!rec) return respond(textMsg(MSG_STALE));
+    if (!rec.batchDocId) return respond(textMsg("รายการนี้ยังไม่ได้อยู่ในใบเบิกที่ถูกตีกลับ"));
+    try {
+      const out = await updateReimbursementBatchWorkflow(
+        env, sheet.sheetId, rec.batchDocId, "resubmit", {}, sheet.token
+      );
+      if (!out.ok) return respond(textMsg(out.message || "ส่งกลับตรวจไม่สำเร็จ"));
+      const updated = await getExpenseById(env, sheet.sheetId, id, sheet.token);
+      return respond([
+        textMsg(`ส่งใบเบิก ${rec.batchDocId} กลับให้ฝ่ายบัญชีตรวจแล้ว ✅`),
+        updated ? await renderSaved(env, key, sheet, updated) : textMsg("ฝ่ายบัญชีได้รับรายการแล้ว"),
+      ]);
+    } catch (e) {
+      return respond(textMsg(`ส่งกลับตรวจไม่สำเร็จ: ${String(e.message || e).slice(0, 160)}`));
+    }
+  }
+
   if (act === "urgent") {
     const rec = await getExpenseById(env, sheet.sheetId, id, sheet.token);
     if (!rec) return respond(textMsg(MSG_STALE));
-    if (rec.batchDocId || rec.batchStatus === "รวมรอบแล้ว" || rec.batchStatus === "จ่ายแล้ว") {
+    if (rec.batchDocId || ["รวมรอบแล้ว", "รอตรวจเอกสาร", "ต้องแก้ไข", "รอโอนเงิน", "รอหลักฐานการโอน", "จ่ายแล้ว"].includes(String(rec.batchStatus || ""))) {
       return respond(await renderSaved(env, key, sheet, rec));
     }
     await respond(textMsg("กำลังรวมรายการนี้เป็นรอบเบิกด่วน… ⏳"));
