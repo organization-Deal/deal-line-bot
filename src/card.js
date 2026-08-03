@@ -312,7 +312,7 @@ export function buildRecordCard(rec = {}, opts = {}) {
     : rec.paid || batchState === 'จ่ายแล้ว'
       ? 'จ่ายแล้ว'
       : batchLabel[batchState]
-        || (batchState === 'ขอเบิกด่วน' ? 'กำลังทำรอบด่วน' : 'บันทึกแล้ว');
+        || (batchState === 'ขอเบิกด่วน' ? 'กำลังสร้างใบเบิกด่วน' : 'บันทึกแล้ว');
 
   const statusTone = mode === 'confirm'
     ? 'warning'
@@ -352,7 +352,7 @@ export function buildRecordCard(rec = {}, opts = {}) {
       ? infoRow('สถานะ', rec.paid ? 'จ่ายแล้ว' : 'ยังไม่จ่าย')
       : null,
     mode === 'saved' && has(rec.batchStatus)
-      ? infoRow('รอบเบิก', rec.batchDocId ? `${rec.batchStatus} · ${rec.batchDocId}` : rec.batchStatus)
+      ? infoRow('ใบเบิก', rec.batchDocId ? `${rec.batchStatus} · ${rec.batchDocId}` : rec.batchStatus)
       : null,
     recordedAt ? infoRow('บันทึกเมื่อ', recordedAt) : null,
     ...taxRows(rec),
@@ -484,7 +484,7 @@ export function buildRecordCard(rec = {}, opts = {}) {
     if (!rec.paid && !rec.batchDocId && rec.type !== 'รายรับ' && rec.type !== 'income') {
       quickLinks.push(dot());
       quickLinks.push(textLink(
-        rec.batchStatus === 'ขอเบิกด่วน' ? 'กำลังทำรอบด่วน' : 'เบิกด่วน',
+        rec.batchStatus === 'ขอเบิกด่วน' ? 'กำลังสร้างใบเบิกด่วน' : 'เบิกด่วน',
         { type: 'postback', label: 'เบิกด่วน', data: pb('urgent', id) },
         rec.batchStatus === 'ขอเบิกด่วน' ? C.orange : C.blue,
       ));
@@ -504,10 +504,10 @@ export function buildRecordCard(rec = {}, opts = {}) {
     });
 
     const docButtons = [];
-    if (opts.claimUrl) docButtons.push(documentButton('ใบขอเบิก', opts.claimUrl));
+    if (opts.claimUrl) docButtons.push(documentButton('ใบเบิกรายการ', opts.claimUrl));
     if (opts.receiptUrl) docButtons.push(documentButton('ใบแทน', opts.receiptUrl));
     if (opts.batchClaimUrl || rec.batchClaimPdfUrl) {
-      docButtons.push(documentButton('ใบขอเบิกรวม', opts.batchClaimUrl || rec.batchClaimPdfUrl));
+      docButtons.push(documentButton('ใบเบิกหลัก', opts.batchClaimUrl || rec.batchClaimPdfUrl));
     }
 
     if (docButtons.length) {

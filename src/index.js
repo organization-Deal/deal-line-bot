@@ -305,7 +305,7 @@ export default {
           return cors(json(out, out.ok ? 200 : (out.reason === "duplicate" ? 409 : 400)));
         }
 
-        /* รอบเบิก — รวมหลายรายการของผู้เบิกเป็นไฟล์เดียว */
+        /* ใบเบิกหลัก — รวมหลายรายการย่อยของผู้เบิกเป็นไฟล์เดียว */
         if (url.pathname === "/api/batches") {
           return cors(json(await getBatchDashboard(env, sheetId, token)));
         }
@@ -316,7 +316,7 @@ export default {
             type: b.type === "ด่วน" ? "ด่วน" : "ปกติ",
             payerKey: b.payerKey || "",
             expenseIds: Array.isArray(b.expenseIds) ? b.expenseIds : [],
-            note: b.note || "ปิดรอบด้วยตนเองจาก Dashboard",
+            note: b.note || "สร้างใบเบิกด้วยตนเองจาก Dashboard",
           });
           return cors(json(out, out.ok ? 200 : 400));
         }
@@ -1065,16 +1065,16 @@ async function handlePostback(event, env, key, mode = "reply") {
     if (rec.batchDocId || ["รวมรอบแล้ว", "รอตรวจเอกสาร", "ต้องแก้ไข", "รอโอนเงิน", "รอหลักฐานการโอน", "จ่ายแล้ว"].includes(String(rec.batchStatus || ""))) {
       return respond(await renderSaved(env, key, sheet, rec));
     }
-    await respond(textMsg("กำลังรวมรายการนี้เป็นรอบเบิกด่วน… ⏳"));
+    await respond(textMsg("กำลังสร้างใบเบิกด่วนจากรายการนี้… ⏳"));
     try {
       const out = await requestUrgentBatch(env, key, sheet.sheetId, sheet.token, [id]);
       if (!out.ok || !out.batches?.length) {
-        return push(env, lineTarget(event.source), textMsg("สร้างรอบเบิกด่วนไม่สำเร็จ กรุณาเปิด Dashboard เพื่อตรวจรายการ"));
+        return push(env, lineTarget(event.source), textMsg("สร้างใบเบิกด่วนไม่สำเร็จ กรุณาเปิด Dashboard เพื่อตรวจรายการ"));
       }
       const batch = out.batches[0];
       const updated = await getExpenseById(env, sheet.sheetId, id, sheet.token);
       const messages = [
-        textMsg(`สร้างรอบเบิกด่วนแล้ว ✅
+        textMsg(`สร้างใบเบิกด่วนแล้ว ✅
 เลขที่ ${batch.docId}
 รวม ฿${Number(batch.total || 0).toLocaleString("th-TH", { minimumFractionDigits: 2 })}`),
       ];
@@ -1082,7 +1082,7 @@ async function handlePostback(event, env, key, mode = "reply") {
       return push(env, lineTarget(event.source), messages);
     } catch (e) {
       console.error("urgent batch", e);
-      return push(env, lineTarget(event.source), textMsg(`สร้างรอบเบิกด่วนไม่สำเร็จ ❌
+      return push(env, lineTarget(event.source), textMsg(`สร้างใบเบิกด่วนไม่สำเร็จ ❌
 ${String(e.message || e).slice(0, 180)}`));
     }
   }
@@ -1288,8 +1288,8 @@ async function handleText(event, env, key) {
     const base = await dashUrl(env, key);
     const url = base ? `${base}&page=batches` : "";
     return reply(env, event.replyToken, textMsg(
-      `เปิดหน้ารอบเบิกได้ที่นี่
-ระบบรวมหลายรายการของผู้เบิกคนเดียวเป็นใบขอเบิกรวมอัตโนมัติทุกวันจันทร์ 11:00 น.` +
+      `เปิดหน้าใบเบิกได้ที่นี่
+ระบบรวมรายการย่อยของผู้เบิกคนเดียวเป็นใบเบิกหลัก 1 ไฟล์อัตโนมัติทุกวันจันทร์ 11:00 น.` +
       (url ? `
 
 ${url}` : "")
@@ -1314,7 +1314,7 @@ ${url}` : "")
       "• แดชบอร์ด — เปิดหน้ารวมทุกอย่าง\n" +
       "• ตั้งค่า — กรอกข้อมูลบริษัท\n" +
       "• อีเมล — เชื่อม Gmail และดูใบเสร็จ/ใบกำกับอัตโนมัติ\n" +
-      "• รอบเบิก — ดูรายการรอเข้ารอบและใบขอเบิกรวม\n" +
+      "• ใบเบิก — ดูรายการย่อยที่รอรวมและใบเบิกหลัก\n" +
       "• รีเซ็ตลิงก์ — ยกเลิกลิงก์เก่าทั้งหมด\n" +
       "• เชื่อม — เชื่อม Google"
     ));

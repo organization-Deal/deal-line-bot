@@ -1,7 +1,7 @@
-// ระบบรวมหลายรายการเป็น "รอบเบิก" ต่อผู้เบิก
-// - รอบปกติ: ปิดอัตโนมัติตามเวลาที่ตั้งไว้ (ค่าเริ่มต้น จันทร์ 11:00 Asia/Bangkok)
-// - รอบด่วน: สร้างทันทีจากรายการที่เลือก
-// - สูงสุดค่าเริ่มต้น 10 รายการต่อ PDF ถ้าเกินจะแบ่ง P1, P2, ...
+// ระบบรวมรายการย่อยหลายรายการเป็น "ใบเบิกหลัก" ต่อผู้เบิก
+// - ใบเบิกปกติ: สร้างอัตโนมัติตามเวลาที่ตั้งไว้ (ค่าเริ่มต้น จันทร์ 11:00 Asia/Bangkok)
+// - ใบเบิกด่วน: สร้างทันทีจากรายการที่เลือก
+// - สูงสุดค่าเริ่มต้น 10 รายการย่อยต่อ PDF ถ้าเกินจะแบ่ง P1, P2, ...
 
 import { getAccessToken } from "./google-auth.js";
 import { getUserToken } from "./oauth.js";
@@ -15,6 +15,7 @@ import { push, textMsg } from "./line.js";
 import { buildReimbursementCorrectionCard } from "./card.js";
 
 const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
+const DRIVE = "https://www.googleapis.com/drive/v3";
 export const TAB_BATCHES = "รอบเบิก";
 export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V3_20260803";
 
@@ -271,7 +272,7 @@ async function appendBatch(env, sheetId, batch, token = null) {
     lineNotifyStatus: batch.lineNotifyStatus || "ยังไม่แจ้ง",
     lineNotifyAt: batch.lineNotifyAt || "",
     rejectionReason: batch.rejectionReason || "",
-    auditLog: batch.auditLog || JSON.stringify([{ at: new Date().toISOString(), action: "created", detail: batch.note || "สร้างรอบเบิก" }]),
+    auditLog: batch.auditLog || JSON.stringify([{ at: new Date().toISOString(), action: "created", detail: batch.note || "สร้างใบเบิกหลัก" }]),
     updatedAt: batch.updatedAt || new Date().toISOString(),
   };
   const values = BATCH_SCHEMA.map((s) => full[s.key] ?? "");
@@ -376,7 +377,7 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
   if (requestedPayer) eligible = eligible.filter((r) => payerKey(r) === requestedPayer);
   if (type === "ด่วน" && !selected.size) eligible = eligible.filter((r) => r.batchType === "ด่วน" || r.batchStatus === "ขอเบิกด่วน");
 
-  if (!eligible.length) return { ok: true, runNo: "", batches: [], itemCount: 0, total: 0, message: "ไม่มีรายการรอเข้ารอบ" };
+  if (!eligible.length) return { ok: true, runNo: "", batches: [], itemCount: 0, total: 0, message: "ไม่มีรายการย่อยรอสร้างใบเบิก" };
 
   const runNo = options.runNo || await nextRunNo(env, sheetId, token, type);
   const groups = groupItems(eligible);
@@ -416,7 +417,7 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
         periodStart: period.start, periodEnd: period.end,
         itemIds: items.map((r) => r.id),
         part: `${p + 1}/${chunks.length}`,
-        note: options.note || (type === "ด่วน" ? "ผู้เบิกขอรับเงินด่วน" : "ปิดรอบอัตโนมัติ"),
+        note: options.note || (type === "ด่วน" ? "ผู้เบิกขอรับเงินด่วน" : "สร้างใบเบิกอัตโนมัติ"),
       };
 
       const pdf = await createBatchClaimPdf(env, batchDraft, items, settings, profile, token);
@@ -456,7 +457,7 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
           }, token).catch(() => {});
         }
         await updateBatchRow(env, sheetId, saved.id, {
-          status: "ยกเลิก", note: `สร้างรอบไม่สมบูรณ์: ${String(e.message || e).slice(0, 140)}`,
+          status: "ยกเลิก", note: `สร้างใบเบิกไม่สมบูรณ์: ${String(e.message || e).slice(0, 140)}`,
         }, token).catch(() => {});
         if (pdf.fileId) {
           await fetch(`https://www.googleapis.com/drive/v3/files/${pdf.fileId}`, {
@@ -477,7 +478,7 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
     return {
       ok: false,
       reason: "missing_payer_profile",
-      message: "ยังสร้างรอบไม่ได้ เพราะข้อมูลบัญชีผู้เบิกไม่ครบ",
+      message: "ยังสร้างใบเบิกไม่ได้ เพราะข้อมูลบัญชีผู้เบิกไม่ครบ",
       runNo: "",
       batches: [],
       itemCount: 0,
@@ -516,7 +517,7 @@ async function acquireBatchLock(env, tenant) {
   // Fallback สำหรับกรณี binding ยังไม่พร้อม: กันกดซ้ำภายใน isolate โดยไม่เขียน KV
   const now = Date.now();
   const existing = LOCAL_BATCH_LOCKS.get(tenant);
-  if (existing && existing.expiresAt > now) throw new Error("มีการปิดรอบของธุรกิจนี้กำลังทำงานอยู่ กรุณารอสักครู่");
+  if (existing && existing.expiresAt > now) throw new Error("มีการสร้างใบเบิกของธุรกิจนี้กำลังทำงานอยู่ กรุณารอสักครู่");
   const token = crypto.randomUUID();
   LOCAL_BATCH_LOCKS.set(tenant, { token, expiresAt: now + 5 * 60 * 1000 });
   return { mode: "local", tenant, token };
@@ -580,7 +581,7 @@ export async function requestUrgentBatch(env, tenant, sheetId, token, expenseIds
     return await createReimbursementBatches(env, tenant, sheetId, token, {
       type: "ด่วน",
       expenseIds: records.map((r) => r.id),
-      note: "สร้างรอบด่วนจากคำขอผู้เบิก",
+      note: "สร้างใบเบิกด่วนจากคำขอผู้เบิก",
     });
   } catch (error) {
     for (const r of records) {
@@ -768,10 +769,37 @@ async function notifyCorrectionRequired(env, sheetId, rec, items, reason, token 
   }
 }
 
-function driveDirectImageUrl(viewUrl) {
+function driveFileId(viewUrl) {
   const raw = String(viewUrl || "");
   const match = raw.match(/drive\.google\.com\/file\/d\/([^/?#]+)/i) || raw.match(/[?&]id=([^&#]+)/i);
-  return match?.[1] ? `https://lh3.googleusercontent.com/d/${match[1]}` : raw;
+  return match?.[1] || "";
+}
+
+function driveDirectImageUrl(viewUrl) {
+  const raw = String(viewUrl || "");
+  const fileId = driveFileId(raw);
+  return fileId ? `https://lh3.googleusercontent.com/d/${fileId}` : raw;
+}
+
+async function buildUpdatedMainClaim(env, sheetId, rec, token = null) {
+  const settings = await readSettings(env, sheetId, token);
+  const profile = payerProfile(settings, rec?.payerId, rec?.payerName);
+  const items = [];
+  for (const id of rec?.itemIds || []) {
+    const item = await getExpenseById(env, sheetId, id, token).catch(() => null);
+    if (item) items.push(item);
+  }
+  if (!items.length) throw new Error("ไม่พบรายการย่อยสำหรับสร้างใบเบิกหลัก");
+  return createBatchClaimPdf(env, rec, items, settings, profile, token);
+}
+
+async function removeOldMainClaim(token, oldUrl, newFileId = "") {
+  const oldFileId = driveFileId(oldUrl);
+  if (!oldFileId || oldFileId === newFileId) return;
+  await fetch(`${DRIVE}/files/${oldFileId}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => {});
 }
 
 async function notifyPaymentComplete(env, sheetId, rec, slipUrl, mediaType = "", token = null) {
@@ -798,14 +826,14 @@ async function notifyPaymentComplete(env, sheetId, rec, slipUrl, mediaType = "",
 
 export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, action, payload = {}, token = null) {
   const rec = await findBatch(env, sheetId, batchId, token);
-  if (!rec) return { ok: false, reason: "not_found", message: "ไม่พบรอบเบิก" };
+  if (!rec) return { ok: false, reason: "not_found", message: "ไม่พบใบเบิก" };
   const now = new Date().toISOString();
 
   if (action === "approve") {
     const current = String(rec.status || "");
-    if (["จ่ายแล้ว", "ยกเลิก"].includes(current)) return { ok: false, reason: "batch_closed", message: "รอบนี้ปิดงานแล้ว" };
+    if (["จ่ายแล้ว", "ยกเลิก"].includes(current)) return { ok: false, reason: "batch_closed", message: "ใบเบิกนี้ปิดงานแล้ว" };
     if (!["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(current)) {
-      return { ok: false, reason: "not_waiting_review", message: "รอบนี้ไม่ได้อยู่ในขั้นตรวจเอกสาร" };
+      return { ok: false, reason: "not_waiting_review", message: "ใบเบิกนี้ไม่ได้อยู่ในขั้นตรวจเอกสาร" };
     }
     const patch = {
       status: "รอโอนเงิน", approvedAt: rec.approvedAt || now, rejectionReason: "",
@@ -823,7 +851,7 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
     if (!["รอโอนเงิน", "อนุมัติแล้ว", "รอจ่าย"].includes(current)) {
       const message = ["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(current)
         ? "ต้องตรวจเอกสารและกดเอกสารผ่านก่อน"
-        : "รอบนี้ไม่ได้อยู่ในสถานะรอโอนเงิน";
+        : "ใบเบิกนี้ไม่ได้อยู่ในสถานะรอโอนเงิน";
       return { ok: false, reason: "batch_not_payable", message };
     }
     const patch = {
@@ -838,7 +866,7 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
 
   if (action === "reject") {
     if (!["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(String(rec.status || ""))) {
-      return { ok: false, reason: "not_waiting_review", message: "ตีกลับได้เฉพาะรอบที่กำลังตรวจเอกสาร" };
+      return { ok: false, reason: "not_waiting_review", message: "ตีกลับได้เฉพาะใบเบิกที่กำลังตรวจเอกสาร" };
     }
     const reason = String(payload.reason || "").trim();
     if (!reason) return { ok: false, reason: "reason_required", message: "กรุณาระบุเหตุผลที่ตีกลับ" };
@@ -867,15 +895,36 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
 
   if (action === "resubmit") {
     if (!["ต้องแก้ไข", "ตีกลับ"].includes(String(rec.status || ""))) {
-      return { ok: false, reason: "not_waiting_correction", message: "รอบนี้ไม่ได้อยู่ในสถานะต้องแก้ไข" };
+      return { ok: false, reason: "not_waiting_correction", message: "ใบเบิกนี้ไม่ได้อยู่ในสถานะต้องแก้ไข" };
     }
+
+    // สร้างใบเบิกหลักใหม่จากข้อมูลและหลักฐานล่าสุดก่อนส่งกลับให้บัญชีตรวจ
+    // เพื่อให้ PDF หลักมีใบแทนและไฟล์แนบที่พนักงานเพิ่งแก้ไขครบถ้วน
+    let mainClaim;
+    try {
+      mainClaim = await buildUpdatedMainClaim(env, sheetId, rec, token);
+    } catch (e) {
+      return {
+        ok: false,
+        reason: "main_claim_regeneration_failed",
+        message: `สร้างใบเบิกหลักฉบับอัปเดตไม่สำเร็จ: ${String(e.message || e).slice(0, 180)}`,
+      };
+    }
+
     const patch = {
-      status: "รอตรวจเอกสาร", rejectionReason: "", updatedAt: now,
-      auditLog: auditJson(rec, "correction_resubmitted", {}),
+      status: "รอตรวจเอกสาร", rejectionReason: "", pdfUrl: mainClaim.pdfUrl, updatedAt: now,
+      auditLog: auditJson(rec, "correction_resubmitted", { mainClaimRegenerated: true }),
     };
     const out = await updateBatchRow(env, sheetId, batchId, patch, token);
-    if (out.ok) await patchBatchExpenses(env, sheetId, rec.itemIds, { paid: false, batchStatus: "รอตรวจเอกสาร" }, token);
-    return out;
+    if (out.ok) {
+      await patchBatchExpenses(env, sheetId, rec.itemIds, {
+        paid: false,
+        batchStatus: "รอตรวจเอกสาร",
+        batchClaimPdfUrl: mainClaim.pdfUrl,
+      }, token);
+      await removeOldMainClaim(token, rec.pdfUrl, mainClaim.fileId);
+    }
+    return { ...out, pdfUrl: mainClaim.pdfUrl };
   }
 
   if (action === "retry_payment_notification") {
@@ -915,12 +964,12 @@ async function attachRepaymentProofToExpenses(env, sheetId, itemIds, slipUrl, pa
 
 export async function uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token = null) {
   const rec = await findBatch(env, sheetId, batchId, token);
-  if (!rec) return { ok: false, reason: "not_found", message: "ไม่พบรอบเบิก" };
+  if (!rec) return { ok: false, reason: "not_found", message: "ไม่พบใบเบิก" };
   const currentStatus = String(rec.status || "");
   if (["ต้องแก้ไข", "ตีกลับ", "รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(currentStatus)) {
     return { ok: false, reason: "review_required", message: "ต้องให้เอกสารผ่านก่อนแนบหลักฐานการโอน" };
   }
-  if (currentStatus === "จ่ายแล้ว" || rec.paymentSlipUrl) return { ok: false, reason: "already_paid", message: "รอบนี้แนบหลักฐานและปิดงานแล้ว" };
+  if (currentStatus === "จ่ายแล้ว" || rec.paymentSlipUrl) return { ok: false, reason: "already_paid", message: "ใบเบิกนี้แนบหลักฐานและปิดงานแล้ว" };
   if (currentStatus !== "รอหลักฐานการโอน" && String(rec.transferStatus || "") !== "ตั้งโอนแล้ว") {
     return { ok: false, reason: "transfer_required", message: "ต้องบันทึกว่าโอนเงินแล้วก่อนแนบหลักฐาน" };
   }
@@ -955,7 +1004,7 @@ export async function uploadReimbursementPaymentSlip(env, sheetId, batchId, file
   return {
     ok: true, batchId, status: "จ่ายแล้ว", paymentSlipUrl: slipUrl, lineNotifyStatus: notice.status,
     record: notifyUpdate.ok ? notifyUpdate.record : out.record,
-    warning: notifyUpdate.ok ? "" : "บันทึกสถานะแจ้ง LINE ไม่สำเร็จ แต่รอบถูกปิดและแนบหลักฐานแล้ว",
+    warning: notifyUpdate.ok ? "" : "บันทึกสถานะแจ้ง LINE ไม่สำเร็จ แต่ใบเบิกถูกปิดและแนบหลักฐานแล้ว",
   };
 }
 
@@ -1007,7 +1056,7 @@ export async function runScheduledReimbursementBatches(env) {
       const out = await createReimbursementBatches(env, tenant, sheetId, token, { type: "ปกติ", settings });
       if (!out.ok) {
         const details = (out.blocked || []).slice(0, 3).map((x) => `• ${x.payerName}: ${(x.missing || []).join(", ")}`).join("\n");
-        await push(env, tenant, textMsg(`ยังปิดรอบเบิกอัตโนมัติไม่ได้ ⚠️\nข้อมูลบัญชีผู้เบิกไม่ครบ\n${details || out.message || "เปิดหน้า ทีมของฉัน เพื่อตรวจข้อมูล"}`)).catch(() => {});
+        await push(env, tenant, textMsg(`ยังสร้างใบเบิกอัตโนมัติไม่ได้ ⚠️\nข้อมูลบัญชีผู้เบิกไม่ครบ\n${details || out.message || "เปิดหน้า ทีมของฉัน เพื่อตรวจข้อมูล"}`)).catch(() => {});
         results.push({ tenant, ...out });
         continue;
       }
@@ -1015,19 +1064,19 @@ export async function runScheduledReimbursementBatches(env) {
       if (out.itemCount > 0) {
         const url = await dashboardBatchUrl(env, tenant);
         const line = [
-          `ปิดรอบเบิกอัตโนมัติแล้ว ✅`,
-          `รอบ ${out.runNo}`,
+          `สร้างใบเบิกอัตโนมัติแล้ว ✅`,
+          `รหัสรอบจ่าย ${out.runNo}`,
           `${out.people} คน · ${out.itemCount} รายการ`,
           `รวม ฿${Number(out.total || 0).toLocaleString("th-TH", { minimumFractionDigits: 2 })}`,
           out.blocked?.length ? `ยังไม่รวม ${out.blocked.length} คน เพราะข้อมูลบัญชีไม่ครบ` : "",
-          url ? `\nตรวจและอนุมัติรอบเบิก:\n${url}` : "",
+          url ? `\nตรวจและอนุมัติใบเบิก:\n${url}` : "",
         ].filter(Boolean).join("\n");
         await push(env, tenant, textMsg(line)).catch((e) => console.warn("batch notify", tenant, e.message));
       }
     } catch (e) {
       await releaseScheduledRun(env, tenant, scheduleSlot);
       console.error("scheduled batch", tenant, e);
-      await push(env, tenant, textMsg(`ปิดรอบเบิกไม่สำเร็จ ❌\n${String(e.message || e).slice(0, 180)}\nเปิด Dashboard แล้วกดปิดรอบด้วยตนเอง`)).catch(() => {});
+      await push(env, tenant, textMsg(`สร้างใบเบิกอัตโนมัติไม่สำเร็จ ❌\n${String(e.message || e).slice(0, 180)}\nเปิด Dashboard แล้วสร้างใบเบิกด้วยตนเอง`)).catch(() => {});
       results.push({ tenant, ok: false, error: String(e) });
     }
   }
