@@ -2,7 +2,7 @@
 // โครงเอกสาร: หน้าสรุปใบเบิก → ใบแทนของแต่ละรายการ (ถ้ามี) → หลักฐาน/ใบเสร็จของแต่ละรายการ
 // รองรับสูงสุด 10 รายการต่อใบเบิกตามค่าระบบ
 
-export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V2_20260803";
+export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V3_SEPARATE_PAGES_20260804";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
@@ -163,8 +163,17 @@ function shell(title, body) {
     @page{size:A4;margin:11mm 12mm}
     body{font-family:'Sarabun','Noto Sans Thai',Tahoma,Arial,sans-serif;color:#111;font-size:9.2pt;line-height:1.35;margin:0}
     table{border-collapse:collapse}.grid{border:1px solid #222}.grid th,.grid td{border:1px solid #222}.nob,.nob tr,.nob td{border:0!important}
-    .page-break{page-break-before:always}.keep{page-break-inside:avoid}.muted{color:#666}.doc-link{color:#111;text-decoration:underline}
+    .page-break{page-break-before:always;break-before:page}.keep{page-break-inside:avoid;break-inside:avoid}.muted{color:#666}.doc-link{color:#111;text-decoration:underline}
   </style></head><body>${body}</body></html>`;
+}
+
+// Google Docs' HTML importer does not consistently honor page-break rules that
+// exist only in a CSS class. An explicit inline marker is more reliable when the
+// HTML is converted to a Google Doc and then exported as PDF.
+function hardPageBreak() {
+  // A paragraph with an inline page-break rule is honored by the Google Docs
+  // HTML importer more consistently than a class or a page-break on <section>.
+  return `<p aria-hidden="true" style="clear:both;margin:0;padding:0;height:0;line-height:0;font-size:0;page-break-before:always;break-before:page">&nbsp;</p>`;
 }
 
 function findPeriod(items) {
@@ -270,7 +279,7 @@ function replacementReceiptSection(item, settings, payer, index) {
   const detail = item.note || item.category || "ค่าใช้จ่าย";
   const reason = item.noReceiptReason || "ไม่อาจเรียกเก็บใบเสร็จรับเงินจากผู้รับได้";
   const receiptNo = item.slipNo || `รายการที่ ${index + 1}`;
-  return `<section class="page-break">
+  return `<section style="page-break-inside:auto;break-inside:auto">
     ${companyHeader(settings)}
     <div style="font-size:8.8pt;line-height:1.45;margin:5px 0 10px"><b>เอกสารประกอบใบเบิก:</b> ${esc(item.batchDocId || "—")} · <b>รายการที่:</b> ${index + 1} · <b>เลขที่ใบแทน:</b> ${esc(receiptNo)}</div>
     <div style="text-align:center;font-size:16.5pt;font-weight:700;margin:6px 0 3px">ใบรับรองแทนใบเสร็จรับเงิน</div>
@@ -297,7 +306,7 @@ function evidenceSection(item, index) {
   const attachments = Array.isArray(item.packetAttachments) ? item.packetAttachments : [];
   const tx = parseDate(item.dateISO || item.dateText || item.date).en;
   const title = item.vendor || item.note || item.category || "รายการเบิก";
-  const head = `<section class="page-break">
+  const head = `<section style="page-break-inside:auto;break-inside:auto">
     <div style="font-size:8.5pt;color:#666">เอกสารประกอบใบเบิก · รายการที่ ${index + 1}</div>
     <div style="font-size:15pt;font-weight:700;margin:4px 0 8px">${esc(title)}</div>
     <table class="grid" border="1" cellspacing="0" cellpadding="5" width="100%" style="width:100%;font-size:8.8pt;margin-bottom:12px">
@@ -308,7 +317,7 @@ function evidenceSection(item, index) {
   if (!attachments.length) {
     return `${head}<div style="border:1px dashed #999;padding:28px;text-align:center;color:#666">ยังไม่มีหลักฐานแนบสำหรับรายการนี้</div></section>`;
   }
-  const body = attachments.map((a, i) => `<div style="${i ? "page-break-before:always;" : ""}page-break-inside:avoid">
+  const body = attachments.map((a, i) => `${i ? hardPageBreak() : ""}<div style="page-break-inside:avoid;break-inside:avoid">
       <div style="font-size:10pt;font-weight:700;margin-bottom:6px">${esc(a.label)}${a.name && a.name !== a.label ? ` · ${esc(a.name)}` : ""}</div>
       ${a.previewUrl ? `<div style="text-align:center;border:1px solid #ddd;padding:8px"><img src="${esc(a.previewUrl)}" alt="${esc(a.label)}" width="620" style="width:620px;max-height:850px;height:auto;object-fit:contain"></div>` : `<div style="border:1px dashed #aaa;padding:24px;text-align:center">ไฟล์แนบไม่สามารถแสดงตัวอย่างใน PDF ได้</div>`}
       ${a.previewOnly ? `<div style="font-size:8pt;color:#666;margin-top:5px">ภาพนี้เป็นหน้าตัวอย่างของไฟล์ PDF ต้นฉบับ</div>` : ""}
@@ -341,7 +350,17 @@ function buildBatchHtml(batch, items, settings = {}, payer = {}) {
   ).join("");
   const evidenceCount = items.reduce((sum, r) => sum + (Array.isArray(r.packetAttachments) ? r.packetAttachments.length : 0), 0);
   const replacementCount = items.filter(needsReplacementReceipt).length;
-  const appendices = items.map((item, i) => `${replacementReceiptSection(item, settings, payer, i)}${evidenceSection(item, i)}`).join("");
+  const appendixDocuments = [];
+  items.forEach((item, i) => {
+    const replacement = replacementReceiptSection(item, settings, payer, i);
+    if (replacement) appendixDocuments.push(replacement);
+    appendixDocuments.push(evidenceSection(item, i));
+  });
+  // The summary claim is one document. Every replacement receipt and every
+  // evidence packet starts on a new physical page after it.
+  const appendices = appendixDocuments.length
+    ? `${hardPageBreak()}${appendixDocuments.join(hardPageBreak())}`
+    : "";
 
   return shell(`ใบเบิก ${batch.docId}`, `
     ${companyHeader(settings)}
