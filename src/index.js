@@ -44,7 +44,7 @@ import {
 } from "./member-profile.js";
 import {
   MultiExpenseSession, touchMultiSession, addMultiImage,
-  forceMultiSummary, cancelMultiSession, handleMultiHttp,
+  forceMultiSummary, cancelMultiSession, confirmMultiSession, handleMultiHttp,
 } from "./multi-expense.js";
 
 export { MultiExpenseSession } from "./multi-expense.js";
@@ -494,7 +494,7 @@ export default {
       const key = tenantKey(event.source);
       const isImage = event.type === "message" && event.message?.type === "image";
       const postbackAct = event.type === "postback" ? new URLSearchParams(event.postback?.data || "").get("act") : "";
-      const isConfirm = postbackAct === "confirm" || postbackAct === "confirm_force";
+      const isConfirm = postbackAct === "confirm" || postbackAct === "confirm_force" || postbackAct === "multi_confirm";
 
       if (isImage) {
         // Session ต่อผู้ส่ง 1 คนในแต่ละบริษัท รองรับส่งรูปหลายใบพร้อมกันโดยไม่ตอบสแปมทุกภาพ
@@ -1073,6 +1073,25 @@ async function handlePostback(event, env, key, mode = "reply") {
     }
 
     return respond(await renderSaved(env, key, sheet, rec, rec));
+  }
+
+  if (act === "multi_confirm") {
+    const out = await confirmMultiSession(env, key, uid || key);
+    if (out.ok) return out;
+
+    if (out.code === "profile_required" && out.profileUrl) {
+      return respond(textMsg(`${out.error || "กรอกข้อมูลผู้เบิกให้ครบก่อน"}
+
+เปิดกรอกข้อมูล:
+${out.profileUrl}`));
+    }
+
+    const reviewText = out.reviewUrl ? `
+
+เปิดตรวจและแก้ไข:
+${out.reviewUrl}` : "";
+    return respond(textMsg(`ยังยืนยันรายการไม่ได้ครับ
+${out.error || "กรุณาตรวจข้อมูลอีกครั้ง"}${reviewText}`));
   }
 
   if (act === "multi_cancel") {

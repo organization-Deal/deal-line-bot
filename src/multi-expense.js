@@ -149,6 +149,19 @@ export async function cancelMultiSession(env, tenant, userId) {
   return doJson(stubFor(env, sid), "/internal-cancel", { sid });
 }
 
+export async function confirmMultiSession(env, tenant, userId, { force = false } = {}) {
+  const sid = await multiSessionKey(tenant, userId);
+  const res = await stubFor(env, sid).fetch("https://multi.local/internal-commit", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sid, force }),
+  });
+  const text = await res.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text || "ระบบตอบกลับไม่ถูกต้อง" }; }
+  return { ...data, ok: res.ok && data.ok !== false, statusCode: res.status };
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -641,7 +654,8 @@ function summaryCard(s, env) {
         spacing: "sm",
         paddingAll: "14px",
         contents: [
-          { type: "button", style: "primary", color: "#1D1D1F", height: "sm", action: { type: "uri", label: "ตรวจและยืนยัน", uri: reviewUrl } },
+          { type: "button", style: "primary", color: "#1D1D1F", height: "sm", action: { type: "postback", label: "ยืนยันรายการถูกต้อง", data: `act=multi_confirm&s=${encodeURIComponent(s.sid)}` } },
+          { type: "button", style: "secondary", height: "sm", action: { type: "uri", label: "ตรวจและแก้ไข", uri: reviewUrl } },
           { type: "button", style: "secondary", height: "sm", action: { type: "postback", label: "ยกเลิกชุด", data: `act=multi_cancel&s=${encodeURIComponent(s.sid)}` } },
         ],
       },
@@ -812,6 +826,16 @@ export class MultiExpenseSession {
       await this.save(s);
       if (s.targetId) await push(this.env, s.targetId, textMsg("ยกเลิกชุดเอกสารแล้วครับ รูปยังอยู่ใน Google Drive"));
       return json({ ok: true });
+    }
+
+    if (url.pathname === "/internal-commit" && request.method === "POST") {
+      if (!s || !Object.keys(s.items || {}).length) return json({ error: "ยังไม่มีชุดเอกสาร", code: "empty_session" }, 404);
+      const b = await parseBody(request);
+      const result = await this.commit(s, { force: b.force === true });
+      if (result.ok) return result;
+      const payload = await result.json().catch(() => ({ error: "ยืนยันรายการไม่สำเร็จ" }));
+      const reviewUrl = `${baseUrl(this.env)}/multi/review?s=${encodeURIComponent(s.sid)}&k=${encodeURIComponent(s.token)}`;
+      return json({ ...payload, reviewUrl }, result.status);
     }
 
     if (!s || !this.authorized(s, url)) return json({ error: "ลิงก์หมดอายุหรือไม่ถูกต้อง" }, 401);
