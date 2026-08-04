@@ -49,7 +49,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v2.4_FINANCE_CHANNEL_RECONCILIATION";
+const VERSION = "DEAL_LINE_BOT_v2.5_PDF_SPLIT_3_BUTTONS_20260805";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";

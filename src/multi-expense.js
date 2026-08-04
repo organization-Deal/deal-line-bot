@@ -1,4 +1,4 @@
-// src/multi-expense.js — v1.8 (Apple-like LINE summary + unified review UI)
+// src/multi-expense.js — v1.9 (LINE direct confirmation: 3-button summary card)
 // รับรูปหลายใบจาก LINE → OCR ทีละรูป → Durable Object จัดกลุ่มรายการอัตโนมัติ
 // ถ้า AI จับคู่ไม่ชัวร์ ผู้ใช้เปิดหน้าตรวจเอกสารแล้วจัดรูปเองก่อนบันทึก
 
@@ -13,6 +13,8 @@ import {
   createMemberOnboardingUrl, getMemberProfile,
   memberProfileComplete, missingMemberFields,
 } from "./member-profile.js";
+
+export const MULTI_CARD_VERSION = "MULTI_CARD_3_BUTTONS_20260805";
 
 const SESSION_IDLE_MS = 60 * 60 * 1000;
 const DEBOUNCE_MS = 2200;
@@ -634,6 +636,8 @@ function summaryCard(s, env) {
       }],
     });
   }
+
+  console.log(`[multi-card] version=${MULTI_CARD_VERSION} sid=${s.sid} groups=${v.counts.groups}`);
 
   return {
     type: "flex",
