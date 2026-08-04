@@ -1,8 +1,10 @@
+import { PDFDocument } from "pdf-lib";
+
 // สร้าง "ใบเบิกหลัก" 1 ไฟล์ต่อผู้เบิก
 // โครงเอกสาร: หน้าสรุปใบเบิก (จบแยกหน้า) → ใบแทนของแต่ละรายการ → หลักฐาน/ใบเสร็จของแต่ละรายการ
 // รองรับสูงสุด 10 รายการต่อใบเบิกตามค่าระบบ
 
-export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V5_20260805";
+export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V6_20260805";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
@@ -286,7 +288,7 @@ function metaNumberFor(item = {}, batch = {}, index = 0) {
   return item.expenseId || item.recordId || item.itemId || item.reimbursementId || item.rowId || item.id || `${batch.docId || batch.runNo || 'BATCH'}-${index + 1}`;
 }
 
-function replacementReceiptSection(item, settings, payer, batch, index) {
+function replacementReceiptBody(item, settings, payer, batch, index) {
   if (!needsReplacementReceipt(item)) return "";
   const tx = parseDate(item.dateISO || item.dateText || item.date).en;
   const issue = issueDateFor(item, batch);
@@ -296,10 +298,9 @@ function replacementReceiptSection(item, settings, payer, batch, index) {
   const reason = item.noReceiptReason || "ไม่อาจเรียกเก็บใบเสร็จรับเงินจากผู้รับได้ และนำค่าใช้จ่ายไปใช้ในงานของบริษัทโดยแท้จริง";
   const documentNo = metaNumberFor(item, batch, index);
   const requestNo = item.requestNo || item.reqNo || batch.docId || batch.runNo || "—";
-  const blankRows = Array.from({ length: 9 }, () => `<tr style="height:34px"><td></td><td></td><td></td><td></td></tr>`).join("");
-  return `
-    ${hardPageBreak()}
-    ${companyHeader(settings)}
+  const blankRows = Array.from({ length: 8 }, () => `<tr style="height:32px"><td></td><td></td><td></td><td></td></tr>`).join("");
+
+  return `${companyHeader(settings)}
     <table class="nob" border="0" width="100%" style="width:100%;margin:6px 0 4px">
       <tr>
         <td style="border:0;font-size:9.2pt;line-height:1.5">
@@ -309,8 +310,8 @@ function replacementReceiptSection(item, settings, payer, batch, index) {
         </td>
       </tr>
     </table>
-    <div style="text-align:center;font-size:18pt;font-weight:700;margin:18px 0 6px">ใบรับรองแทนใบเสร็จรับเงิน</div>
-    <div style="text-align:center;font-size:11.2pt;font-weight:700;margin-bottom:16px">บจ. / หจก. ${esc(settings.company_name || "—")} (ผู้ซื้อ/ผู้รับบริการ)</div>
+    <div style="text-align:center;font-size:18pt;font-weight:700;margin:16px 0 6px">ใบรับรองแทนใบเสร็จรับเงิน</div>
+    <div style="text-align:center;font-size:11.2pt;font-weight:700;margin-bottom:15px">บจ. / หจก. ${esc(settings.company_name || "—")} (ผู้ซื้อ/ผู้รับบริการ)</div>
 
     <table class="grid" border="1" cellspacing="0" cellpadding="6" width="100%" style="width:100%;table-layout:fixed;font-size:9.1pt">
       <thead>
@@ -322,7 +323,7 @@ function replacementReceiptSection(item, settings, payer, batch, index) {
         </tr>
       </thead>
       <tbody>
-        <tr style="height:56px">
+        <tr style="height:54px">
           <td style="text-align:center">${esc(tx)}</td>
           <td>${esc(detail)}</td>
           <td style="text-align:center">${money(item.amount)}</td>
@@ -333,13 +334,13 @@ function replacementReceiptSection(item, settings, payer, batch, index) {
     </table>
     <div style="text-align:right;font-size:11pt;font-weight:700;margin-top:8px">รวมทั้งสิ้น : ${money(item.amount)} บาท</div>
 
-    <div class="keep" style="margin-top:20px;font-size:9.1pt;line-height:1.65">
+    <div class="keep" style="margin-top:18px;font-size:9.1pt;line-height:1.62">
       <div>ข้าพเจ้า <b>${esc(claimant)}</b> (ผู้เบิกจ่าย) ตำแหน่ง ${esc(position)}</div>
-      <div style="margin-top:7px">ขอรับรองว่า รายจ่ายข้างต้นนี้${esc(reason)}</div>
-      <div style="margin-top:7px">วันที่ตั้งเบิก ${esc(issue)}</div>
+      <div style="margin-top:6px">ขอรับรองว่า รายจ่ายข้างต้นนี้${esc(reason)}</div>
+      <div style="margin-top:6px">วันที่ตั้งเบิก ${esc(issue)}</div>
     </div>
 
-    <table class="nob keep" border="0" cellspacing="0" cellpadding="0" width="100%" style="width:100%;margin-top:26px">
+    <table class="nob keep" border="0" cellspacing="0" cellpadding="0" width="100%" style="width:100%;margin-top:22px">
       <tr>
         ${replacementSignatureCell(claimant, "ผู้เบิกจ่าย", payer.signatureUrl || "")}
         ${replacementSignatureCell(settings.approver_name || "—", "ผู้อนุมัติ", settings.approver_sign_url || "")}
@@ -351,105 +352,102 @@ function replacementReceiptSection(item, settings, payer, batch, index) {
     </table>`;
 }
 
-function evidenceSection(item, index) {
+function evidenceBodies(item, index) {
   const attachments = Array.isArray(item.packetAttachments) ? item.packetAttachments : [];
-  if (!attachments.length) return "";
-
-  return attachments.map((a) => `${hardPageBreak()}
-    <div style="text-align:center;page-break-inside:avoid;break-inside:avoid">
+  return attachments.map((a) => `
+    <div style="text-align:center;page-break-inside:avoid;break-inside:avoid;padding-top:4px">
       ${a.previewUrl
         ? `<img src="${esc(a.previewUrl)}" alt="หลักฐานรายการที่ ${index + 1}" width="650" style="width:650px;max-width:100%;max-height:930px;height:auto;object-fit:contain">`
         : `<div style="border:1px dashed #aaa;padding:24px;text-align:center">ไฟล์แนบไม่สามารถแสดงตัวอย่างใน PDF ได้</div>`}
-    </div>`).join("");
+    </div>`);
 }
 
-function buildSummarySection(batch, items, settings = {}, payer = {}) {
+function buildSummaryBody(batch, items, settings = {}, payer = {}) {
   const issue = issueDateFor({}, batch);
   const period = findPeriod(items);
   const total = items.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-  const typeLabel = batch.type === "ด่วน" ? "ใบเบิกด่วน" : "ใบเบิกปกติ";
   const rows = items.map((r, i) => {
     const d = parseDate(r.dateISO || r.dateText || r.date).en;
     const detail = r.note || r.vendor || r.category || "ค่าใช้จ่าย";
-    const evidenceCount = Array.isArray(r.packetAttachments) ? r.packetAttachments.length : 0;
     return `<tr style="height:31px;page-break-inside:avoid;break-inside:avoid">
       <td style="text-align:center">${i + 1}</td>
       <td style="text-align:center">${esc(d)}</td>
       <td>${esc(detail)}</td>
-      <td style="text-align:center">${evidenceCount}</td>
-      <td style="text-align:center">${needsReplacementReceipt(r) ? "มี" : "—"}</td>
       <td style="text-align:right">${money(r.amount)}</td>
     </tr>`;
   }).join("");
   const blankCount = Math.max(0, 10 - items.length);
   const blanks = Array.from({ length: blankCount }, () =>
-    `<tr style="height:26px"><td>&nbsp;</td><td></td><td></td><td></td><td></td><td></td></tr>`
+    `<tr style="height:26px"><td>&nbsp;</td><td></td><td></td><td></td></tr>`
   ).join("");
-  const evidenceCount = items.reduce((sum, r) => sum + (Array.isArray(r.packetAttachments) ? r.packetAttachments.length : 0), 0);
-  const replacementCount = items.filter(needsReplacementReceipt).length;
 
-  return `
-    <div class="break-after">
-      ${companyHeader(settings)}
-      <table class="nob" border="0" width="100%" style="width:100%;border:0;margin:2px 0 8px">
-        <tr>
-          <td style="border:0;font-size:8.7pt;vertical-align:bottom">
-            <div><b>ประเภท:</b> ${esc(typeLabel)}</div>
-            <div><b>ช่วงรายการ:</b> ${esc(period.start)} – ${esc(period.end)}</div>
-          </td>
-          <td style="border:0;text-align:right;font-size:8.8pt;vertical-align:bottom">
-            <div><b>เลขที่ใบเบิก</b></div><div style="font-size:10.5pt;font-weight:700">${esc(batch.docId)}</div>
-          </td>
-        </tr>
-      </table>
+  return `${companyHeader(settings)}
+    <table class="nob" border="0" width="100%" style="width:100%;border:0;margin:2px 0 8px">
+      <tr>
+        <td style="border:0;font-size:8.7pt;vertical-align:bottom">
+          <div><b>ช่วงรายการ:</b> ${esc(period.start)} - ${esc(period.end)}</div>
+        </td>
+        <td style="border:0;text-align:right;font-size:8.8pt;vertical-align:bottom">
+          <div><b>เลขที่ใบเบิก</b></div><div style="font-size:10.5pt;font-weight:700">${esc(batch.docId)}</div>
+        </td>
+      </tr>
+    </table>
 
-      <div style="text-align:center;font-size:18pt;font-weight:700;margin:4px 0 2px">ใบเบิก</div>
-      <div style="text-align:center;font-size:9.2pt;margin-bottom:11px">${esc(typeLabel)} · รวม ${items.length} รายการย่อยไว้ในเอกสารฉบับเดียว</div>
+    <div style="text-align:center;font-size:18pt;font-weight:700;margin:4px 0 2px">ใบเบิก</div>
+    <div style="text-align:center;font-size:9.2pt;margin-bottom:11px">รวม ${items.length} รายการย่อยไว้ในเอกสารฉบับเดียว</div>
 
-      <table class="grid" border="1" cellspacing="0" cellpadding="5" width="100%" style="width:100%;table-layout:fixed;font-size:8.6pt">
-        <thead><tr style="height:31px">
-          <th width="6%">ลำดับ</th><th width="13%">วันที่</th><th width="43%">รายการ</th><th width="10%">หลักฐาน</th><th width="10%">ใบแทน</th><th width="18%">จำนวนเงิน<br>(บาท)</th>
-        </tr></thead>
-        <tbody>${rows}${blanks}</tbody>
-      </table>
+    <table class="grid" border="1" cellspacing="0" cellpadding="5" width="100%" style="width:100%;table-layout:fixed;font-size:8.6pt">
+      <thead><tr style="height:31px">
+        <th width="9%">ลำดับ</th>
+        <th width="19%">วันที่</th>
+        <th width="52%">รายการ</th>
+        <th width="20%">จำนวนเงิน<br>(บาท)</th>
+      </tr></thead>
+      <tbody>${rows}${blanks}</tbody>
+    </table>
 
-      <div style="text-align:right;font-size:10.2pt;font-weight:700;margin-top:8px">รวมทั้งสิ้น ${money(total)} บาท</div>
+    <div style="text-align:right;font-size:10.2pt;font-weight:700;margin-top:8px">รวมทั้งสิ้น ${money(total)} บาท</div>
 
-      <div style="font-size:8.7pt;line-height:1.55;margin-top:14px;page-break-inside:avoid;break-inside:avoid">
-        <div><b>ผู้ขอเบิก:</b> ${esc(payer.name || batch.payerName || "—")}${payer.role ? ` · ${esc(payer.role)}` : ""}</div>
-        <div><b>ชื่อบัญชี:</b> ${esc(payer.accountName || payer.name || batch.payerName || "—")}&nbsp;&nbsp;&nbsp;&nbsp;<b>เลขบัญชี:</b> ${esc(payer.accountNo || "—")}</div>
-        <div><b>ธนาคาร:</b> ${esc(payer.bank || "—")}&nbsp;&nbsp;&nbsp;&nbsp;<b>เอกสารในชุด:</b> หลักฐาน ${evidenceCount} ไฟล์ · ใบแทน ${replacementCount} ใบ</div>
-        <div><b>รหัสรอบจ่าย:</b> ${esc(batch.runNo)}&nbsp;&nbsp;&nbsp;&nbsp;<b>จัดทำเมื่อ:</b> ${esc(issue)}</div>
-      </div>
-
-      <div style="font-size:8.2pt;color:#666;margin-top:12px">หน้าถัดไปเป็นใบแทนและหลักฐานของรายการย่อย เรียงตามลำดับในตารางด้านบน</div>
+    <div style="font-size:8.7pt;line-height:1.55;margin-top:14px;page-break-inside:avoid;break-inside:avoid">
+      <div><b>ผู้ขอเบิก:</b> ${esc(payer.name || batch.payerName || "—")}${payer.role ? ` · ${esc(payer.role)}` : ""}</div>
+      <div><b>ชื่อบัญชี:</b> ${esc(payer.accountName || payer.name || batch.payerName || "—")}&nbsp;&nbsp;&nbsp;&nbsp;<b>เลขบัญชี:</b> ${esc(payer.accountNo || "—")}</div>
+      <div><b>ธนาคาร:</b> ${esc(payer.bank || "—")}</div>
+      <div><b>รหัสรอบจ่าย:</b> ${esc(batch.runNo)}&nbsp;&nbsp;&nbsp;&nbsp;<b>จัดทำเมื่อ:</b> ${esc(issue)}</div>
     </div>`;
 }
 
-function buildBatchHtml(batch, items, settings = {}, payer = {}) {
-  const summary = buildSummarySection(batch, items, settings, payer);
-  const appendices = items.map((item, i) => `${replacementReceiptSection(item, settings, payer, batch, i)}${evidenceSection(item, i)}`).join("");
-  return shell(`ใบเบิก ${batch.docId}`, `${summary}${appendices}`);
-}
-
-async function htmlToPdf(token, name, html) {
+async function htmlToPdfBytes(token, name, html) {
   let docId = "";
   try {
     const doc = await uploadMultipart(token, {
-      name: `${name} (ต้นฉบับ)`,
+      name: `${name} (ต้นฉบับชั่วคราว)`,
       mimeType: "application/vnd.google-apps.document",
     }, "text/html; charset=UTF-8", new TextEncoder().encode(html));
     docId = doc.id;
-    const pdf = await exportPdf(token, docId);
-    const file = await uploadMultipart(token, {
-      name: `${name}.pdf`,
-      mimeType: "application/pdf",
-    }, "application/pdf", pdf);
-    await shareAnyone(token, file.id);
-    return { fileId: file.id, url: file.webViewLink || `https://drive.google.com/file/d/${file.id}/view` };
+    return await exportPdf(token, docId);
   } finally {
     if (docId) await deleteFile(token, docId);
   }
+}
+
+async function mergePdfBytes(parts) {
+  if (!parts.length) throw new Error("ไม่มีหน้า PDF สำหรับรวมเอกสาร");
+  const output = await PDFDocument.create();
+  for (const bytes of parts) {
+    const source = await PDFDocument.load(bytes, { ignoreEncryption: true });
+    const pages = await output.copyPages(source, source.getPageIndices());
+    for (const page of pages) output.addPage(page);
+  }
+  return new Uint8Array(await output.save({ useObjectStreams: false }));
+}
+
+async function uploadFinalPdf(token, name, pdfBytes) {
+  const file = await uploadMultipart(token, {
+    name: `${name}.pdf`,
+    mimeType: "application/pdf",
+  }, "application/pdf", pdfBytes);
+  await shareAnyone(token, file.id);
+  return { fileId: file.id, url: file.webViewLink || `https://drive.google.com/file/d/${file.id}/view` };
 }
 
 export async function createBatchClaimPdf(env, batch, items, settings = {}, payer = {}, token) {
@@ -459,6 +457,36 @@ export async function createBatchClaimPdf(env, batch, items, settings = {}, paye
 
   const hydratedItems = await hydrateItems(token, items);
   console.log(`[main-claim-document] version=${BATCH_DOCUMENT_VERSION} doc=${batch.docId} items=${hydratedItems.length}`);
-  const result = await htmlToPdf(token, `ใบเบิก_${batch.docId}`, buildBatchHtml(batch, hydratedItems, settings, payer));
+
+  const pdfParts = [];
+  pdfParts.push(await htmlToPdfBytes(
+    token,
+    `ใบเบิก_${batch.docId}_สรุป`,
+    shell(`ใบเบิก ${batch.docId}`, buildSummaryBody(batch, hydratedItems, settings, payer))
+  ));
+
+  for (let i = 0; i < hydratedItems.length; i++) {
+    const item = hydratedItems[i];
+    const replacementBody = replacementReceiptBody(item, settings, payer, batch, i);
+    if (replacementBody) {
+      pdfParts.push(await htmlToPdfBytes(
+        token,
+        `ใบแทน_${batch.docId}_${i + 1}`,
+        shell(`ใบแทน ${batch.docId} รายการ ${i + 1}`, replacementBody)
+      ));
+    }
+
+    const bodies = evidenceBodies(item, i);
+    for (let j = 0; j < bodies.length; j++) {
+      pdfParts.push(await htmlToPdfBytes(
+        token,
+        `หลักฐาน_${batch.docId}_${i + 1}_${j + 1}`,
+        shell(`หลักฐาน ${batch.docId} รายการ ${i + 1}`, bodies[j])
+      ));
+    }
+  }
+
+  const mergedPdf = await mergePdfBytes(pdfParts);
+  const result = await uploadFinalPdf(token, `ใบเบิก_${batch.docId}`, mergedPdf);
   return { docId: batch.docId, pdfUrl: result.url, fileId: result.fileId };
 }
