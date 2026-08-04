@@ -2,7 +2,7 @@
 // โครงเอกสาร: หน้าสรุปใบเบิก (จบแยกหน้า) → ใบแทนของแต่ละรายการ → หลักฐาน/ใบเสร็จของแต่ละรายการ
 // รองรับสูงสุด 10 รายการต่อใบเบิกตามค่าระบบ
 
-export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V3_20260805";
+export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V5_20260805";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
@@ -166,6 +166,12 @@ function replacementSignatureCell(name, role, signUrl = "") {
   </td>`;
 }
 
+function hardPageBreak() {
+  // Google Docs HTML import ignores page-break on some section/div elements.
+  // A standalone paragraph with page-break-before is handled more reliably.
+  return `<p style="page-break-before:always;break-before:page;margin:0;height:0;line-height:0;font-size:0">&nbsp;</p>`;
+}
+
 function shell(title, body) {
   return `<!doctype html><html lang="th"><head><meta charset="utf-8"><title>${esc(title)}</title>
   <style>
@@ -292,7 +298,7 @@ function replacementReceiptSection(item, settings, payer, batch, index) {
   const requestNo = item.requestNo || item.reqNo || batch.docId || batch.runNo || "—";
   const blankRows = Array.from({ length: 9 }, () => `<tr style="height:34px"><td></td><td></td><td></td><td></td></tr>`).join("");
   return `
-    <div class="page-break"></div>
+    ${hardPageBreak()}
     ${companyHeader(settings)}
     <table class="nob" border="0" width="100%" style="width:100%;margin:6px 0 4px">
       <tr>
@@ -347,26 +353,14 @@ function replacementReceiptSection(item, settings, payer, batch, index) {
 
 function evidenceSection(item, index) {
   const attachments = Array.isArray(item.packetAttachments) ? item.packetAttachments : [];
-  const tx = parseDate(item.dateISO || item.dateText || item.date).en;
-  const title = item.vendor || item.note || item.category || "รายการเบิก";
-  const head = `<div class="page-break"></div>
-    <div style="font-size:8.5pt;color:#666">เอกสารประกอบใบเบิก · รายการที่ ${index + 1}</div>
-    <div style="font-size:15pt;font-weight:700;margin:4px 0 8px">${esc(title)}</div>
-    <table class="grid" border="1" cellspacing="0" cellpadding="5" width="100%" style="width:100%;font-size:8.8pt;margin-bottom:12px">
-      <tr><td width="18%"><b>วันที่</b></td><td width="32%">${esc(tx)}</td><td width="18%"><b>ยอดเงิน</b></td><td width="32%" style="text-align:right">${money(item.amount)} บาท</td></tr>
-      <tr><td><b>หมวด</b></td><td>${esc(item.category || "—")}</td><td><b>ผู้โอน</b></td><td>${esc(item.transferor || item.payerName || "—")}</td></tr>
-      <tr><td><b>รายละเอียด</b></td><td colspan="3">${esc(item.note || "—")}</td></tr>
-    </table>`;
-  if (!attachments.length) {
-    return `${head}<div style="border:1px dashed #999;padding:28px;text-align:center;color:#666">ยังไม่มีหลักฐานแนบสำหรับรายการนี้</div>`;
-  }
-  const body = attachments.map((a, i) => `<div style="${i ? "page-break-before:always;break-before:page;" : ""}page-break-inside:avoid;break-inside:avoid">
-      <div style="font-size:10pt;font-weight:700;margin-bottom:6px">${esc(a.label)}${a.name && a.name !== a.label ? ` · ${esc(a.name)}` : ""}</div>
-      ${a.previewUrl ? `<div style="text-align:center;border:1px solid #ddd;padding:8px"><img src="${esc(a.previewUrl)}" alt="${esc(a.label)}" width="620" style="width:620px;max-height:850px;height:auto;object-fit:contain"></div>` : `<div style="border:1px dashed #aaa;padding:24px;text-align:center">ไฟล์แนบไม่สามารถแสดงตัวอย่างใน PDF ได้</div>`}
-      ${a.previewOnly ? `<div style="font-size:8pt;color:#666;margin-top:5px">ภาพนี้เป็นหน้าตัวอย่างของไฟล์ PDF ต้นฉบับ</div>` : ""}
-      <div style="font-size:8.2pt;margin-top:5px"><a class="doc-link" href="${esc(a.url)}">เปิดไฟล์ต้นฉบับ</a></div>
+  if (!attachments.length) return "";
+
+  return attachments.map((a) => `${hardPageBreak()}
+    <div style="text-align:center;page-break-inside:avoid;break-inside:avoid">
+      ${a.previewUrl
+        ? `<img src="${esc(a.previewUrl)}" alt="หลักฐานรายการที่ ${index + 1}" width="650" style="width:650px;max-width:100%;max-height:930px;height:auto;object-fit:contain">`
+        : `<div style="border:1px dashed #aaa;padding:24px;text-align:center">ไฟล์แนบไม่สามารถแสดงตัวอย่างใน PDF ได้</div>`}
     </div>`).join("");
-  return `${head}${body}`;
 }
 
 function buildSummarySection(batch, items, settings = {}, payer = {}) {
@@ -381,7 +375,7 @@ function buildSummarySection(batch, items, settings = {}, payer = {}) {
     return `<tr style="height:31px;page-break-inside:avoid;break-inside:avoid">
       <td style="text-align:center">${i + 1}</td>
       <td style="text-align:center">${esc(d)}</td>
-      <td>${esc(detail)}${r.vendor ? `<div style="font-size:7.9pt;color:#555">ผู้รับ: ${esc(r.vendor)}</div>` : ""}</td>
+      <td>${esc(detail)}</td>
       <td style="text-align:center">${evidenceCount}</td>
       <td style="text-align:center">${needsReplacementReceipt(r) ? "มี" : "—"}</td>
       <td style="text-align:right">${money(r.amount)}</td>
@@ -427,11 +421,6 @@ function buildSummarySection(batch, items, settings = {}, payer = {}) {
         <div><b>ธนาคาร:</b> ${esc(payer.bank || "—")}&nbsp;&nbsp;&nbsp;&nbsp;<b>เอกสารในชุด:</b> หลักฐาน ${evidenceCount} ไฟล์ · ใบแทน ${replacementCount} ใบ</div>
         <div><b>รหัสรอบจ่าย:</b> ${esc(batch.runNo)}&nbsp;&nbsp;&nbsp;&nbsp;<b>จัดทำเมื่อ:</b> ${esc(issue)}</div>
       </div>
-
-      <table class="nob" border="0" cellspacing="0" cellpadding="0" width="100%" style="width:100%;border:0;margin-top:14px;page-break-inside:avoid;break-inside:avoid"><tr>
-        ${signatureCell(payer.name || batch.payerName, "ผู้เบิกจ่าย", issue, payer.signatureUrl || "", payer.role || "")}
-        ${signatureCell(settings.approver_name, "ผู้อนุมัติ", issue, settings.approver_sign_url || "", settings.approver_position || "")}
-      </tr></table>
 
       <div style="font-size:8.2pt;color:#666;margin-top:12px">หน้าถัดไปเป็นใบแทนและหลักฐานของรายการย่อย เรียงตามลำดับในตารางด้านบน</div>
     </div>`;
