@@ -11,7 +11,7 @@ import {
   STATUS_DELETED,
 } from "./sheets.js";
 import { createBatchClaimPdf } from "./batch-documents.js";
-import { uploadFile } from "./drive.js";
+import { uploadTenantFile } from "./drive.js";
 import { push, textMsg } from "./line.js";
 import { buildReimbursementCorrectionCard } from "./card.js";
 import {
@@ -584,7 +584,9 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
         note: options.note || (type === "ด่วน" ? "ผู้เบิกขอรับเงินด่วน" : "สร้างใบเบิกอัตโนมัติ"),
       };
 
-      const pdf = await createBatchClaimPdf(env, batchDraft, items, settings, profile, token);
+      const pdf = await createBatchClaimPdf(env, batchDraft, items, settings, profile, token, {
+        tenant, companyName: settings.company_name || "พื้นที่บริษัท", sheetId,
+      });
       let saved;
       try {
         saved = await appendBatch(env, sheetId, { ...batchDraft, pdfUrl: pdf.pdfUrl }, token);
@@ -971,7 +973,7 @@ function driveDirectImageUrl(viewUrl) {
   return fileId ? `https://lh3.googleusercontent.com/d/${fileId}` : raw;
 }
 
-async function buildUpdatedMainClaim(env, sheetId, rec, token = null) {
+async function buildUpdatedMainClaim(env, tenant, sheetId, rec, token = null) {
   const [settings, expenses] = await Promise.all([
     readSettings(env, sheetId, token),
     readExpenses(env, sheetId, token),
@@ -980,7 +982,9 @@ async function buildUpdatedMainClaim(env, sheetId, rec, token = null) {
   const wanted = new Set((rec?.itemIds || []).map(String));
   const items = expenses.filter((item) => wanted.has(String(item.id || "")));
   if (!items.length) throw new Error("ไม่พบรายการย่อยสำหรับสร้างใบเบิกหลัก");
-  return createBatchClaimPdf(env, rec, items, settings, profile, token);
+  return createBatchClaimPdf(env, rec, items, settings, profile, token, {
+    tenant, companyName: settings.company_name || "พื้นที่บริษัท", sheetId,
+  });
 }
 
 async function removeOldMainClaim(token, oldUrl, newFileId = "") {
@@ -1014,7 +1018,7 @@ async function notifyPaymentComplete(env, sheetId, rec, slipUrl, mediaType = "",
   }
 }
 
-export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, action, payload = {}, token = null) {
+export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, action, payload = {}, token = null, options = {}) {
   const rec = await findBatch(env, sheetId, batchId, token);
   if (!rec) return { ok: false, reason: "not_found", message: "ไม่พบใบเบิก" };
   const now = new Date().toISOString();
@@ -1113,7 +1117,7 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
     // เพื่อให้ PDF หลักมีใบแทนและไฟล์แนบที่พนักงานเพิ่งแก้ไขครบถ้วน
     let mainClaim;
     try {
-      mainClaim = await buildUpdatedMainClaim(env, sheetId, rec, token);
+      mainClaim = await buildUpdatedMainClaim(env, options.tenant || "", sheetId, rec, token);
     } catch (e) {
       return {
         ok: false,
@@ -1209,7 +1213,19 @@ export async function uploadReimbursementPaymentSlip(env, sheetId, batchId, file
   const bytes = new Uint8Array(await file.arrayBuffer());
   const ext = String(file.name || "slip").split(".").pop().replace(/[^a-zA-Z0-9]/g, "") || "jpg";
   const name = `PAYMENT-${rec.docId || rec.runNo || rec.id}-${Date.now()}.${ext}`;
-  const slipUrl = await uploadFile(env, bytes, mediaType || "image/jpeg", name, token, { publicRead: true });
+  const slipUrl = await uploadTenantFile(
+    env,
+    options.tenant || "",
+    bytes,
+    mediaType || "image/jpeg",
+    name,
+    token,
+    {
+      category: "payments",
+      publicRead: true,
+      companyName: settings.company_name || "พื้นที่บริษัท",
+    }
+  );
   if (!slipUrl) return { ok: false, reason: "upload_failed", message: "อัปโหลดหลักฐานไป Google Drive ไม่สำเร็จ" };
 
   const paidPatch = {

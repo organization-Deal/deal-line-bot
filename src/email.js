@@ -6,7 +6,7 @@ import {
   ensureEmailInboxTab, appendEmailInbox, readEmailInbox, getEmailInboxById,
   updateEmailInbox, findEmailDuplicate, buildSubscriptions,
 } from "./email-sheets.js";
-import { uploadFile } from "./drive.js";
+import { uploadTenantFile } from "./drive.js";
 import { getUserToken } from "./oauth.js";
 import { appendExpense, findDuplicateExpenses } from "./sheets.js";
 import { push, textMsg } from "./line.js";
@@ -117,12 +117,14 @@ async function processOne(env, tenant, sheetId, token, base, item) {
   const fileHash = await sha256(item.content);
   const mediaType = normalizedMime(item);
   const bodyPreview = String(base.text || "").replace(/\s+/g, " ").trim().slice(0, 1500);
-  const driveUrl = await uploadFile(
+  const driveUrl = await uploadTenantFile(
     env,
+    tenant,
     item.content,
     mediaType,
     `Email-${new Date().toISOString().slice(0, 10)}-${safeName(item.filename)}`,
-    token
+    token,
+    { category: "email", publicRead: false }
   );
 
   const analysis = await analyzeEmailDocument(env, {

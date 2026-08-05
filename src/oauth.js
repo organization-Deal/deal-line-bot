@@ -5,6 +5,7 @@
 //   • ล้าง flag setup ตอนเชื่อม เพื่อให้เช็คข้อมูลบริษัทใหม่รอบหน้า
 
 import { HEADER } from "./sheets.js";
+import { ensureTenantDriveFolders } from "./drive-folders.js";
 
 const SCOPE = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets";
 const _utok = {};
@@ -132,16 +133,26 @@ export async function handleCallback(env, url, origin) {
   // ถ้ามี = ห้ามสร้างใหม่เด็ดขาด ไม่งั้นเชื่อมซ้ำทีข้อมูลหายทุกที
   let sheetId = await env.KV.get(`tenant:${state}`);
   const reused = !!sheetId;
-  if (reused) {
-    console.log(`OAUTH reuse existing sheet for ${state}: ${sheetId}`);
-  } else {
-    try {
-      sheetId = (await createUserSheet(env, tok.access_token, "DEAL Finance")).sheetId;
+  try {
+    const folders = await ensureTenantDriveFolders(env, state, tok.access_token, {
+      companyName: "",
+      sheetId: sheetId || "",
+    });
+    if (reused) {
+      console.log(`OAUTH reuse existing sheet for ${state}: ${sheetId}`);
+    } else {
+      sheetId = (await createUserSheet(env, tok.access_token, "DEAL Finance", {
+        parentFolderId: folders.companyFolderId,
+      })).sheetId;
       await env.KV.put(`tenant:${state}`, sheetId);
+      await ensureTenantDriveFolders(env, state, tok.access_token, {
+        companyName: "",
+        sheetId,
+      });
       console.log(`OAUTH created new sheet for ${state}: ${sheetId}`);
-    } catch (e) {
-      console.error("create user sheet", e);
     }
+  } catch (e) {
+    console.error("create user workspace", e);
   }
 
   // ให้เช็คข้อมูลบริษัทใหม่รอบหน้า — flag เก่าอาจค้างจากชีทคนละใบ
@@ -187,11 +198,15 @@ export async function getUserToken(env, key) {
   return j.access_token;
 }
 
-export async function createUserSheet(env, token, title) {
+export async function createUserSheet(env, token, title, { parentFolderId = "" } = {}) {
   let res = await fetch("https://www.googleapis.com/drive/v3/files?fields=id", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ name: title, mimeType: "application/vnd.google-apps.spreadsheet" }),
+    body: JSON.stringify({
+      name: title,
+      mimeType: "application/vnd.google-apps.spreadsheet",
+      ...(parentFolderId ? { parents: [parentFolderId] } : {}),
+    }),
   });
   if (!res.ok) throw new Error("create sheet: " + res.status);
   const sheetId = (await res.json()).id;

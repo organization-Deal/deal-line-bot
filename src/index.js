@@ -14,7 +14,10 @@ import {
   ensureHeaders, backfillIds, readSettings, writeSettings, ensureSettingsTab,
   addAttachment, removeAttachment, usedFileIds, ATTACH_TYPES, findDuplicateExpenses,
 } from "./sheets.js";
-import { uploadImage, listUploadedImages } from "./drive.js";
+import { uploadTenantImage, listUploadedImages } from "./drive.js";
+import {
+  ensureTenantDriveFolders, folderIdForCategory, tenantDriveFolderUrl, organizeTenantReferencedFiles,
+} from "./drive-folders.js";
 import { createExpenseDocuments } from "./documents.js";
 import {
   handleIncomingEmail, getEmailInboxInfo, rotateEmailInbox, listEmailDocuments,
@@ -49,7 +52,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v2.9_WORKSPACE_LINKS_20260805";
+const VERSION = "DEAL_LINE_BOT_v3.0_TENANT_DRIVE_FOLDERS_20260805";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -226,19 +229,45 @@ export default {
           return cors(json(await readExpenses(env, sheetId, token)));
         }
 
-        // ลิงก์ทางลัดจาก Dashboard ไปยังแหล่งข้อมูลจริงของบริษัท
+        // ลิงก์ทางลัดจาก Dashboard ไปยังพื้นที่เอกสารของบริษัทจริง
         if (url.pathname === "/api/workspace-links") {
-          const driveUrl = token
-            ? "https://drive.google.com/drive/my-drive"
-            : (env.DRIVE_FOLDER_ID
-              ? `https://drive.google.com/drive/folders/${encodeURIComponent(env.DRIVE_FOLDER_ID)}`
-              : "https://drive.google.com/drive/my-drive");
+          const settings = await readSettings(env, sheetId, token).catch(() => ({}));
+          const folders = await ensureTenantDriveFolders(env, key, token, {
+            companyName: settings.company_name || "พื้นที่บริษัท",
+            sheetId,
+          });
+          const organizeKey = `driveorganized:${key}:${sheetId}:v1`;
+          if ((await env.KV.get(organizeKey)) !== "1") {
+            ctx.waitUntil((async () => {
+              try {
+                const [expenses, emailDocs] = await Promise.all([
+                  readExpenses(env, sheetId, token),
+                  listEmailDocuments(env, sheetId, token).catch(() => []),
+                ]);
+                const result = await organizeTenantReferencedFiles(
+                  folders.accessToken, folders, expenses, emailDocs
+                );
+                await env.KV.put(organizeKey, "1");
+                console.log(`[drive-organize] tenant=${key} total=${result.total} moved=${result.moved} failed=${result.failed}`);
+              } catch (error) {
+                console.warn(`[drive-organize] tenant=${key}`, error.message);
+              }
+            })());
+          }
           return cors(json({
             ok: true,
             sheetId,
             sheetUrl: `https://docs.google.com/spreadsheets/d/${encodeURIComponent(sheetId)}/edit`,
-            driveUrl,
-            driveMode: token ? "oauth-my-drive" : (env.DRIVE_FOLDER_ID ? "shared-folder" : "my-drive"),
+            driveUrl: tenantDriveFolderUrl(folders),
+            driveMode: token ? "oauth-project-folder" : "service-project-folder",
+            folders: {
+              company: folders.companyFolderId,
+              claims: folders.claimsFolderId,
+              replacements: folders.replacementsFolderId,
+              originals: folders.originalsFolderId,
+              payments: folders.paymentsFolderId,
+              email: folders.emailFolderId,
+            },
           }));
         }
 
@@ -263,6 +292,10 @@ export default {
           if (request.method === "POST") {
             const b = await request.json();
             const saved = await writeSettings(env, sheetId, b, token);
+            await ensureTenantDriveFolders(env, key, token, {
+              companyName: b.company_name || saved.company_name || "พื้นที่บริษัท",
+              sheetId,
+            });
             await env.KV.delete(`setup:${key}`);              // ของเก่า
             await env.KV.delete(`setup:${key}:${sheetId}`);   // ให้เช็คใหม่รอบหน้า
             return cors(json(saved));
@@ -359,7 +392,7 @@ export default {
 
         if (url.pathname === "/api/batch-workflow" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
-          const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token);
+          const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token, { tenant: key });
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -368,7 +401,7 @@ export default {
           const batchId = String(form.get("batchId") || "");
           const paymentChannelId = String(form.get("paymentChannelId") || "");
           const file = form.get("file");
-          const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token, { paymentChannelId });
+          const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token, { paymentChannelId, tenant: key });
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -429,7 +462,9 @@ export default {
             bankAccountNo: member.accountNo || "",
             bankAccountName: member.accountName || member.name || "",
           } : rec;
-          const docs = await createExpenseDocuments(env, docRec, settings, token);
+          const docs = await createExpenseDocuments(env, docRec, settings, token, {
+            tenant: key, companyName: settings.company_name || "พื้นที่บริษัท", sheetId,
+          });
           const patch = {
             slipNo: docs.receiptNo,
             claimPdfUrl: docs.claimUrl,
@@ -440,8 +475,12 @@ export default {
         }
 
         if (url.pathname === "/api/orphans") {
+          const folders = await ensureTenantDriveFolders(env, key, token, {
+            companyName: (await readSettings(env, sheetId, token).catch(() => ({}))).company_name || "พื้นที่บริษัท",
+            sheetId,
+          });
           const [files, used] = await Promise.all([
-            listUploadedImages(env, token),
+            listUploadedImages(env, token, { folderId: folderIdForCategory(folders, "originals") }),
             usedFileIds(env, sheetId, token),
           ]);
           const unlinked = files.filter((f) => !used.has(f.fileId));
@@ -457,9 +496,10 @@ export default {
         if (url.pathname === "/api/upload-image" && request.method === "POST") {
           const b = await request.json();
           if (!b.base64) return cors(json({ error: "no image" }, 400));
-          const link = await uploadImage(
-            env, b.base64, b.mediaType || "image/png",
-            b.name || `asset-${Date.now()}.png`, token
+          const link = await uploadTenantImage(
+            env, key, b.base64, b.mediaType || "image/png",
+            b.name || `asset-${Date.now()}.png`, token,
+            { category: "assets" }
           );
           if (!link) return cors(json({ error: "upload failed" }, 500));
           const m = String(link).match(/\/d\/([a-zA-Z0-9_-]{20,})/);
@@ -854,8 +894,9 @@ async function handleImage(event, env, key, mode = "reply") {
   console.log(`[image] tenant=${key} sheetId=${sheet.sheetId} oauth=${!!sheet.token}`);
 
   const { base64, mediaType } = content;
-  const drivePromise = uploadImage(
-    env, base64, mediaType, `bill-${Date.now()}.jpg`, sheet.token
+  const drivePromise = uploadTenantImage(
+    env, key, base64, mediaType, `bill-${Date.now()}.jpg`, sheet.token,
+    { category: "originals" }
   );
 
   if (attachRaw) {
@@ -1075,7 +1116,9 @@ async function handlePostback(event, env, key, mode = "reply") {
       if (!documentSettingsReady(settings)) {
         rec.documentError = "บันทึกรายการแล้ว — กรอกข้อมูลบริษัทครั้งเดียว จากนั้นระบบจะสร้างใบเบิกและใบแทนให้อัตโนมัติ";
       } else {
-        const docs = await createExpenseDocuments(env, rec, settings, token);
+        const docs = await createExpenseDocuments(env, rec, settings, token, {
+          tenant: key, companyName: settings.company_name || "พื้นที่บริษัท", sheetId: pending.sheetId,
+        });
         const patch = {
           slipNo: docs.receiptNo,
           claimPdfUrl: docs.claimUrl,
@@ -1129,7 +1172,7 @@ ${out.error || "กรุณาตรวจข้อมูลอีกครั�
     if (!rec.batchDocId) return respond(textMsg("รายการนี้ยังไม่ได้อยู่ในใบเบิกที่ถูกตีกลับ"));
     try {
       const out = await updateReimbursementBatchWorkflow(
-        env, sheet.sheetId, rec.batchDocId, "resubmit", {}, sheet.token
+        env, sheet.sheetId, rec.batchDocId, "resubmit", {}, sheet.token, { tenant: key }
       );
       if (!out.ok) return respond(textMsg(out.message || "ส่งกลับตรวจไม่สำเร็จ"));
       const updated = await getExpenseById(env, sheet.sheetId, id, sheet.token);

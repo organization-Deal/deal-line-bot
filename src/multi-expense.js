@@ -1085,7 +1085,9 @@ export class MultiExpenseSession {
           continue;
         }
         try {
-          const docs = await createExpenseDocuments(this.env, rec, settings, token);
+          const docs = await createExpenseDocuments(this.env, rec, settings, token, {
+            tenant: s.tenant, companyName: settings.company_name || "พื้นที่บริษัท", sheetId,
+          });
           const patch = { slipNo: docs.receiptNo, claimPdfUrl: docs.claimUrl, receiptPdfUrl: docs.receiptUrl };
           await updateExpenseById(this.env, sheetId, rec.id, patch, token);
           s.saved[i] = { ...rec, ...patch };

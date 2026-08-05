@@ -3,6 +3,7 @@
 // V3 ปรับ HTML ให้ Google Docs แปลงได้ตรงขึ้น: กำหนดขนาดรูปด้วย attribute,
 // ตารางจัดวางทั้งหมด border=0 และลดความสูงเพื่อให้จบในหน้าเดียว
 
+import { ensureTenantDriveFolders, folderIdForCategory } from "./drive-folders.js";
 export const DOCUMENT_TEMPLATE_VERSION = "FORMAL_DOCS_V3_GOOGLE_SAFE_20260802";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
@@ -304,7 +305,7 @@ function buildReplacementHtml(rec, settings, receiptNo) {
   `);
 }
 
-async function htmlToPdfOnDrive(token, name, html) {
+async function htmlToPdfOnDrive(token, name, html, folderId = "") {
   let docId = null;
   try {
     const doc = await uploadMultipart(token, {
@@ -317,6 +318,7 @@ async function htmlToPdfOnDrive(token, name, html) {
     const file = await uploadMultipart(token, {
       name: `${name}.pdf`,
       mimeType: "application/pdf",
+      ...(folderId ? { parents: [folderId] } : {}),
     }, "application/pdf", pdf);
     await shareAnyone(token, file.id);
     return {
@@ -332,7 +334,7 @@ async function htmlToPdfOnDrive(token, name, html) {
  * สร้าง PDF 2 ใบและคืนลิงก์ Drive
  * @returns {{claimNo:string,receiptNo:string,claimUrl:string,receiptUrl:string}}
  */
-export async function createExpenseDocuments(env, rec, settings = {}, token) {
+export async function createExpenseDocuments(env, rec, settings = {}, token, options = {}) {
   if (!token) throw new Error("ไม่มี Google OAuth token สำหรับสร้างเอกสาร");
   if (!rec?.id) throw new Error("รายการไม่มี id");
 
@@ -344,9 +346,20 @@ export async function createExpenseDocuments(env, rec, settings = {}, token) {
   const claimNo = `REQ-${d.compact}-${id}`;
   const receiptNo = `${receiptPrefix}-${d.compact}-${id}`;
 
+  let claimFolderId = String(options.claimFolderId || "");
+  let replacementFolderId = String(options.replacementFolderId || "");
+  if (options.tenant && (!claimFolderId || !replacementFolderId)) {
+    const folders = await ensureTenantDriveFolders(env, options.tenant, token, {
+      companyName: options.companyName || settings.company_name || "พื้นที่บริษัท",
+      sheetId: options.sheetId || "",
+    });
+    claimFolderId ||= folderIdForCategory(folders, "claims");
+    replacementFolderId ||= folderIdForCategory(folders, "replacements");
+  }
+
   const [claim, receipt] = await Promise.all([
-    htmlToPdfOnDrive(token, claimNo, buildClaimHtml(rec, settings, claimNo)),
-    htmlToPdfOnDrive(token, receiptNo, buildReplacementHtml(rec, settings, receiptNo)),
+    htmlToPdfOnDrive(token, claimNo, buildClaimHtml(rec, settings, claimNo), claimFolderId),
+    htmlToPdfOnDrive(token, receiptNo, buildReplacementHtml(rec, settings, receiptNo), replacementFolderId),
   ]);
 
   return {

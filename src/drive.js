@@ -2,6 +2,7 @@
 // v2.0: เพิ่ม listUploadedImages() สำหรับหารูปกำพร้า (อัปแล้วแต่ยังไม่ผูกกับรายการไหน)
 
 import { getAccessToken } from "./google-auth.js";
+import { ensureTenantDriveFolders, folderIdForCategory } from "./drive-folders.js";
 
 function base64ToBytes(b64) {
   const bin = atob(b64);
@@ -10,18 +11,18 @@ function base64ToBytes(b64) {
   return out;
 }
 
-export async function uploadFile(env, data, mediaType, name, token = null, { publicRead = false } = {}) {
+export async function uploadFile(env, data, mediaType, name, token = null, { publicRead = false, folderId = "" } = {}) {
   let authToken, parents;
   if (token) {
     // โหมด OAuth: เก็บใน Drive ของลูกค้าเอง (ไม่ต้องมีโฟลเดอร์ ไม่ติดโควตา)
     authToken = token;
-    parents = null;
+    parents = folderId ? [folderId] : null;
   } else {
     // โหมด service account: ต้องมีโฟลเดอร์ที่แชร์ไว้ (มีโควตาจำกัด)
-    const folderId = env.DRIVE_FOLDER_ID;
-    if (!folderId) return null;
+    const targetFolderId = folderId || env.DRIVE_FOLDER_ID;
+    if (!targetFolderId) return null;
     authToken = await getAccessToken(env);
-    parents = [folderId];
+    parents = [targetFolderId];
   }
 
   const metadata = { name };
@@ -62,8 +63,29 @@ export async function uploadFile(env, data, mediaType, name, token = null, { pub
 
 
 // backward-compatible alias used by LINE image uploads
-export async function uploadImage(env, base64, mediaType, name, token = null) {
-  return uploadFile(env, base64, mediaType, name, token, { publicRead: true });
+export async function uploadImage(env, base64, mediaType, name, token = null, options = {}) {
+  return uploadFile(env, base64, mediaType, name, token, { ...options, publicRead: true });
+}
+
+/** อัปไฟล์เข้าพื้นที่ Drive ของ tenant ตามประเภทเอกสาร */
+export async function uploadTenantFile(env, tenant, data, mediaType, name, token = null, {
+  category = "originals", publicRead = false, companyName = "",
+} = {}) {
+  let folderId = "";
+  try {
+    const folders = await ensureTenantDriveFolders(env, tenant, token, { companyName });
+    folderId = folderIdForCategory(folders, category);
+  } catch (error) {
+    console.error(`[drive-folder] tenant=${tenant} category=${category}`, error);
+    return null;
+  }
+  return uploadFile(env, data, mediaType, name, token, { publicRead, folderId });
+}
+
+export async function uploadTenantImage(env, tenant, base64, mediaType, name, token = null, options = {}) {
+  return uploadTenantFile(env, tenant, base64, mediaType, name, token, {
+    ...options, category: options.category || "originals", publicRead: true,
+  });
 }
 
 /**
@@ -74,14 +96,16 @@ export async function uploadImage(env, base64, mediaType, name, token = null) {
  *
  * @returns {Array<{fileId,name,createdTime,viewUrl,imgUrl}>} ใหม่สุดขึ้นก่อน
  */
-export async function listUploadedImages(env, token = null, { limit = 200 } = {}) {
+export async function listUploadedImages(env, token = null, { limit = 200, folderId = "" } = {}) {
   let authToken = token;
   let q = "mimeType contains 'image/' and trashed = false";
 
   if (!authToken) {
-    const folderId = env.DRIVE_FOLDER_ID;
-    if (!folderId) return [];
+    const targetFolderId = folderId || env.DRIVE_FOLDER_ID;
+    if (!targetFolderId) return [];
     authToken = await getAccessToken(env);
+    q += ` and '${targetFolderId}' in parents`;
+  } else if (folderId) {
     q += ` and '${folderId}' in parents`;
   }
 

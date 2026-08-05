@@ -1,4 +1,5 @@
 import { PDFDocument } from "pdf-lib";
+import { ensureTenantDriveFolders, folderIdForCategory } from "./drive-folders.js";
 
 // สร้าง "ใบเบิกหลัก" 1 ไฟล์ต่อผู้เบิก
 // โครงเอกสาร: หน้าสรุปใบเบิก (จบแยกหน้า) → ใบแทนของแต่ละรายการ → หลักฐาน/ใบเสร็จของแต่ละรายการ
@@ -454,16 +455,17 @@ async function mergePdfBytes(parts) {
   return new Uint8Array(await output.save({ useObjectStreams: false }));
 }
 
-async function uploadFinalPdf(token, name, pdfBytes) {
+async function uploadFinalPdf(token, name, pdfBytes, folderId = "") {
   const file = await uploadMultipart(token, {
     name: `${name}.pdf`,
     mimeType: "application/pdf",
+    ...(folderId ? { parents: [folderId] } : {}),
   }, "application/pdf", pdfBytes);
   await shareAnyone(token, file.id);
   return { fileId: file.id, url: file.webViewLink || `https://drive.google.com/file/d/${file.id}/view` };
 }
 
-export async function createBatchClaimPdf(env, batch, items, settings = {}, payer = {}, token) {
+export async function createBatchClaimPdf(env, batch, items, settings = {}, payer = {}, token, options = {}) {
   if (!token) throw new Error("ไม่มี Google OAuth token สำหรับสร้างใบเบิกหลัก");
   if (!batch?.docId) throw new Error("ไม่มีเลขที่ใบเบิก");
   if (!Array.isArray(items) || !items.length) throw new Error("ไม่มีรายการสำหรับสร้างใบเบิก");
@@ -499,7 +501,15 @@ export async function createBatchClaimPdf(env, batch, items, settings = {}, paye
     }
   }
 
+  let claimFolderId = String(options.claimFolderId || "");
+  if (options.tenant && !claimFolderId) {
+    const folders = await ensureTenantDriveFolders(env, options.tenant, token, {
+      companyName: options.companyName || settings.company_name || "พื้นที่บริษัท",
+      sheetId: options.sheetId || "",
+    });
+    claimFolderId = folderIdForCategory(folders, "claims");
+  }
   const mergedPdf = await mergePdfBytes(pdfParts);
-  const result = await uploadFinalPdf(token, `ใบเบิก_${batch.docId}`, mergedPdf);
+  const result = await uploadFinalPdf(token, `ใบเบิก_${batch.docId}`, mergedPdf, claimFolderId);
   return { docId: batch.docId, pdfUrl: result.url, fileId: result.fileId };
 }
