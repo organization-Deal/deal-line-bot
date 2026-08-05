@@ -32,7 +32,7 @@ import {
 import {
   ensureBatchTab, getBatchDashboard, createReimbursementBatches,
   requestUrgentBatch, updateReimbursementBatchStatus,
-  updateReimbursementBatchWorkflow, updateExpenseReviewWorkflow, uploadReimbursementPaymentSlip,
+  updateReimbursementBatchWorkflow, uploadReimbursementPaymentSlip,
   runScheduledReimbursementBatches,
 } from "./batches.js";
 import {
@@ -52,7 +52,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v3.2_PRIMARY_REVIEW_OPTIONAL_MERGE_20260805";
+const VERSION = "DEAL_LINE_BOT_v3.3_REUSE_BUSINESS_ACROSS_LINE_GROUPS_20260805";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -396,12 +396,6 @@ export default {
           return cors(json(out, out.ok ? 200 : 400));
         }
 
-        if (url.pathname === "/api/expense-workflow" && request.method === "POST") {
-          const b = await request.json().catch(() => ({}));
-          const out = await updateExpenseReviewWorkflow(env, key, sheetId, b.expenseId, b.action, b.payload || {}, token);
-          return cors(json(out, out.ok ? 200 : 400));
-        }
-
         if (url.pathname === "/api/batch-payment-slip" && request.method === "POST") {
           const form = await request.formData();
           const batchId = String(form.get("batchId") || "");
@@ -498,20 +492,37 @@ export default {
             files: showAll ? files : unlinked,
           }));
         }
-        // อัปโลโก้ / ลายเซ็น เข้า Drive ลูกค้า แล้วคืนลิงก์ที่ฝังในเอกสารได้
+        // อัปโลโก้ / ลายเซ็นเข้า Drive และบันทึก URL ลง _settings ทันที
+        // ไม่ต้องพึ่งให้ผู้ใช้กดปุ่มบันทึกซ้ำ และกันค่าถูกลบจากการบันทึกแบบ partial field
         if (url.pathname === "/api/upload-image" && request.method === "POST") {
           const b = await request.json();
           if (!b.base64) return cors(json({ error: "no image" }, 400));
+
+          const kind = String(b.kind || "").trim().toLowerCase();
           const link = await uploadTenantImage(
             env, key, b.base64, b.mediaType || "image/png",
             b.name || `asset-${Date.now()}.png`, token,
             { category: "assets" }
           );
           if (!link) return cors(json({ error: "upload failed" }, 500));
+
           const m = String(link).match(/\/d\/([a-zA-Z0-9_-]{20,})/);
+          const publicUrl = m ? `https://lh3.googleusercontent.com/d/${m[1]}` : link;
+          const settingPatch = kind === "logo"
+            ? { logo_url: publicUrl }
+            : (["sign", "signature", "approver_sign"].includes(kind)
+              ? { approver_sign_url: publicUrl }
+              : {});
+          const settings = Object.keys(settingPatch).length
+            ? await writeSettings(env, sheetId, settingPatch, token)
+            : await readSettings(env, sheetId, token);
+
           return cors(json({
             ok: true,
-            url: m ? `https://lh3.googleusercontent.com/d/${m[1]}` : link,
+            kind,
+            url: publicUrl,
+            saved: Object.keys(settingPatch).length > 0,
+            settings,
           }));
         }
         if (url.pathname === "/api/attach" && request.method === "POST") {
@@ -789,7 +800,7 @@ function connectMsg(env, key) {
     contents: { type: "bubble",
       body: { type: "box", layout: "vertical", spacing: "sm", contents: [
         { type: "text", text: "เชื่อม Google ก่อนใช้งาน 🔗", weight: "bold", size: "md", color: "#1F6E56" },
-        { type: "text", text: "กดปุ่มด้านล่างเพื่อเชื่อม Google Drive ของคุณ — บิลและชีทจะเก็บในบัญชีของคุณเอง", size: "sm", color: "#8c8c8c", wrap: true },
+        { type: "text", text: "ใช้บัญชี Google เดิมได้เลย — ระบบจะค้นหาธุรกิจเดิมและเชื่อม Sheet/Drive ให้กลุ่มนี้อัตโนมัติ", size: "sm", color: "#8c8c8c", wrap: true },
       ] },
       footer: { type: "box", layout: "vertical", contents: [
         { type: "button", style: "primary", color: "#1F6E56", height: "sm",
@@ -871,8 +882,16 @@ async function handleEvent(event, env) {
   console.log(`[event] type=${event.type} tenant=${key} user=${event.source?.userId || "-"}`);
 
   if (event.type === "join" || event.type === "follow") {
+    const existingSheetId = await env.KV.get(`tenant:${key}`);
+    const existingToken = await env.KV.get(`gtoken:${key}`);
+    if (existingSheetId && existingToken) {
+      return reply(env, event.replyToken, [
+        textMsg("พบธุรกิจที่เคยเชื่อมไว้แล้วครับ ✅\nกลุ่มนี้ใช้ข้อมูลบริษัท Sheet และ Drive เดิมได้เลย ไม่ต้องตั้งค่าใหม่"),
+        await dashboardMsg(env, key),
+      ]);
+    }
     return reply(env, event.replyToken, [
-      textMsg("สวัสดีครับ ผมน้องช่วยบัญชีของ DEAL 📒\nเริ่มใช้งานง่าย ๆ แค่เชื่อม Google ครั้งเดียว แล้วส่งรูปบิลได้เลย"),
+      textMsg("สวัสดีครับ ผมน้องช่วยบัญชีของ DEAL 📒\nกดเชื่อม Google ด้วยบัญชีเดิม ระบบจะค้นหาธุรกิจที่เคยสร้างไว้และผูกกลุ่มนี้ให้อัตโนมัติ"),
       connectMsg(env, key),
     ]);
   }
