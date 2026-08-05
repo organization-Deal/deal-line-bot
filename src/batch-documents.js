@@ -1,11 +1,11 @@
 import { PDFDocument } from "pdf-lib";
-import { ensureTenantDriveFolders, folderIdForCategory } from "./drive-folders.js";
+import { ensureTenantDriveFolders, monthlyFolderIdForCategory } from "./drive-folders.js";
 
 // สร้าง "ใบเบิกหลัก" 1 ไฟล์ต่อผู้เบิก
 // โครงเอกสาร: หน้าสรุปใบเบิก (จบแยกหน้า) → ใบแทนของแต่ละรายการ → หลักฐาน/ใบเสร็จของแต่ละรายการ
 // รองรับสูงสุด 10 รายการต่อใบเบิกตามค่าระบบ
 
-export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V9_DYNAMIC_CLAIM_AND_RECEIPT_ROWS_20260805";
+export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V10_MONTHLY_DRIVE_20260805";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
@@ -456,11 +456,12 @@ async function mergePdfBytes(parts) {
 }
 
 async function uploadFinalPdf(token, name, pdfBytes, folderId = "") {
-  const file = await uploadMultipart(token, {
+  const metadata = {
     name: `${name}.pdf`,
     mimeType: "application/pdf",
-    ...(folderId ? { parents: [folderId] } : {}),
-  }, "application/pdf", pdfBytes);
+  };
+  if (folderId) metadata.parents = [folderId];
+  const file = await uploadMultipart(token, metadata, "application/pdf", pdfBytes);
   await shareAnyone(token, file.id);
   return { fileId: file.id, url: file.webViewLink || `https://drive.google.com/file/d/${file.id}/view` };
 }
@@ -503,11 +504,16 @@ export async function createBatchClaimPdf(env, batch, items, settings = {}, paye
 
   let claimFolderId = String(options.claimFolderId || "");
   if (options.tenant && !claimFolderId) {
+    const firstEntryDate = hydratedItems
+      .map((item) => item.submittedAt || item.createdAt || item.created_at || item.recordedAt || "")
+      .filter(Boolean)
+      .sort()[0] || batch.createdAt || batch.created_at || new Date().toISOString();
     const folders = await ensureTenantDriveFolders(env, options.tenant, token, {
       companyName: options.companyName || settings.company_name || "พื้นที่บริษัท",
       sheetId: options.sheetId || "",
+      transactionDate: firstEntryDate,
     });
-    claimFolderId = folderIdForCategory(folders, "claims");
+    claimFolderId = monthlyFolderIdForCategory(folders, "claims");
   }
   const mergedPdf = await mergePdfBytes(pdfParts);
   const result = await uploadFinalPdf(token, `ใบเบิก_${batch.docId}`, mergedPdf, claimFolderId);

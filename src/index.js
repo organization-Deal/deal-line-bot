@@ -52,7 +52,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v3.0_TENANT_DRIVE_FOLDERS_20260805";
+const VERSION = "DEAL_LINE_BOT_v3.1_MONTHLY_TENANT_DRIVE_20260805";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -236,7 +236,7 @@ export default {
             companyName: settings.company_name || "พื้นที่บริษัท",
             sheetId,
           });
-          const organizeKey = `driveorganized:${key}:${sheetId}:v1`;
+          const organizeKey = `driveorganized:${key}:${sheetId}:v2-monthly`;
           if ((await env.KV.get(organizeKey)) !== "1") {
             ctx.waitUntil((async () => {
               try {

@@ -1224,6 +1224,7 @@ export async function uploadReimbursementPaymentSlip(env, sheetId, batchId, file
       category: "payments",
       publicRead: true,
       companyName: settings.company_name || "พื้นที่บริษัท",
+      transactionDate: rec.createdAt || rec.created_at || rec.submittedAt || rec.recordedAt || now,
     }
   );
   if (!slipUrl) return { ok: false, reason: "upload_failed", message: "อัปโหลดหลักฐานไป Google Drive ไม่สำเร็จ" };

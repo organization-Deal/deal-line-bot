@@ -2,7 +2,7 @@
 // v2.0: เพิ่ม listUploadedImages() สำหรับหารูปกำพร้า (อัปแล้วแต่ยังไม่ผูกกับรายการไหน)
 
 import { getAccessToken } from "./google-auth.js";
-import { ensureTenantDriveFolders, folderIdForCategory } from "./drive-folders.js";
+import { ensureTenantDriveFolders, monthlyFolderIdForCategory } from "./drive-folders.js";
 
 function base64ToBytes(b64) {
   const bin = atob(b64);
@@ -69,12 +69,15 @@ export async function uploadImage(env, base64, mediaType, name, token = null, op
 
 /** อัปไฟล์เข้าพื้นที่ Drive ของ tenant ตามประเภทเอกสาร */
 export async function uploadTenantFile(env, tenant, data, mediaType, name, token = null, {
-  category = "originals", publicRead = false, companyName = "",
+  category = "originals", publicRead = false, companyName = "", transactionDate = null,
 } = {}) {
   let folderId = "";
   try {
-    const folders = await ensureTenantDriveFolders(env, tenant, token, { companyName });
-    folderId = folderIdForCategory(folders, category);
+    const folders = await ensureTenantDriveFolders(env, tenant, token, {
+      companyName,
+      transactionDate: transactionDate || new Date().toISOString(),
+    });
+    folderId = monthlyFolderIdForCategory(folders, category);
   } catch (error) {
     console.error(`[drive-folder] tenant=${tenant} category=${category}`, error);
     return null;

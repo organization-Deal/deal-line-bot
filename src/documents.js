@@ -3,7 +3,7 @@
 // V3 ปรับ HTML ให้ Google Docs แปลงได้ตรงขึ้น: กำหนดขนาดรูปด้วย attribute,
 // ตารางจัดวางทั้งหมด border=0 และลดความสูงเพื่อให้จบในหน้าเดียว
 
-import { ensureTenantDriveFolders, folderIdForCategory } from "./drive-folders.js";
+import { ensureTenantDriveFolders, monthlyFolderIdForCategory } from "./drive-folders.js";
 export const DOCUMENT_TEMPLATE_VERSION = "FORMAL_DOCS_V3_GOOGLE_SAFE_20260802";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
@@ -352,9 +352,10 @@ export async function createExpenseDocuments(env, rec, settings = {}, token, opt
     const folders = await ensureTenantDriveFolders(env, options.tenant, token, {
       companyName: options.companyName || settings.company_name || "พื้นที่บริษัท",
       sheetId: options.sheetId || "",
+      transactionDate: rec.submittedAt || rec.createdAt || rec.created_at || rec.recordedAt || new Date().toISOString(),
     });
-    claimFolderId ||= folderIdForCategory(folders, "claims");
-    replacementFolderId ||= folderIdForCategory(folders, "replacements");
+    claimFolderId ||= monthlyFolderIdForCategory(folders, "claims");
+    replacementFolderId ||= monthlyFolderIdForCategory(folders, "replacements");
   }
 
   const [claim, receipt] = await Promise.all([

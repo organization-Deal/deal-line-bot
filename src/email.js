@@ -124,7 +124,7 @@ async function processOne(env, tenant, sheetId, token, base, item) {
     mediaType,
     `Email-${new Date().toISOString().slice(0, 10)}-${safeName(item.filename)}`,
     token,
-    { category: "email", publicRead: false }
+    { category: "email", publicRead: false, transactionDate: base.receivedAt || new Date().toISOString() }
   );
 
   const analysis = await analyzeEmailDocument(env, {
