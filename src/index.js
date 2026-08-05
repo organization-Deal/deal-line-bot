@@ -52,7 +52,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v3.5_RESTORE_EXPENSE_WORKFLOW_ENDPOINT_20260805";
+const VERSION = "DEAL_LINE_BOT_v3.8_COMPANY_SETUP_REQUIRED_20260806";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -91,32 +91,82 @@ function safeEqual(a, b) {
  * ใช้ KV flag `setup:{tenant}:{sheetId}` กันอ่านชีทซ้ำทุกครั้งที่บันทึกรายการ
  * ผูกกับ sheetId เพื่อกัน flag ค้างข้ามชีท — ล้างเมื่อบันทึกตั้งค่าใหม่ / migrate / เชื่อมใหม่
  */
+function settingValue(s = {}, ...keys) {
+  for (const key of keys) {
+    const value = String(s[key] || "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function activePaymentChannels(s = {}) {
+  const raw = s.payment_channels;
+  let rows = [];
+  if (Array.isArray(raw)) rows = raw;
+  else if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      rows = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      rows = [];
+    }
+  }
+  return rows.filter((item) => {
+    const value = String(item?.active ?? "true").trim().toLowerCase();
+    return !["false", "0", "no", "off", "inactive", "ปิด"].includes(value);
+  });
+}
+
 async function checkSetup(env, key, sheet) {
-  // ผูก flag กับ sheetId ด้วย — ชีทเปลี่ยนเมื่อไหร่ flag เก่าใช้ไม่ได้ทันที
-  const flag = `setup:${key}:${sheet.sheetId}`;
+  const cacheKey = `companysetup:v3:${key}:${sheet.sheetId}`;
   try {
-    if ((await env.KV.get(flag)) === "1") return null;
+    const gmail = await getGmailStatus(env, key);
+    const cached = await env.KV.get(cacheKey, "json").catch(() => null);
+    if (cached?.documentsReady === true && cached?.financeReady === true) {
+      if (gmail.connected === true) return null;
+      const gmailMissing = gmail.reconnectRequired ? "เชื่อม Gmail ใหม่" : "Gmail เจ้าของธุรกิจ";
+      return {
+        warn: `ตั้งค่าบริษัทให้ครบก่อนใช้งาน — ยังขาด ${gmailMissing} กดปุ่มด้านล่างเพื่อดำเนินการต่อ`,
+        missing: [gmailMissing],
+      };
+    }
 
     const s = await readSettings(env, sheet.sheetId, sheet.token);
-    const missing = [];
-    if (!s.company_name)  missing.push("ชื่อบริษัท");
-    if (!s.tax_id)        missing.push("เลขผู้เสียภาษี");
-    if (!s.approver_name) missing.push("ชื่อผู้อนุมัติ");
+    const documentMissing = [];
+    if (!settingValue(s, "company_name")) documentMissing.push("ชื่อบริษัท");
+    if (!settingValue(s, "tax_id")) documentMissing.push("เลขผู้เสียภาษี");
+    if (!settingValue(s, "approver_name")) documentMissing.push("ชื่อผู้อนุมัติ");
+    if (!settingValue(s, "logo_url", "company_logo_url", "logoUrl")) documentMissing.push("โลโก้บริษัท");
+    if (!settingValue(s, "approver_sign_url", "approverSignUrl", "approver_signature_url", "signature_url")) documentMissing.push("ลายเซ็นผู้อนุมัติ");
 
-    if (!missing.length) {
-      await env.KV.put(flag, "1");
-      return null;
-    }
-    return { warn: `ยังขาด ${missing.join(" · ")} — ระบบยังสร้างใบเบิกและใบแทนไม่ได้ กดปุ่มส้มด้านล่างเพื่อกรอก (ทำครั้งเดียว)` };
+    const documentsReady = documentMissing.length === 0;
+    const financeReady = activePaymentChannels(s).length > 0;
+    const missing = [...documentMissing];
+    if (!financeReady) missing.push("ช่องทางการโอนเงิน");
+    if (!gmail.connected) missing.push(gmail.reconnectRequired ? "เชื่อม Gmail ใหม่" : "Gmail เจ้าของธุรกิจ");
+
+    await env.KV.put(cacheKey, JSON.stringify({ documentsReady, financeReady, checkedAt: Date.now() }));
+
+    if (!missing.length) return null;
+    return {
+      warn: `ตั้งค่าบริษัทให้ครบก่อนใช้งาน — ยังขาด ${missing.join(" · ")} กดปุ่มด้านล่างเพื่อดำเนินการต่อ`,
+      missing,
+    };
   } catch (e) {
-    // อ่านตั้งค่าไม่ได้ = ถือว่ายังไม่ครบ ให้ปุ่มขึ้น ดีกว่าเงียบแล้วลูกค้าไม่รู้ตัว
     console.warn("checkSetup", e.message);
-    return { warn: "อ่านข้อมูลบริษัทไม่ได้ — กดปุ่มด้านล่างเพื่อตรวจการตั้งค่า" };
+    return { warn: "ตรวจสถานะการตั้งค่าบริษัทไม่ได้ — เปิด Dashboard เพื่อตรวจ Gmail ข้อมูลบริษัท และช่องทางการโอนเงิน" };
   }
 }
 
 function documentSettingsReady(s = {}) {
-  return !!(s.company_name && s.tax_id && s.approver_name);
+  return !!(
+    settingValue(s, "company_name") &&
+    settingValue(s, "tax_id") &&
+    settingValue(s, "approver_name") &&
+    settingValue(s, "logo_url", "company_logo_url", "logoUrl") &&
+    settingValue(s, "approver_sign_url", "approverSignUrl", "approver_signature_url", "signature_url") &&
+    activePaymentChannels(s).length > 0
+  );
 }
 
 export default {
@@ -298,6 +348,7 @@ export default {
             });
             await env.KV.delete(`setup:${key}`);              // ของเก่า
             await env.KV.delete(`setup:${key}:${sheetId}`);   // ให้เช็คใหม่รอบหน้า
+            await env.KV.delete(`companysetup:v3:${key}:${sheetId}`);
             return cors(json(saved));
           }
           return cors(json(await readSettings(env, sheetId, token)));
@@ -452,11 +503,19 @@ export default {
           if (!b.force && rec.claimPdfUrl && rec.receiptPdfUrl) {
             return cors(json({ ok: true, skipped: true, record: rec }));
           }
+          const setup = await checkSetup(env, key, { sheetId, token });
+          if (setup) {
+            return cors(json({
+              error: "settings_incomplete",
+              hint: setup.warn,
+              missing: setup.missing || [],
+            }, 400));
+          }
           const settings = await readSettings(env, sheetId, token);
           if (!documentSettingsReady(settings)) {
             return cors(json({
               error: "settings_incomplete",
-              hint: "กรอกชื่อบริษัท เลขผู้เสียภาษี และชื่อผู้อนุมัติก่อนสร้างเอกสาร",
+              hint: "ตั้งค่าข้อมูลบริษัท โลโก้ ลายเซ็น และช่องทางการโอนเงินให้ครบก่อนสร้างเอกสาร",
             }, 400));
           }
           const member = findMemberProfile(settings, {
@@ -788,9 +847,9 @@ async function renderSaved(env, key, sheet, rec, justAppended = null) {
     dashUrl(env, key),
     dashUrl(env, key, "/receipt"),
   ]);
-  const setupUrl = setup && documentsPage && rec.id
-    ? `${documentsPage}&id=${encodeURIComponent(rec.id)}`
-    : (setup ? documentsPage : null);
+  const setupUrl = setup && dash
+    ? `${dash}${dash.includes("?") ? "&" : "?"}setup=1`
+    : null;
 
   return savedCard(rec, rec.imageUrl || null, dash, {
     id: rec.id,
@@ -1150,9 +1209,10 @@ async function handlePostback(event, env, key, mode = "reply") {
 
     // กดบันทึกครั้งเดียว → สร้างใบเบิก + ใบแทนเป็น PDF → อัป Drive → เขียนลิงก์ลงชีท
     try {
+      const setup = await checkSetup(env, key, { sheetId: pending.sheetId, token });
       const settings = await readSettings(env, pending.sheetId, token);
-      if (!documentSettingsReady(settings)) {
-        rec.documentError = "บันทึกรายการแล้ว — กรอกข้อมูลบริษัทครั้งเดียว จากนั้นระบบจะสร้างใบเบิกและใบแทนให้อัตโนมัติ";
+      if (setup || !documentSettingsReady(settings)) {
+        rec.documentError = setup?.warn || "บันทึกรายการแล้ว — ตั้งค่าข้อมูลบริษัท โลโก้ ลายเซ็น และช่องทางการโอนเงินให้ครบ จากนั้นระบบจะสร้างใบเบิกและใบแทนให้อัตโนมัติ";
       } else {
         const docs = await createExpenseDocuments(env, rec, settings, token, {
           tenant: key, companyName: settings.company_name || "พื้นที่บริษัท", sheetId: pending.sheetId,
@@ -1390,6 +1450,7 @@ async function handleText(event, env, key) {
       const b = await ensureBatchTab(env, sheet.sheetId, sheet.token);
       await env.KV.delete(`setup:${key}`);
       await env.KV.delete(`setup:${key}:${sheet.sheetId}`);
+      await env.KV.delete(`companysetup:v3:${key}:${sheet.sheetId}`);
       return reply(env, event.replyToken, textMsg(
         `อัปเกรดชีทเรียบร้อย ✅\n` +
         `หัวคอลัมน์: ${h.changed ? `เพิ่ม ${h.added} ช่อง` : "ครบอยู่แล้ว"}\n` +
