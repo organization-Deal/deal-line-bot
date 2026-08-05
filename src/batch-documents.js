@@ -5,7 +5,7 @@ import { ensureTenantDriveFolders, monthlyFolderIdForCategory } from "./drive-fo
 // โครงเอกสาร: หน้าสรุปใบเบิก (จบแยกหน้า) → ใบแทนของแต่ละรายการ → หลักฐาน/ใบเสร็จของแต่ละรายการ
 // รองรับสูงสุด 10 รายการต่อใบเบิกตามค่าระบบ
 
-export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V10_MONTHLY_DRIVE_20260805";
+export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V11_A4_EVIDENCE_FIT_20260805";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
@@ -261,6 +261,7 @@ async function resolveAttachment(token, candidate) {
   }
   return {
     ...candidate,
+    fileId: meta?.id || driveFileId(candidate.url),
     name: meta?.name || candidate.label,
     mimeType,
     previewUrl,
@@ -351,14 +352,90 @@ function replacementReceiptBody(item, settings, payer, batch, index) {
     </table>`;
 }
 
-function evidenceBodies(item, index) {
-  const attachments = Array.isArray(item.packetAttachments) ? item.packetAttachments : [];
-  return attachments.map((a) => `
-    <div style="text-align:center;page-break-inside:avoid;break-inside:avoid;padding-top:4px">
-      ${a.previewUrl
-        ? `<img src="${esc(a.previewUrl)}" alt="หลักฐานรายการที่ ${index + 1}" width="650" style="width:650px;max-width:100%;max-height:930px;height:auto;object-fit:contain">`
-        : `<div style="border:1px dashed #aaa;padding:24px;text-align:center">ไฟล์แนบไม่สามารถแสดงตัวอย่างใน PDF ได้</div>`}
-    </div>`);
+const A4_WIDTH_PT = 595.28;
+const A4_HEIGHT_PT = 841.89;
+const EVIDENCE_MARGIN_PT = 24;
+
+function detectMimeType(bytes, hinted = "") {
+  const hint = String(hinted || "").toLowerCase();
+  if (hint.includes("application/pdf")) return "application/pdf";
+  if (hint.includes("image/png")) return "image/png";
+  if (hint.includes("image/jpeg") || hint.includes("image/jpg")) return "image/jpeg";
+  if (bytes?.length >= 4) {
+    if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) return "application/pdf";
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  }
+  return hint;
+}
+
+async function fetchAttachmentBytes(token, attachment = {}) {
+  const fileId = attachment.fileId || driveFileId(attachment.url);
+  const url = fileId
+    ? `${DRIVE}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`
+    : String(attachment.url || attachment.previewUrl || "");
+  if (!url) throw new Error("ไม่มี URL ของหลักฐาน");
+
+  const headers = fileId ? { Authorization: `Bearer ${token}` } : {};
+  const res = await fetch(url, { headers, redirect: "follow" });
+  if (!res.ok) throw new Error(`ดาวน์โหลดหลักฐานไม่สำเร็จ ${res.status}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  return {
+    bytes,
+    mimeType: detectMimeType(bytes, attachment.mimeType || res.headers.get("content-type") || ""),
+  };
+}
+
+async function imageToA4PdfBytes(bytes, mimeType) {
+  const pdf = await PDFDocument.create();
+  const image = mimeType === "image/png"
+    ? await pdf.embedPng(bytes)
+    : await pdf.embedJpg(bytes);
+
+  const page = pdf.addPage([A4_WIDTH_PT, A4_HEIGHT_PT]);
+  const maxWidth = A4_WIDTH_PT - (EVIDENCE_MARGIN_PT * 2);
+  const maxHeight = A4_HEIGHT_PT - (EVIDENCE_MARGIN_PT * 2);
+  const scale = Math.min(maxWidth / image.width, maxHeight / image.height);
+  const width = image.width * scale;
+  const height = image.height * scale;
+
+  page.drawImage(image, {
+    x: (A4_WIDTH_PT - width) / 2,
+    y: (A4_HEIGHT_PT - height) / 2,
+    width,
+    height,
+  });
+
+  return new Uint8Array(await pdf.save({ useObjectStreams: false }));
+}
+
+async function evidencePdfBytes(token, attachment, itemIndex, attachmentIndex) {
+  try {
+    const { bytes, mimeType } = await fetchAttachmentBytes(token, attachment);
+    if (mimeType === "application/pdf") {
+      // ใช้ PDF ต้นฉบับทั้งไฟล์ เพื่อไม่ให้หน้าหรือรายละเอียดหาย
+      await PDFDocument.load(bytes, { ignoreEncryption: true });
+      return bytes;
+    }
+    if (mimeType === "image/png" || mimeType === "image/jpeg") {
+      // วางภาพบน A4 แบบ contain: คงสัดส่วน จัดกึ่งกลาง และไม่ครอปภาพ
+      return await imageToA4PdfBytes(bytes, mimeType);
+    }
+    throw new Error(`ชนิดไฟล์ไม่รองรับ: ${mimeType || "unknown"}`);
+  } catch (error) {
+    console.warn(
+      `[evidence-a4] item=${itemIndex + 1} attachment=${attachmentIndex + 1}`,
+      error?.message || error
+    );
+    const fallback = attachment.previewUrl
+      ? `<div style="text-align:center;padding:4px"><img src="${esc(attachment.previewUrl)}" alt="หลักฐาน" width="610" style="width:610px;max-width:100%;height:auto;object-fit:contain"></div>`
+      : `<div style="border:1px dashed #aaa;padding:24px;text-align:center">ไฟล์แนบไม่สามารถแสดงตัวอย่างใน PDF ได้</div>`;
+    return await htmlToPdfBytes(
+      token,
+      `หลักฐานสำรอง_${itemIndex + 1}_${attachmentIndex + 1}`,
+      shell(`หลักฐานรายการ ${itemIndex + 1}`, fallback)
+    );
+  }
 }
 
 function buildSummaryBody(batch, items, settings = {}, payer = {}) {
@@ -492,13 +569,9 @@ export async function createBatchClaimPdf(env, batch, items, settings = {}, paye
       ));
     }
 
-    const bodies = evidenceBodies(item, i);
-    for (let j = 0; j < bodies.length; j++) {
-      pdfParts.push(await htmlToPdfBytes(
-        token,
-        `หลักฐาน_${batch.docId}_${i + 1}_${j + 1}`,
-        shell(`หลักฐาน ${batch.docId} รายการ ${i + 1}`, bodies[j])
-      ));
+    const attachments = Array.isArray(item.packetAttachments) ? item.packetAttachments : [];
+    for (let j = 0; j < attachments.length; j++) {
+      pdfParts.push(await evidencePdfBytes(token, attachments[j], i, j));
     }
   }
 
