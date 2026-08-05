@@ -32,7 +32,7 @@ import {
 import {
   ensureBatchTab, getBatchDashboard, createReimbursementBatches,
   requestUrgentBatch, updateReimbursementBatchStatus,
-  updateReimbursementBatchWorkflow, uploadReimbursementPaymentSlip,
+  updateReimbursementBatchWorkflow, updateExpenseReviewWorkflow, uploadReimbursementPaymentSlip,
   runScheduledReimbursementBatches,
 } from "./batches.js";
 import {
@@ -52,7 +52,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v3.4_SETTINGS_CANONICAL_PERSIST_20260805";
+const VERSION = "DEAL_LINE_BOT_v3.5_RESTORE_EXPENSE_WORKFLOW_ENDPOINT_20260805";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -393,6 +393,14 @@ export default {
         if (url.pathname === "/api/batch-workflow" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
           const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token, { tenant: key });
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        // รายการย่อยที่ยังไม่ได้รวมใบเบิก: ตรวจผ่าน/ตีกลับได้ทันที
+        // ถ้ากดผ่าน ระบบจะสร้างใบเบิก 1 รายการเบื้องหลัง แล้วเข้าสู่รอโอน
+        if (url.pathname === "/api/expense-workflow" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await updateExpenseReviewWorkflow(env, key, sheetId, b.expenseId, b.action, b.payload || {}, token);
           return cors(json(out, out.ok ? 200 : 400));
         }
 
