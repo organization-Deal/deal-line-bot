@@ -24,7 +24,7 @@ import {
 const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
 const DRIVE = "https://www.googleapis.com/drive/v3";
 export const TAB_BATCHES = "รอบเบิก";
-export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V5_FINANCE_CHANNELS_20260803";
+export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V6_REVIEW_MERGE_20260805";
 
 const LOCAL_BATCH_LOCKS = new Map();
 const LOCAL_SCHEDULE_CLAIMS = new Set();
@@ -170,11 +170,16 @@ function payerName(rec = {}) {
   return String(rec.payerName || rec.sender || "ไม่ระบุผู้เบิก").trim();
 }
 
-function isEligible(rec) {
+function basicExpenseMergeEligible(rec) {
   if (!rec || !String(rec.id || "").trim() || rec.status === STATUS_DELETED) return false;
   if (rec.type === "รายรับ" || rec.type === "income") return false;
   if (rec.paid) return false;
   if (!(Number(rec.amount) > 0)) return false;
+  return true;
+}
+
+function isEligible(rec) {
+  if (!basicExpenseMergeEligible(rec)) return false;
   // ป้องกันข้อมูลเก่าก่อนติดตั้งฟีเจอร์ถูกดึงเข้ารอบแบบไม่ตั้งใจ
   // รายการใหม่จากโค้ดชุดนี้จะมี batchType / batchStatus ตั้งแต่ตอนบันทึก
   const enrolled = String(rec.batchType || rec.batchStatus || rec.urgentRequestedAt || "").trim();
@@ -184,8 +189,15 @@ function isEligible(rec) {
   if (hasMainClaim) return false;
   // รายการที่ผู้เบิกยืนยันแล้วใช้สถานะ "รอตรวจเอกสาร" ได้ทันที
   // แต่ยังถือเป็นรายการย่อยที่เลือกไปรวมเป็นใบเบิกหลักได้ ตราบใดที่ยังไม่มีเลขใบเบิก
-  if (["รวมรอบแล้ว", "ต้องแก้ไข", "รอโอนเงิน", "รอจ่าย", "รอหลักฐานการโอน", "อนุมัติแล้ว", "จ่ายแล้ว", "ยกเลิก"].includes(String(rec.batchStatus || "").trim())) return false;
+  if (["รวมรอบแล้ว", "ต้องแก้ไข", "รอโอนเงิน", "รอจ่าย", "รอหลักฐานการโอน", "อนุมัติแล้ว", "จ่ายแล้ว", "ยกเลิก", "ถูกรวมแล้ว"].includes(String(rec.batchStatus || "").trim())) return false;
   return true;
+}
+
+function isMergeableReviewBatch(batch = {}) {
+  const status = String(batch.status || "").trim();
+  if (!["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(status)) return false;
+  if (batch.approvedAt || batch.paidAt || batch.paymentSlipUrl) return false;
+  return Array.isArray(batch.itemIds) && batch.itemIds.length > 0;
 }
 
 function parseList(raw) {
@@ -487,11 +499,45 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
     ? Math.max(1, Math.min(10, Number(options.maxItems || settings.batch_max_items || 10)))
     : 1;
   const all = await readExpenses(env, sheetId, token);
-  const selected = new Set((options.expenseIds || []).map(String));
+  const requestedBatchIds = [...new Set((options.batchIds || []).map((id) => String(id || "").trim()).filter(Boolean))];
+  const sourceBatches = [];
+  const sourceBatchItemIds = new Set();
+
+  if (requestedBatchIds.length) {
+    const batches = await listBatches(env, sheetId, token);
+    const byId = new Map();
+    for (const batch of batches) {
+      byId.set(String(batch.id || ""), batch);
+      byId.set(String(batch.docId || ""), batch);
+    }
+    for (const batchId of requestedBatchIds) {
+      const batch = byId.get(batchId);
+      if (!batch) {
+        return { ok: false, reason: "batch_not_found", message: `ไม่พบใบเบิก ${batchId}` };
+      }
+      if (!isMergeableReviewBatch(batch)) {
+        return { ok: false, reason: "batch_not_mergeable", message: `ใบเบิก ${batch.docId || batchId} ไม่อยู่ในสถานะรอตรวจเอกสาร หรือถูกดำเนินการต่อแล้ว` };
+      }
+      sourceBatches.push(batch);
+      batch.itemIds.forEach((id) => sourceBatchItemIds.add(String(id)));
+    }
+  }
+
+  const selected = new Set([
+    ...(options.expenseIds || []).map(String),
+    ...sourceBatchItemIds,
+  ]);
   const requestedPayer = String(options.payerKey || "").trim();
 
-  let eligible = all.filter(isEligible);
+  let eligible = all.filter((rec) => sourceBatchItemIds.has(String(rec.id)) ? basicExpenseMergeEligible(rec) : isEligible(rec));
   if (selected.size) eligible = eligible.filter((r) => selected.has(String(r.id)));
+  if (selected.size) {
+    const found = new Set(eligible.map((r) => String(r.id)));
+    const missing = [...selected].filter((id) => !found.has(String(id)));
+    if (missing.length) {
+      return { ok: false, reason: "items_not_mergeable", message: `มี ${missing.length} รายการที่ไม่สามารถรวมใบเบิกได้ กรุณาอัปเดตข้อมูลแล้วลองใหม่`, missingIds: missing };
+    }
+  }
   if (requestedPayer) eligible = eligible.filter((r) => payerKey(r) === requestedPayer);
   if (type === "ด่วน" && !selected.size) eligible = eligible.filter((r) => r.batchType === "ด่วน" || r.batchStatus === "ขอเบิกด่วน");
 
@@ -586,7 +632,21 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
     }
   }
 
-  console.log(`[batch] tenant=${tenant} run=${runNo} type=${type} docs=${created.length} items=${itemCount} total=${totalAll} blocked=${blocked.length}`);
+  if (sourceBatches.length && created.length) {
+    const mergedInto = created.map((batch) => batch.docId).filter(Boolean).join(", ");
+    const mergedAt = new Date().toISOString();
+    for (const source of sourceBatches) {
+      await updateBatchRow(env, sheetId, source.id, {
+        status: "ถูกรวมแล้ว",
+        note: `รวมเข้ากับใบเบิก ${mergedInto}`,
+        rejectionReason: "",
+        updatedAt: mergedAt,
+        auditLog: auditJson(source, "merged_into_new_claim", { mergedInto, newBatchIds: created.map((batch) => batch.id) }),
+      }, token, source).catch((error) => console.warn("mark source batch merged", source.docId || source.id, error.message));
+    }
+  }
+
+  console.log(`[batch] tenant=${tenant} run=${runNo} type=${type} docs=${created.length} items=${itemCount} total=${totalAll} blocked=${blocked.length} mergedSources=${sourceBatches.length}`);
   if (!created.length && blocked.length) {
     return {
       ok: false,
@@ -600,7 +660,7 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
       blocked,
     };
   }
-  return { ok: true, runNo: created.length ? runNo : "", batches: created, itemCount, total: totalAll, people: peopleCreated, blocked };
+  return { ok: true, runNo: created.length ? runNo : "", batches: created, itemCount, total: totalAll, people: peopleCreated, blocked, mergedBatchCount: sourceBatches.length };
 }
 
 function batchCoordinatorStub(env, tenant) {

@@ -49,7 +49,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v2.7_REVIEW_DIRECT_CLAIM_SIGNATURES_20260805";
+const VERSION = "DEAL_LINE_BOT_v2.8_REVIEW_MERGE_CLAIMS_20260805";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -322,7 +322,8 @@ export default {
             type: b.type === "ด่วน" ? "ด่วน" : "ปกติ",
             payerKey: b.payerKey || "",
             expenseIds: Array.isArray(b.expenseIds) ? b.expenseIds : [],
-            note: b.note || "สร้างใบเบิกด้วยตนเองจาก Dashboard",
+            batchIds: Array.isArray(b.batchIds) ? b.batchIds : [],
+            note: b.note || "สร้างหรือรวมใบเบิกด้วยตนเองจาก Dashboard",
           });
           return cors(json(out, out.ok ? 200 : 400));
         }
