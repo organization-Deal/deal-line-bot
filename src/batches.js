@@ -24,7 +24,7 @@ import {
 const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
 const DRIVE = "https://www.googleapis.com/drive/v3";
 export const TAB_BATCHES = "รอบเบิก";
-export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V6_REVIEW_MERGE_20260805";
+export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V7_PRIMARY_REVIEW_OPTIONAL_MERGE_20260805";
 
 const LOCAL_BATCH_LOCKS = new Map();
 const LOCAL_SCHEDULE_CLAIMS = new Set();
@@ -733,6 +733,74 @@ export async function createReimbursementBatches(env, tenant, sheetId, token, op
   } finally {
     await releaseBatchLock(env, lock).catch(() => {});
   }
+}
+
+
+export async function updateExpenseReviewWorkflow(env, tenant, sheetId, expenseId, action, payload = {}, token = null) {
+  const id = String(expenseId || "").trim();
+  if (!id) return { ok: false, reason: "expense_id_required", message: "ไม่พบรหัสรายการเบิก" };
+  if (!["approve", "reject"].includes(String(action || ""))) {
+    return { ok: false, reason: "bad_action", message: "รายการที่ยังไม่รวมใบเบิกรองรับเฉพาะเอกสารผ่านหรือตีกลับ" };
+  }
+
+  const expenses = await readExpenses(env, sheetId, token);
+  const expense = expenses.find((row) => String(row.id || "") === id);
+  if (!expense || expense.status === STATUS_DELETED) {
+    return { ok: false, reason: "expense_not_found", message: "ไม่พบรายการเบิกนี้" };
+  }
+  if (expense.type === "รายรับ" || expense.type === "income") {
+    return { ok: false, reason: "income_not_supported", message: "รายการรายรับไม่อยู่ใน Workflow เบิกจ่าย" };
+  }
+  if (expense.paid || String(expense.batchStatus || "") === "จ่ายแล้ว") {
+    return { ok: false, reason: "already_paid", message: "รายการนี้จ่ายแล้ว" };
+  }
+
+  // รายการใหม่เข้าขั้นตรวจเอกสารทันที โดยไม่ต้องผ่านขั้นรอรวมใบเบิก
+  // เมื่อบัญชีกดผ่าน/ตีกลับ ระบบจะสร้างใบเบิกหลัก 1 รายการอัตโนมัติเบื้องหลัง
+  // การเลือกหลายรายการแล้วรวมใบเบิกยังคงเป็นฟีเจอร์เสริมบน Dashboard
+  let batches = await listBatches(env, sheetId, token);
+  let batch = batches.find((row) =>
+    !["ยกเลิก", "ถูกรวมแล้ว"].includes(String(row.status || "")) &&
+    Array.isArray(row.itemIds) && row.itemIds.map(String).includes(id)
+  );
+  let promoted = false;
+
+  if (!batch) {
+    const created = await createReimbursementBatches(env, tenant, sheetId, token, {
+      type: String(expense.batchType || "") === "ด่วน" ? "ด่วน" : "ปกติ",
+      expenseIds: [id],
+      mergeItems: false,
+      maxItems: 1,
+      note: "สร้างใบเบิกรายการอัตโนมัติเพื่อเข้าสู่ Workflow ตรวจเอกสาร",
+    });
+    if (!created.ok) return created;
+    batch = Array.isArray(created.batches) ? created.batches[0] : null;
+    promoted = true;
+    if (!batch) {
+      batches = await listBatches(env, sheetId, token);
+      batch = batches.find((row) =>
+        !["ยกเลิก", "ถูกรวมแล้ว"].includes(String(row.status || "")) &&
+        Array.isArray(row.itemIds) && row.itemIds.map(String).includes(id)
+      );
+    }
+  }
+
+  if (!batch) {
+    return { ok: false, reason: "claim_creation_failed", message: "สร้างใบเบิกรายการเพื่อดำเนิน Workflow ไม่สำเร็จ" };
+  }
+
+  const nextPayload = { ...(payload || {}) };
+  if (action === "reject") nextPayload.itemIds = [id];
+  const result = await updateReimbursementBatchWorkflow(
+    env, sheetId, batch.id || batch.docId, action, nextPayload, token, { tenant }
+  );
+  return {
+    ...result,
+    promotedFromExpense: promoted,
+    batchId: batch.id || "",
+    docId: batch.docId || "",
+    expenseId: id,
+  };
 }
 
 export async function requestUrgentBatch(env, tenant, sheetId, token, expenseIds = []) {

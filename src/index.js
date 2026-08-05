@@ -32,7 +32,7 @@ import {
 import {
   ensureBatchTab, getBatchDashboard, createReimbursementBatches,
   requestUrgentBatch, updateReimbursementBatchStatus,
-  updateReimbursementBatchWorkflow, uploadReimbursementPaymentSlip,
+  updateReimbursementBatchWorkflow, updateExpenseReviewWorkflow, uploadReimbursementPaymentSlip,
   runScheduledReimbursementBatches,
 } from "./batches.js";
 import {
@@ -52,7 +52,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v3.1_MONTHLY_TENANT_DRIVE_20260805";
+const VERSION = "DEAL_LINE_BOT_v3.2_PRIMARY_REVIEW_OPTIONAL_MERGE_20260805";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -393,6 +393,12 @@ export default {
         if (url.pathname === "/api/batch-workflow" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
           const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token, { tenant: key });
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/expense-workflow" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await updateExpenseReviewWorkflow(env, key, sheetId, b.expenseId, b.action, b.payload || {}, token);
           return cors(json(out, out.ok ? 200 : 400));
         }
 
