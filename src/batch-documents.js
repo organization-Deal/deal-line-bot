@@ -4,7 +4,7 @@ import { PDFDocument } from "pdf-lib";
 // โครงเอกสาร: หน้าสรุปใบเบิก (จบแยกหน้า) → ใบแทนของแต่ละรายการ → หลักฐาน/ใบเสร็จของแต่ละรายการ
 // รองรับสูงสุด 10 รายการต่อใบเบิกตามค่าระบบ
 
-export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V8_DYNAMIC_ROWS_20260805";
+export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V9_DYNAMIC_CLAIM_AND_RECEIPT_ROWS_20260805";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
@@ -298,7 +298,6 @@ function replacementReceiptBody(item, settings, payer, batch, index) {
   const reason = item.noReceiptReason || "ไม่อาจเรียกเก็บใบเสร็จรับเงินจากผู้รับได้ และนำค่าใช้จ่ายไปใช้ในงานของบริษัทโดยแท้จริง";
   const documentNo = metaNumberFor(item, batch, index);
   const requestNo = item.requestNo || item.reqNo || batch.docId || batch.runNo || "—";
-  const blankRows = Array.from({ length: 8 }, () => `<tr style="height:32px"><td></td><td></td><td></td><td></td></tr>`).join("");
 
   return `${companyHeader(settings)}
     <table class="nob" border="0" width="100%" style="width:100%;margin:6px 0 4px">
@@ -329,7 +328,6 @@ function replacementReceiptBody(item, settings, payer, batch, index) {
           <td style="text-align:center">${money(item.amount)}</td>
           <td>${esc(item.receiptNote || "")}</td>
         </tr>
-        ${blankRows}
       </tbody>
     </table>
     <div style="text-align:right;font-size:11pt;font-weight:700;margin-top:8px">รวมทั้งสิ้น : ${money(item.amount)} บาท</div>
