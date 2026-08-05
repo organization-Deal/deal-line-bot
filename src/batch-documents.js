@@ -4,7 +4,7 @@ import { PDFDocument } from "pdf-lib";
 // โครงเอกสาร: หน้าสรุปใบเบิก (จบแยกหน้า) → ใบแทนของแต่ละรายการ → หลักฐาน/ใบเสร็จของแต่ละรายการ
 // รองรับสูงสุด 10 รายการต่อใบเบิกตามค่าระบบ
 
-export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V7_SIGNATURES_20260805";
+export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V8_DYNAMIC_ROWS_20260805";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
@@ -369,17 +369,13 @@ function buildSummaryBody(batch, items, settings = {}, payer = {}) {
   const rows = items.map((r, i) => {
     const d = parseDate(r.dateISO || r.dateText || r.date).en;
     const detail = r.note || r.vendor || r.category || "ค่าใช้จ่าย";
-    return `<tr style="height:31px;page-break-inside:avoid;break-inside:avoid">
-      <td style="text-align:center">${i + 1}</td>
-      <td style="text-align:center">${esc(d)}</td>
-      <td>${esc(detail)}</td>
-      <td style="text-align:right">${money(r.amount)}</td>
+    return `<tr style="page-break-inside:avoid;break-inside:avoid">
+      <td style="text-align:center;vertical-align:top;padding:6px 5px">${i + 1}</td>
+      <td style="text-align:center;vertical-align:top;padding:6px 5px;white-space:nowrap">${esc(d)}</td>
+      <td style="vertical-align:top;padding:6px 5px;white-space:normal;word-break:break-word;overflow-wrap:anywhere;line-height:1.35">${esc(detail)}</td>
+      <td style="text-align:right;vertical-align:top;padding:6px 5px;white-space:nowrap">${money(r.amount)}</td>
     </tr>`;
   }).join("");
-  const blankCount = Math.max(0, 10 - items.length);
-  const blanks = Array.from({ length: blankCount }, () =>
-    `<tr style="height:26px"><td>&nbsp;</td><td></td><td></td><td></td></tr>`
-  ).join("");
 
   return `${companyHeader(settings)}
     <table class="nob" border="0" width="100%" style="width:100%;border:0;margin:2px 0 8px">
@@ -403,7 +399,7 @@ function buildSummaryBody(batch, items, settings = {}, payer = {}) {
         <th width="52%">รายการ</th>
         <th width="20%">จำนวนเงิน<br>(บาท)</th>
       </tr></thead>
-      <tbody>${rows}${blanks}</tbody>
+      <tbody>${rows}</tbody>
     </table>
 
     <div style="text-align:right;font-size:10.2pt;font-weight:700;margin-top:8px">รวมทั้งสิ้น ${money(total)} บาท</div>
