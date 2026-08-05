@@ -49,7 +49,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v2.8_REVIEW_MERGE_CLAIMS_20260805";
+const VERSION = "DEAL_LINE_BOT_v2.9_WORKSPACE_LINKS_20260805";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -224,6 +224,22 @@ export default {
 
         if (url.pathname === "/api/expenses") {
           return cors(json(await readExpenses(env, sheetId, token)));
+        }
+
+        // ลิงก์ทางลัดจาก Dashboard ไปยังแหล่งข้อมูลจริงของบริษัท
+        if (url.pathname === "/api/workspace-links") {
+          const driveUrl = token
+            ? "https://drive.google.com/drive/my-drive"
+            : (env.DRIVE_FOLDER_ID
+              ? `https://drive.google.com/drive/folders/${encodeURIComponent(env.DRIVE_FOLDER_ID)}`
+              : "https://drive.google.com/drive/my-drive");
+          return cors(json({
+            ok: true,
+            sheetId,
+            sheetUrl: `https://docs.google.com/spreadsheets/d/${encodeURIComponent(sheetId)}/edit`,
+            driveUrl,
+            driveMode: token ? "oauth-my-drive" : (env.DRIVE_FOLDER_ID ? "shared-folder" : "my-drive"),
+          }));
         }
 
         if (url.pathname === "/api/slip-items") {
