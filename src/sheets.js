@@ -67,7 +67,7 @@ const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "AM"
 export const HEADER = SCHEMA.map((s) => s.header);              // oauth.js / provision.js ใช้ตัวนี้
 const COL_OF = Object.fromEntries(SCHEMA.map((s) => [s.key, s.col]));
 
-export const STATUS_PENDING = "รอตรวจเอกสาร";
+export const STATUS_PENDING = "รอเบิก";
 export const STATUS_DELETED = "ลบแล้ว";
 
 /** ประเภทหลักฐาน — ตรงกับ 4 ช่องแนบไฟล์ในระบบ Lark เดิม */
@@ -295,7 +295,7 @@ export async function appendExpense(env, sheetId, r, meta = {}, token = null) {
     duplicateOf:     r.duplicateOf || "",
     payerId:             meta.payerId || r.payerId || "",
     batchType:           r.batchType || "ปกติ",
-    batchStatus:         r.batchStatus || "รอตรวจเอกสาร",
+    batchStatus:         r.batchStatus || "รอเข้ารอบ",
     batchNo:             r.batchNo || "",
     batchDocId:          r.batchDocId || "",
     batchClaimPdfUrl:    r.batchClaimPdfUrl || "",
@@ -717,15 +717,26 @@ const DEFAULT_SETTINGS = {
   doc_prefix: "R",
 };
 
+function settingsFromRows(rows = []) {
+  const out = { ...DEFAULT_SETTINGS };
+  const seen = new Set();
+  for (const row of rows) {
+    const key = String(row?.[0] ?? "").trim();
+    if (!key || key === "key") continue;
+    const value = row?.[1] ?? "";
+    // ชีตเก่าอาจมี key ซ้ำจากการบันทึกหลายรอบ
+    // อย่าให้แถวว่างเก่าที่อยู่ด้านล่างมาทับ URL โลโก้/ลายเซ็นที่มีค่าจริง
+    if (String(value).trim() !== "" || !seen.has(key)) out[key] = value;
+    seen.add(key);
+  }
+  return out;
+}
+
 export async function readSettings(env, sheetId, token = null) {
   try {
     const t = await authToken(env, token);
-    const data = await call(t, rangeUrl(sheetId, TAB_SETTINGS, "A2:B"));
-    const out = { ...DEFAULT_SETTINGS };
-    for (const [k, v] of data.values || []) {
-      if (k) out[String(k).trim()] = v ?? "";
-    }
-    return out;
+    const data = await call(t, rangeUrl(sheetId, TAB_SETTINGS, "A2:B200"));
+    return settingsFromRows(data.values || []);
   } catch (e) {
     if (e?.status === 429 || e?.isQuota) throw e;
     console.warn("readSettings:", e.message);
@@ -737,14 +748,41 @@ export async function writeSettings(env, sheetId, settings, token = null) {
   const t = await authToken(env, token);
   await ensureSettingsTab(env, sheetId, t);
 
-  const merged = { ...DEFAULT_SETTINGS, ...settings };
-  const values = Object.entries(merged).map(([k, v]) => [k, v ?? ""]);
+  let current = { ...DEFAULT_SETTINGS };
+  try {
+    const data = await call(t, rangeUrl(sheetId, TAB_SETTINGS, "A2:B200"));
+    current = settingsFromRows(data.values || []);
+  } catch (error) {
+    if (error?.status === 429 || error?.isQuota) throw error;
+    console.warn("writeSettings read current:", error.message);
+  }
 
-  await call(t, rangeUrl(sheetId, TAB_SETTINGS, "A1:B100", "?valueInputOption=USER_ENTERED"), {
+  const patch = settings && typeof settings === "object" ? settings : {};
+  const merged = { ...current, ...patch };
+  const standardKeys = Object.keys(DEFAULT_SETTINGS);
+  const extraKeys = Object.keys(merged).filter((k) => !standardKeys.includes(k)).sort();
+  const keys = [...standardKeys, ...extraKeys];
+  const values = [["key", "value"], ...keys.map((k) => [k, merged[k] ?? ""])];
+
+  // ล้างก่อนเขียนทุกครั้ง เพื่อกำจัด key ซ้ำ/แถวว่างเก่าที่ทำให้บันทึกแล้วอ่านกลับเป็นค่าว่าง
+  await call(
+    t,
+    `${API}/${sheetId}/values/${encodeURIComponent(`${TAB_SETTINGS}!A1:B200`)}:clear`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+  await call(t, rangeUrl(sheetId, TAB_SETTINGS, `A1:B${values.length}`, "?valueInputOption=RAW"), {
     method: "PUT",
-    body: JSON.stringify({ values: [["key", "value"], ...values] }),
+    body: JSON.stringify({ values }),
   });
-  return merged;
+
+  const persisted = await readSettings(env, sheetId, t);
+  const failed = Object.keys(patch).filter(
+    (key) => String(persisted[key] ?? "") !== String(merged[key] ?? "")
+  );
+  if (failed.length) {
+    throw new Error(`settings_not_persisted:${failed.join(",")}`);
+  }
+  return persisted;
 }
 
 export async function ensureSettingsTab(env, sheetId, token = null) {

@@ -52,7 +52,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v3.3_REUSE_BUSINESS_ACROSS_LINE_GROUPS_20260805";
+const VERSION = "DEAL_LINE_BOT_v3.4_SETTINGS_CANONICAL_PERSIST_20260805";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -516,12 +516,17 @@ export default {
           const settings = Object.keys(settingPatch).length
             ? await writeSettings(env, sheetId, settingPatch, token)
             : await readSettings(env, sheetId, token);
+          const savedField = kind === "logo" ? "logo_url" : "approver_sign_url";
+          if (Object.keys(settingPatch).length && !String(settings[savedField] || "").trim()) {
+            return cors(json({ error: "asset_setting_not_persisted", field: savedField }, 500));
+          }
 
           return cors(json({
             ok: true,
             kind,
-            url: publicUrl,
+            url: settings[savedField] || publicUrl,
             saved: Object.keys(settingPatch).length > 0,
+            persisted: true,
             settings,
           }));
         }
