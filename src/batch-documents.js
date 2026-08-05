@@ -4,7 +4,7 @@ import { PDFDocument } from "pdf-lib";
 // โครงเอกสาร: หน้าสรุปใบเบิก (จบแยกหน้า) → ใบแทนของแต่ละรายการ → หลักฐาน/ใบเสร็จของแต่ละรายการ
 // รองรับสูงสุด 10 รายการต่อใบเบิกตามค่าระบบ
 
-export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V6_20260805";
+export const BATCH_DOCUMENT_VERSION = "REIMBURSEMENT_MAIN_CLAIM_PACKET_V7_SIGNATURES_20260805";
 
 const DRIVE = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
@@ -413,7 +413,26 @@ function buildSummaryBody(batch, items, settings = {}, payer = {}) {
       <div><b>ชื่อบัญชี:</b> ${esc(payer.accountName || payer.name || batch.payerName || "—")}&nbsp;&nbsp;&nbsp;&nbsp;<b>เลขบัญชี:</b> ${esc(payer.accountNo || "—")}</div>
       <div><b>ธนาคาร:</b> ${esc(payer.bank || "—")}</div>
       <div><b>รหัสรอบจ่าย:</b> ${esc(batch.runNo)}&nbsp;&nbsp;&nbsp;&nbsp;<b>จัดทำเมื่อ:</b> ${esc(issue)}</div>
-    </div>`;
+    </div>
+
+    <table class="nob keep" border="0" cellspacing="0" cellpadding="0" width="100%" style="width:100%;border:0;margin-top:18px;page-break-inside:avoid;break-inside:avoid">
+      <tr>
+        ${signatureCell(
+          payer.name || batch.payerName || "—",
+          "ผู้เบิกจ่าย",
+          issue,
+          payer.signatureUrl || "",
+          payer.role || ""
+        )}
+        ${signatureCell(
+          settings.approver_name || "—",
+          "ผู้อนุมัติ",
+          issue,
+          settings.approver_sign_url || "",
+          settings.approver_position || ""
+        )}
+      </tr>
+    </table>`;
 }
 
 async function htmlToPdfBytes(token, name, html) {

@@ -713,7 +713,7 @@ function buildRecordFromGroup(s, g, profile) {
     bankAccountNo: profile.accountNo || "",
     bankAccountName: profile.accountName || profile.name || "",
     batchType: "ปกติ",
-    batchStatus: "รอเข้ารอบ",
+    batchStatus: "รอตรวจเอกสาร",
   };
 }
 
@@ -1039,7 +1039,7 @@ export class MultiExpenseSession {
         _row: out.row,
         dateText: dte.text,
         dateISO: dte.iso,
-        status: "รอเบิก",
+        status: "รอตรวจเอกสาร",
         paid: false,
         claimPdfUrl: "",
         receiptPdfUrl: "",
@@ -1170,7 +1170,7 @@ function render(){
   q('#saveBtn').textContent='บันทึก '+Number(D.counts.groups||0)+' รายการ';
   q('#saveBtn').disabled=D.status==='saving'||D.status==='saving_docs'||!D.counts.groups;
   renderGroups();renderPool();
-  if(D.status==='done')showDone('บันทึกสำเร็จ',D.saved.length+' รายการถูกส่งเข้ารอบเบิกแล้ว');
+  if(D.status==='done')showDone('บันทึกสำเร็จ',D.saved.length+' รายการถูกส่งให้ฝ่ายบัญชีตรวจแล้ว');
   else if(D.status==='saving_docs')showDone('บันทึกรายการแล้ว','ระบบกำลังสร้าง PDF อัตโนมัติ สามารถกลับไป LINE ได้เลย');
 }
 function renderGroups(){

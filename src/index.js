@@ -49,7 +49,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v2.6_DEPLOY_PROOF_3_BUTTONS_PDF_SPLIT_20260805";
+const VERSION = "DEAL_LINE_BOT_v2.7_REVIEW_DIRECT_CLAIM_SIGNATURES_20260805";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -1037,7 +1037,7 @@ async function handlePostback(event, env, key, mode = "reply") {
       bankAccountNo: memberProfile?.accountNo || "",
       bankAccountName: memberProfile?.accountName || resolvedPayerName,
       dateText: d.text, dateISO: d.iso,
-      status: "รอเบิก", paid: false,
+      status: "รอตรวจเอกสาร", paid: false,
       type: pending.record.type || "รายจ่าย",
       claimPdfUrl: "",
       receiptPdfUrl: "",
@@ -1046,7 +1046,7 @@ async function handlePostback(event, env, key, mode = "reply") {
       duplicateOf: toSave.duplicateOf || "",
       payerId: uid || "",
       batchType: "ปกติ",
-      batchStatus: "รอเข้ารอบ",
+      batchStatus: "รอตรวจเอกสาร",
       batchNo: "",
       batchDocId: "",
       batchClaimPdfUrl: "",

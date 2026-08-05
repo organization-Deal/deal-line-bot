@@ -179,8 +179,12 @@ function isEligible(rec) {
   // รายการใหม่จากโค้ดชุดนี้จะมี batchType / batchStatus ตั้งแต่ตอนบันทึก
   const enrolled = String(rec.batchType || rec.batchStatus || rec.urgentRequestedAt || "").trim();
   if (!enrolled) return false;
-  if (String(rec.batchDocId || "").trim()) return false;
-  if (["รวมรอบแล้ว", "รอตรวจเอกสาร", "ต้องแก้ไข", "รอโอนเงิน", "รอจ่าย", "รอหลักฐานการโอน", "อนุมัติแล้ว", "จ่ายแล้ว", "ยกเลิก"].includes(String(rec.batchStatus || "").trim())) return false;
+  const hasMainClaim = [rec.batchDocId, rec.batchNo, rec.batchClaimPdfUrl, rec.batchCreatedAt]
+    .some((value) => String(value || "").trim());
+  if (hasMainClaim) return false;
+  // รายการที่ผู้เบิกยืนยันแล้วใช้สถานะ "รอตรวจเอกสาร" ได้ทันที
+  // แต่ยังถือเป็นรายการย่อยที่เลือกไปรวมเป็นใบเบิกหลักได้ ตราบใดที่ยังไม่มีเลขใบเบิก
+  if (["รวมรอบแล้ว", "ต้องแก้ไข", "รอโอนเงิน", "รอจ่าย", "รอหลักฐานการโอน", "อนุมัติแล้ว", "จ่ายแล้ว", "ยกเลิก"].includes(String(rec.batchStatus || "").trim())) return false;
   return true;
 }
 
@@ -562,7 +566,7 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
       } catch (e) {
         // ป้องกันครึ่งรอบ: คืนรายการทั้งหมดกลับเข้าคิว และทำเครื่องหมายใบเบิกว่ายกเลิก
         await updateExpensesByIds(env, sheetId, items.map((item) => item.id), {
-          batchType: "ปกติ", batchStatus: "รอเข้ารอบ", batchNo: "",
+          batchType: "ปกติ", batchStatus: "รอตรวจเอกสาร", batchNo: "",
           batchDocId: "", batchClaimPdfUrl: "", batchPart: "", batchCreatedAt: "",
         }, token).catch(() => {});
         await updateBatchRow(env, sheetId, saved.id, {
@@ -694,7 +698,7 @@ export async function requestUrgentBatch(env, tenant, sheetId, token, expenseIds
   } catch (error) {
     await updateExpensesByIds(env, sheetId, recordIds, {
       batchType: "ปกติ",
-      batchStatus: "รอเข้ารอบ",
+      batchStatus: "รอตรวจเอกสาร",
       urgentRequestedAt: "",
     }, token).catch(() => {});
     throw error;
@@ -714,7 +718,7 @@ export async function getBatchDashboard(env, sheetId, token = null) {
     id: r.id, dateISO: r.dateISO, dateText: r.dateText, createdAt: r.createdAt,
     vendor: r.vendor, transferor: r.transferor, payerName: r.payerName,
     note: r.note, amount: r.amount, category: r.category, docType: r.docType,
-    batchType: r.batchType || "ปกติ", batchStatus: r.batchStatus || "รอเข้ารอบ",
+    batchType: r.batchType || "ปกติ", batchStatus: r.batchStatus || "รอตรวจเอกสาร",
     imageUrl: r.imageUrl, claimPdfUrl: r.claimPdfUrl, receiptPdfUrl: r.receiptPdfUrl,
     attReceipt: r.attReceipt || "", attTax: r.attTax || "", attSlip: r.attSlip || "", attOther: r.attOther || "",
     duplicateStatus: r.duplicateStatus || "", duplicateOf: r.duplicateOf || "",

@@ -67,7 +67,7 @@ const LAST_COL = SCHEMA[SCHEMA.length - 1].col;                 // "AM"
 export const HEADER = SCHEMA.map((s) => s.header);              // oauth.js / provision.js ใช้ตัวนี้
 const COL_OF = Object.fromEntries(SCHEMA.map((s) => [s.key, s.col]));
 
-export const STATUS_PENDING = "รอเบิก";
+export const STATUS_PENDING = "รอตรวจเอกสาร";
 export const STATUS_DELETED = "ลบแล้ว";
 
 /** ประเภทหลักฐาน — ตรงกับ 4 ช่องแนบไฟล์ในระบบ Lark เดิม */
@@ -295,7 +295,7 @@ export async function appendExpense(env, sheetId, r, meta = {}, token = null) {
     duplicateOf:     r.duplicateOf || "",
     payerId:             meta.payerId || r.payerId || "",
     batchType:           r.batchType || "ปกติ",
-    batchStatus:         r.batchStatus || "รอเข้ารอบ",
+    batchStatus:         r.batchStatus || "รอตรวจเอกสาร",
     batchNo:             r.batchNo || "",
     batchDocId:          r.batchDocId || "",
     batchClaimPdfUrl:    r.batchClaimPdfUrl || "",
