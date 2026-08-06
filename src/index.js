@@ -52,7 +52,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v3.8_COMPANY_SETUP_REQUIRED_20260806";
+const VERSION = "DEAL_LINE_BOT_v3.9_DASHBOARD_CARD_THEME_20260807";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -885,17 +885,113 @@ function connectMsg(env, key) {
 async function dashboardMsg(env, key) {
   const url = await dashUrl(env, key);
   return {
-    type: "flex", altText: "เปิดแดชบอร์ดสรุปบัญชี",
-    contents: { type: "bubble",
-      body: { type: "box", layout: "vertical", spacing: "sm", contents: [
-        { type: "text", text: "\u{1F4CA} สรุปบัญชีของคุณ", weight: "bold", size: "md", color: "#1F6E56" },
-        { type: "text", text: "ดูยอดใช้จ่าย ออกใบแทน จับคู่หลักฐาน ตั้งค่าบริษัท — ครบในที่เดียว", size: "sm", color: "#8c8c8c", wrap: true },
-        { type: "text", text: "ลิงก์นี้เป็นความลับ — ใครมีลิงก์ก็เปิดดูได้ ถ้าหลุดให้พิมพ์ \"รีเซ็ตลิงก์\"", size: "xxs", color: "#B0847A", wrap: true, margin: "md" },
-      ] },
-      footer: { type: "box", layout: "vertical", contents: [
-        { type: "button", style: "primary", color: "#1F6E56", height: "sm",
-          action: { type: "uri", label: "เปิดแดชบอร์ด", uri: url } },
-      ] },
+    type: "flex",
+    altText: "เปิดแดชบอร์ดบัญชี",
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        paddingAll: "22px",
+        spacing: "md",
+        contents: [
+          { type: "text", text: "ศูนย์ควบคุมบัญชี", size: "sm", color: "#6E6E73", weight: "bold" },
+          {
+            type: "box",
+            layout: "horizontal",
+            alignItems: "center",
+            justifyContent: "space-between",
+            contents: [
+              { type: "text", text: "แดชบอร์ดบัญชี", size: "xxl", weight: "bold", color: "#111111", flex: 1, wrap: true },
+              {
+                type: "box",
+                layout: "horizontal",
+                cornerRadius: "999px",
+                backgroundColor: "#F0F8F2",
+                paddingStart: "10px",
+                paddingEnd: "10px",
+                paddingTop: "6px",
+                paddingBottom: "6px",
+                flex: 0,
+                contents: [
+                  { type: "text", text: "พร้อมใช้งาน", size: "xxs", color: "#248A3D", weight: "bold", flex: 0 },
+                ],
+              },
+            ],
+          },
+          { type: "text", text: "ดูภาพรวมรายจ่าย เอกสาร และสถานะการเบิกทั้งหมดในที่เดียว", size: "sm", color: "#6E6E73", wrap: true },
+          {
+            type: "box",
+            layout: "vertical",
+            backgroundColor: "#F5F5F7",
+            cornerRadius: "16px",
+            paddingAll: "14px",
+            margin: "sm",
+            spacing: "md",
+            contents: [
+              {
+                type: "box",
+                layout: "baseline",
+                spacing: "sm",
+                contents: [
+                  { type: "text", text: "01", size: "xs", color: "#6E6E73", weight: "bold", flex: 1 },
+                  { type: "text", text: "ดูยอดใช้จ่ายและรายการเบิก", size: "sm", color: "#111111", weight: "bold", wrap: true, flex: 8 },
+                ],
+              },
+              {
+                type: "box",
+                layout: "baseline",
+                spacing: "sm",
+                contents: [
+                  { type: "text", text: "02", size: "xs", color: "#6E6E73", weight: "bold", flex: 1 },
+                  { type: "text", text: "ตรวจเอกสารและจับคู่หลักฐาน", size: "sm", color: "#111111", weight: "bold", wrap: true, flex: 8 },
+                ],
+              },
+              {
+                type: "box",
+                layout: "baseline",
+                spacing: "sm",
+                contents: [
+                  { type: "text", text: "03", size: "xs", color: "#6E6E73", weight: "bold", flex: 1 },
+                  { type: "text", text: "ตั้งค่าบริษัท Gmail และช่องทางการเงิน", size: "sm", color: "#111111", weight: "bold", wrap: true, flex: 8 },
+                ],
+              },
+            ],
+          },
+          {
+            type: "box",
+            layout: "vertical",
+            backgroundColor: "#FFF8EF",
+            cornerRadius: "14px",
+            paddingAll: "13px",
+            margin: "sm",
+            contents: [
+              { type: "text", text: "ลิงก์นี้เป็นความลับ", size: "xs", color: "#9A5B24", weight: "bold" },
+              { type: "text", text: "ใครมีลิงก์ก็เปิดดูได้ หากลิงก์หลุดให้พิมพ์ “รีเซ็ตลิงก์” ใน LINE", size: "xs", color: "#9A5B24", wrap: true, margin: "xs" },
+            ],
+          },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        paddingAll: "14px",
+        contents: [
+          {
+            type: "button",
+            style: "primary",
+            color: "#111111",
+            height: "sm",
+            action: { type: "uri", label: "เปิดแดชบอร์ด", uri: url },
+          },
+        ],
+      },
+      styles: {
+        body: { backgroundColor: "#FFFFFF" },
+        footer: { backgroundColor: "#FFFFFF" },
+      },
     },
   };
 }
