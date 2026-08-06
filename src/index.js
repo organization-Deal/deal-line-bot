@@ -902,7 +902,7 @@ async function dashboardMsg(env, key) {
             spacing: "8px",
             contents: [
               { type: "text", text: "📊", size: "lg", flex: 0 },
-              { type: "text", text: "สรุปบัญชีของคุณ", size: "xl", weight: "bold", color: "#0F7A5A", wrap: true, flex: 1 },
+              { type: "text", text: "สรุปบัญชีของคุณ", size: "xl", weight: "bold", color: "#111111", wrap: true, flex: 1 },
             ],
           },
           {
@@ -934,7 +934,7 @@ async function dashboardMsg(env, key) {
           {
             type: "button",
             style: "primary",
-            color: "#0F7A5A",
+            color: "#111111",
             height: "md",
             action: { type: "uri", label: "เปิดแดชบอร์ด", uri: url },
           },
