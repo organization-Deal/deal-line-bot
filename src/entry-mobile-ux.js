@@ -4,7 +4,7 @@ import { enhanceMobileWebResponse } from "./mobile-web-ux.js";
 
 export { MultiExpenseSession } from "./index.js";
 
-const VERSION = "DEAL_LINE_BOT_v3.8_COMPANY_SETUP_AND_MOBILE_UX_20260806";
+const VERSION = "DEAL_LINE_BOT_v4.3_CLOSE_AND_RETURN_TO_LINE_20260807";
 
 async function wrappedFetch(request, env, ctx) {
   const url = new URL(request.url);
@@ -28,7 +28,7 @@ async function wrappedFetch(request, env, ctx) {
   }
 
   // The enhancer is a no-op for JSON, images, redirects, and other non-HTML responses.
-  return enhanceMobileWebResponse(response);
+  return enhanceMobileWebResponse(response, { liffId: env.LIFF_ID || "" });
 }
 
 export default {

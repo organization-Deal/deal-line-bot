@@ -29,6 +29,8 @@ const SCRIPT = String.raw`<script id="deal-mobile-web-ux-script">
   window.__DEAL_MOBILE_WEB_UX__=true;
 
   const LINE_CHATS_URL='https://line.me/R/nv/chat';
+  const LIFF_ID=__DEAL_LIFF_ID__;
+  let liffReadyPromise=null;
   let busyDepth=0;
   let busyShownAt=0;
   let showTimer=null;
@@ -124,20 +126,85 @@ const SCRIPT = String.raw`<script id="deal-mobile-web-ux-script">
     },Math.max(0,420-elapsed));
   }
 
-  function returnToLine(){
-    const root=ensureBusy();
-    root.classList.add('is-visible','is-returning');
-    setBusyCopy('กำลังกลับไป LINE…','กำลังเปิดหน้าแชตของ LINE');
-    const fallback=root.querySelector('.deal-return-fallback');
-    if(fallback)fallback.style.display='none';
-    try{window.location.assign(LINE_CHATS_URL);}catch(_){location.href=LINE_CHATS_URL;}
-    setTimeout(()=>{try{window.close();}catch(_){}},350);
+  function loadLiffSdk(){
+    if(!LIFF_ID)return Promise.resolve(null);
+    if(window.liff)return Promise.resolve(window.liff);
+    if(liffReadyPromise)return liffReadyPromise;
+    liffReadyPromise=new Promise(resolve=>{
+      const existing=document.querySelector('script[data-deal-liff-sdk="1"]');
+      if(existing){
+        existing.addEventListener('load',()=>resolve(window.liff||null),{once:true});
+        existing.addEventListener('error',()=>resolve(null),{once:true});
+        return;
+      }
+      const script=document.createElement('script');
+      script.src='https://static.line-scdn.net/liff/edge/2/sdk.js';
+      script.async=true;
+      script.dataset.dealLiffSdk='1';
+      script.onload=()=>resolve(window.liff||null);
+      script.onerror=()=>resolve(null);
+      document.head.appendChild(script);
+    });
+    return liffReadyPromise;
+  }
+
+  async function prepareLiff(){
+    if(!LIFF_ID)return null;
+    try{
+      const sdk=await loadLiffSdk();
+      if(!sdk)return null;
+      await sdk.init({liffId:LIFF_ID});
+      return sdk;
+    }catch(error){
+      console.warn('[return-line] LIFF init failed',error);
+      return null;
+    }
+  }
+
+  function openLineFallback(root,fallback){
+    try{window.location.href=LINE_CHATS_URL;}catch(_){location.assign(LINE_CHATS_URL);}
     setTimeout(()=>{
       if(document.visibilityState==='visible'){
-        setBusyCopy('เปิด LINE ไม่สำเร็จอัตโนมัติ','แตะ “เปิด LINE” ด้านล่าง หรือกด X มุมขวาบน');
+        setBusyCopy('ยังปิดหน้านี้ไม่ได้อัตโนมัติ','แตะ “เปิด LINE” ด้านล่าง หรือกด X มุมขวาบน');
         if(fallback)fallback.style.display='block';
       }
-    },1500);
+    },1400);
+  }
+
+  async function returnToLine(){
+    const root=ensureBusy();
+    root.classList.add('is-visible','is-returning');
+    setBusyCopy('กำลังปิดหน้านี้…','กำลังกลับไปยังแชต LINE เดิม');
+    const fallback=root.querySelector('.deal-return-fallback');
+    if(fallback)fallback.style.display='none';
+
+    // วิธีที่ถูกต้องและเสถียรที่สุด: ปิด LIFF browser แล้วกลับแชตเดิม
+    const sdk=await prepareLiff();
+    if(sdk&&typeof sdk.isInClient==='function'&&sdk.isInClient()){
+      try{
+        sdk.closeWindow();
+        setTimeout(()=>{
+          if(document.visibilityState==='visible')openLineFallback(root,fallback);
+        },900);
+        return;
+      }catch(error){
+        console.warn('[return-line] LIFF close failed',error);
+      }
+    }
+
+    // หน้า workers.dev แบบเดิม: ลองย้อนกลับก่อน เพราะมักปิด in-app browser บนมือถือได้
+    const before=location.href;
+    if(history.length>1){
+      try{history.back();}catch(_){}
+      setTimeout(()=>{
+        if(document.visibilityState==='visible'&&location.href===before){
+          openLineFallback(root,fallback);
+        }
+      },700);
+      return;
+    }
+
+    openLineFallback(root,fallback);
   }
   window.returnToLine=returnToLine;
 
@@ -185,12 +252,13 @@ const SCRIPT = String.raw`<script id="deal-mobile-web-ux-script">
     document.body.appendChild(button);
   }
 
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',addReturnButtonWhenNeeded,{once:true});
-  else addReturnButtonWhenNeeded();
+  const boot=()=>{addReturnButtonWhenNeeded();prepareLiff();};
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot,{once:true});
+  else boot();
 })();
 </script>`;
 
-export async function enhanceMobileWebResponse(response) {
+export async function enhanceMobileWebResponse(response, options = {}) {
   if (!(response instanceof Response)) return response;
   const contentType = String(response.headers.get("content-type") || "").toLowerCase();
   if (!contentType.includes("text/html")) return response;
@@ -200,7 +268,8 @@ export async function enhanceMobileWebResponse(response) {
     return new Response(source, response);
   }
 
-  const injection = STYLE + SCRIPT;
+  const script = SCRIPT.replace("__DEAL_LIFF_ID__", JSON.stringify(String(options.liffId || "")));
+  const injection = STYLE + script;
   let body;
   if (/<\/body>/i.test(source)) body = source.replace(/<\/body>/i, `${injection}</body>`);
   else if (/<\/html>/i.test(source)) body = source.replace(/<\/html>/i, `${injection}</html>`);
