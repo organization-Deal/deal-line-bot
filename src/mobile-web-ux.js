@@ -17,6 +17,20 @@ const STYLE = String.raw`<style id="deal-mobile-web-ux-style">
 #dealMobileBusy .deal-line-link{display:block;width:100%;min-height:50px;margin-top:12px;padding:14px 16px;border-radius:14px;background:#1d1d1f;color:#fff;text-decoration:none;font-weight:800}
 .deal-auto-line-button{position:fixed;right:max(16px,env(safe-area-inset-right));bottom:max(18px,calc(env(safe-area-inset-bottom) + 12px));z-index:2147482000;min-height:46px;padding:12px 17px;border:0;border-radius:999px;background:#1d1d1f;color:#fff;font:700 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans Thai",sans-serif;box-shadow:0 10px 28px rgba(0,0,0,.22)}
 [data-deal-action-busy="1"]{opacity:.58!important;cursor:wait!important;pointer-events:none!important}
+#dealLineCloseGuide{position:fixed;inset:0;z-index:2147483646;display:none;background:rgba(245,245,247,.94);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans Thai",sans-serif;color:#1d1d1f}
+#dealLineCloseGuide.is-visible{display:block}
+#dealLineCloseGuide .deal-close-arrow{position:fixed;top:max(12px,env(safe-area-inset-top));right:14px;display:flex;align-items:flex-start;gap:8px;z-index:2;pointer-events:none}
+#dealLineCloseGuide .deal-close-arrow-text{max-width:190px;margin-top:38px;padding:10px 12px;border-radius:14px;background:#1d1d1f;color:#fff;font-size:13px;font-weight:800;line-height:1.35;text-align:center;box-shadow:0 12px 35px rgba(0,0,0,.28)}
+#dealLineCloseGuide .deal-close-arrow-icon{font-size:48px;line-height:1;color:#1d1d1f;transform:rotate(-8deg);filter:drop-shadow(0 3px 8px rgba(0,0,0,.18));animation:dealPointClose 1.05s ease-in-out infinite}
+#dealLineCloseGuide .deal-close-card{position:absolute;left:50%;top:54%;transform:translate(-50%,-50%);width:min(92vw,450px);background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:28px;padding:30px 24px;text-align:center;box-shadow:0 24px 80px rgba(0,0,0,.16)}
+#dealLineCloseGuide .deal-close-check{width:54px;height:54px;margin:0 auto 16px;border-radius:50%;display:grid;place-items:center;background:#1d1d1f;color:#fff;font-size:28px;font-weight:900}
+#dealLineCloseGuide h2{margin:0 0 10px;font-size:27px;line-height:1.2;letter-spacing:-.025em}
+#dealLineCloseGuide .deal-close-main{margin:0;color:#4a4a4f;font-size:16px;line-height:1.65}
+#dealLineCloseGuide .deal-close-note{margin:16px 0 0;padding:13px 14px;border-radius:15px;background:#f5f5f7;color:#6e6e73;font-size:13px;line-height:1.55}
+#dealLineCloseGuide .deal-close-confirm{width:100%;min-height:54px;margin-top:20px;border:0;border-radius:15px;background:#1d1d1f;color:#fff;font:800 15px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans Thai",sans-serif;padding:14px 16px}
+#dealLineCloseGuide .deal-close-confirm:active{transform:scale(.985)}
+#dealLineCloseGuide.pulse .deal-close-arrow-icon{animation-duration:.45s}
+@keyframes dealPointClose{0%,100%{transform:translate(0,0) rotate(-8deg)}50%{transform:translate(5px,-8px) rotate(-8deg)}}
 @keyframes dealSpin{to{transform:rotate(360deg)}}
 @keyframes dealProgress{0%{transform:translateX(-120%)}50%{transform:translateX(105%)}100%{transform:translateX(260%)}}
 @media(max-width:520px){#dealMobileBusy .deal-busy-card{padding:28px 20px;border-radius:24px}#dealMobileBusy h2{font-size:22px}}
@@ -61,7 +75,7 @@ const SCRIPT = String.raw`<script id="deal-mobile-web-ux-script">
     root.setAttribute('role','status');
     root.setAttribute('aria-live','assertive');
     root.setAttribute('aria-busy','true');
-    root.innerHTML='<div class="deal-busy-card"><div class="deal-spinner" aria-hidden="true"></div><h2 id="dealBusyTitle">กำลังดำเนินการ…</h2><p id="dealBusyText">ระบบกำลังทำงาน กรุณาอย่ากดซ้ำหรือปิดหน้านี้</p><div class="deal-progress" aria-hidden="true"><i></i></div><div class="deal-return-fallback"><p>ถ้ายังไม่สลับกลับอัตโนมัติ ให้แตะปุ่มด้านล่าง</p><a class="deal-line-link" href="'+LINE_CHATS_URL+'">เปิด LINE</a></div></div>';
+    root.innerHTML='<div class="deal-busy-card"><div class="deal-spinner" aria-hidden="true"></div><h2 id="dealBusyTitle">กำลังดำเนินการ…</h2><p id="dealBusyText">ระบบกำลังทำงาน กรุณาอย่ากดซ้ำหรือปิดหน้านี้</p><div class="deal-progress" aria-hidden="true"><i></i></div><div class="deal-return-fallback"><p>แตะ X มุมขวาบนเพื่อปิดหน้านี้และกลับ LINE</p></div></div>';
     document.body.appendChild(root);
     return root;
   }
@@ -161,50 +175,53 @@ const SCRIPT = String.raw`<script id="deal-mobile-web-ux-script">
     }
   }
 
-  function openLineFallback(root,fallback){
-    try{window.location.href=LINE_CHATS_URL;}catch(_){location.assign(LINE_CHATS_URL);}
-    setTimeout(()=>{
-      if(document.visibilityState==='visible'){
-        setBusyCopy('ยังปิดหน้านี้ไม่ได้อัตโนมัติ','แตะ “เปิด LINE” ด้านล่าง หรือกด X มุมขวาบน');
-        if(fallback)fallback.style.display='block';
-      }
-    },1400);
+  function ensureCloseGuide(){
+    let guide=document.getElementById('dealLineCloseGuide');
+    if(guide)return guide;
+    guide=document.createElement('div');
+    guide.id='dealLineCloseGuide';
+    guide.setAttribute('role','dialog');
+    guide.setAttribute('aria-modal','true');
+    guide.setAttribute('aria-labelledby','dealCloseGuideTitle');
+    guide.innerHTML='<div class="deal-close-arrow"><div class="deal-close-arrow-text">แตะ X ตรงนี้เพื่อปิดหน้า</div><div class="deal-close-arrow-icon" aria-hidden="true">↗</div></div><div class="deal-close-card"><div class="deal-close-check">✓</div><h2 id="dealCloseGuideTitle">บันทึกเรียบร้อยแล้ว</h2><p class="deal-close-main">แตะเครื่องหมาย <b>X มุมขวาบน</b> เพื่อปิดหน้านี้และกลับไปยังแชต LINE</p><p class="deal-close-note">ระบบกำลังสร้าง PDF ต่อให้อัตโนมัติ ไม่ต้องกดบันทึกซ้ำ และปิดหน้านี้ได้เลย</p><button type="button" class="deal-close-confirm">เข้าใจแล้ว — ปิดด้วย X ด้านบน</button></div>';
+    const confirm=guide.querySelector('.deal-close-confirm');
+    if(confirm)confirm.addEventListener('click',()=>{
+      guide.classList.remove('pulse');
+      void guide.offsetWidth;
+      guide.classList.add('pulse');
+      const arrowText=guide.querySelector('.deal-close-arrow-text');
+      if(arrowText)arrowText.textContent='กด X มุมขวาบนได้เลย';
+    });
+    document.body.appendChild(guide);
+    return guide;
+  }
+
+  function showCloseGuide(){
+    const busy=document.getElementById('dealMobileBusy');
+    if(busy)busy.classList.remove('is-visible','is-returning');
+    const guide=ensureCloseGuide();
+    guide.classList.add('is-visible','pulse');
+    document.documentElement.style.overflow='hidden';
+    document.body.style.overflow='hidden';
+    const button=guide.querySelector('.deal-close-confirm');
+    if(button)setTimeout(()=>button.focus({preventScroll:true}),60);
   }
 
   async function returnToLine(){
-    const root=ensureBusy();
-    root.classList.add('is-visible','is-returning');
-    setBusyCopy('กำลังปิดหน้านี้…','กำลังกลับไปยังแชต LINE เดิม');
-    const fallback=root.querySelector('.deal-return-fallback');
-    if(fallback)fallback.style.display='none';
-
-    // วิธีที่ถูกต้องและเสถียรที่สุด: ปิด LIFF browser แล้วกลับแชตเดิม
+    // LIFF เปิดผ่าน LINE Client จริงสามารถปิดหน้าต่างให้ได้ทันที
     const sdk=await prepareLiff();
     if(sdk&&typeof sdk.isInClient==='function'&&sdk.isInClient()){
       try{
         sdk.closeWindow();
-        setTimeout(()=>{
-          if(document.visibilityState==='visible')openLineFallback(root,fallback);
-        },900);
         return;
       }catch(error){
         console.warn('[return-line] LIFF close failed',error);
       }
     }
 
-    // หน้า workers.dev แบบเดิม: ลองย้อนกลับก่อน เพราะมักปิด in-app browser บนมือถือได้
-    const before=location.href;
-    if(history.length>1){
-      try{history.back();}catch(_){}
-      setTimeout(()=>{
-        if(document.visibilityState==='visible'&&location.href===before){
-          openLineFallback(root,fallback);
-        }
-      },700);
-      return;
-    }
-
-    openLineFallback(root,fallback);
+    // workers.dev / external webview บน iPhone ปิดแท็บด้วย JavaScript ไม่ได้อย่างน่าเชื่อถือ
+    // จึงบอกผู้ใช้ให้กด X ของ LINE browser อย่างชัดเจนแทน
+    showCloseGuide();
   }
   window.returnToLine=returnToLine;
 
@@ -247,12 +264,22 @@ const SCRIPT = String.raw`<script id="deal-mobile-web-ux-script">
     const button=document.createElement('button');
     button.type='button';
     button.className='deal-auto-line-button';
-    button.textContent='กลับไป LINE';
+    button.textContent='ปิดหน้านี้เพื่อกลับ LINE';
     button.addEventListener('click',returnToLine);
     document.body.appendChild(button);
   }
 
-  const boot=()=>{addReturnButtonWhenNeeded();prepareLiff();};
+  function clarifyReturnButtons(){
+    document.querySelectorAll('button,a,[role="button"]').forEach(node=>{
+      const text=clean(node.textContent||node.getAttribute('aria-label')||'');
+      if(/กลับ(?:ไป)?\s*LINE/i.test(text)&&!/ปิดหน้านี้/i.test(text)){
+        if(node.tagName==='INPUT')node.value='ปิดหน้านี้เพื่อกลับ LINE';
+        else node.textContent='ปิดหน้านี้เพื่อกลับ LINE';
+      }
+    });
+  }
+
+  const boot=()=>{clarifyReturnButtons();addReturnButtonWhenNeeded();prepareLiff();};
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',boot,{once:true});
   else boot();
 })();
