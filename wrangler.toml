@@ -1,5 +1,5 @@
 name = "accoutingsuppor02"
-main = "src/index.js"
+main = "src/entry-mobile-ux.js"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
