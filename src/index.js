@@ -52,7 +52,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v3.9_DASHBOARD_CARD_THEME_20260807";
+const VERSION = "DEAL_LINE_BOT_v4.7_SUBSCRIPTION_BETA_20260807";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -169,6 +169,199 @@ function documentSettingsReady(s = {}) {
   );
 }
 
+
+/* ══════════════ Subscription / Beta access ══════════════ */
+const SUBSCRIPTION_SCHEMA = "SUBSCRIPTION_V1_20260807";
+const SUBSCRIPTION_PLANS = Object.freeze({
+  free:     { id: "free",     name: "ฟรี",      monthly: 0,   annual: 0,    documentLimit: 10 },
+  starter:  { id: "starter",  name: "Starter",  monthly: 199, annual: 1990, documentLimit: 50 },
+  pro:      { id: "pro",      name: "Pro",      monthly: 399, annual: 3990, documentLimit: 300 },
+  business: { id: "business", name: "Business", monthly: 990, annual: 9900, documentLimit: 1500 },
+});
+
+function subscriptionMonthKey(value = new Date()) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(d.getTime())) return "";
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit",
+    }).formatToParts(d);
+    const year = parts.find((p) => p.type === "year")?.value || "";
+    const month = parts.find((p) => p.type === "month")?.value || "";
+    return year && month ? `${year}-${month}` : "";
+  } catch {
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  }
+}
+
+function subscriptionRecordKey(key) { return `subscription:v1:${key}`; }
+function subscriptionUsageKey(key, monthKey = subscriptionMonthKey()) { return `subusage:v1:${key}:${monthKey}`; }
+function subscriptionEnforcementEnabled(env) {
+  return !["0", "false", "off", "no"].includes(String(env.SUBSCRIPTION_ENFORCEMENT ?? "1").trim().toLowerCase());
+}
+
+function configuredBetaEnd(env, startedAt = Date.now()) {
+  const fixed = String(env.BETA_FREE_UNTIL || "").trim();
+  if (fixed) {
+    const parsed = Date.parse(fixed);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  const days = Math.max(1, Number(env.BETA_TRIAL_DAYS || 60));
+  return new Date(Number(startedAt) + days * 86400000).toISOString();
+}
+
+async function getSubscriptionRecord(env, key) {
+  const storageKey = subscriptionRecordKey(key);
+  let rec = await env.KV.get(storageKey, "json").catch(() => null);
+  const now = Date.now();
+  if (!rec || typeof rec !== "object") {
+    const startedAt = new Date(now).toISOString();
+    rec = {
+      schema: SUBSCRIPTION_SCHEMA,
+      status: "beta",
+      plan: "pro",
+      cycle: "monthly",
+      createdAt: startedAt,
+      trialStartedAt: startedAt,
+      trialEndsAt: configuredBetaEnd(env, now),
+      requestedPlan: "",
+      requestedCycle: "",
+      upgradeRequestedAt: "",
+    };
+    // ถ้าเปิดระบบหลังวัน Beta กลางสิ้นสุดแล้ว ให้เริ่ม Free โดยไม่แจก Beta รอบใหม่
+    if (Date.parse(rec.trialEndsAt || "") <= now) {
+      rec.status = "free";
+      rec.plan = "free";
+    }
+    await env.KV.put(storageKey, JSON.stringify(rec));
+    return rec;
+  }
+
+  // Beta จบแล้วและยังไม่ได้เปิดแพ็กเสียเงิน → กลับ Free อัตโนมัติ
+  if (rec.status === "beta" && Number.isFinite(Date.parse(rec.trialEndsAt || "")) && Date.parse(rec.trialEndsAt) <= now) {
+    rec = { ...rec, status: "free", plan: "free", betaEndedAt: new Date(now).toISOString() };
+    await env.KV.put(storageKey, JSON.stringify(rec));
+  }
+  return rec;
+}
+
+async function saveSubscriptionRecord(env, key, patch = {}) {
+  const current = await getSubscriptionRecord(env, key);
+  const next = { ...current, ...patch, schema: SUBSCRIPTION_SCHEMA, updatedAt: new Date().toISOString() };
+  await env.KV.put(subscriptionRecordKey(key), JSON.stringify(next));
+  return next;
+}
+
+function countCurrentMonthExpenses(rows = [], monthKey = subscriptionMonthKey()) {
+  if (!monthKey) return 0;
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    const stamp = row?.createdAt || row?.recordedAt || row?.submittedAt || row?.dateISO || row?.date || "";
+    return subscriptionMonthKey(stamp) === monthKey;
+  }).length;
+}
+
+async function getSubscriptionUsage(env, key, sheetId, token, { refresh = false } = {}) {
+  const monthKey = subscriptionMonthKey();
+  const cacheKey = subscriptionUsageKey(key, monthKey);
+  if (!refresh) {
+    const cached = await env.KV.get(cacheKey);
+    if (cached !== null && cached !== undefined && cached !== "") {
+      const value = Number(cached);
+      if (Number.isFinite(value) && value >= 0) return { monthKey, documents: value };
+    }
+  }
+  let documents = 0;
+  try {
+    const rows = await readExpenses(env, sheetId, token);
+    documents = countCurrentMonthExpenses(rows, monthKey);
+  } catch (e) {
+    console.warn("subscription usage refresh", e?.message || e);
+    const cached = Number(await env.KV.get(cacheKey));
+    documents = Number.isFinite(cached) && cached >= 0 ? cached : 0;
+  }
+  await env.KV.put(cacheKey, String(documents), { expirationTtl: 60 * 60 * 24 * 120 });
+  return { monthKey, documents };
+}
+
+async function syncSubscriptionUsageAfterSavedExpense(env, key, sheetId, token) {
+  const monthKey = subscriptionMonthKey();
+  const cacheKey = subscriptionUsageKey(key, monthKey);
+  const cachedRaw = await env.KV.get(cacheKey);
+  if (cachedRaw !== null && cachedRaw !== undefined && cachedRaw !== "") {
+    const cached = Number(cachedRaw);
+    if (Number.isFinite(cached) && cached >= 0) {
+      const next = cached + 1;
+      await env.KV.put(cacheKey, String(next), { expirationTtl: 60 * 60 * 24 * 120 });
+      return next;
+    }
+  }
+  // ยังไม่มี counter: อ่าน Sheet หลังบันทึกแล้วเพื่อ seed จำนวนจริง (ไม่ + ซ้ำ)
+  return (await getSubscriptionUsage(env, key, sheetId, token, { refresh: true })).documents;
+}
+
+async function getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage = false } = {}) {
+  const rec = await getSubscriptionRecord(env, key);
+  const now = Date.now();
+  const trialEndMs = Date.parse(rec.trialEndsAt || "");
+  const betaActive = rec.status === "beta" && Number.isFinite(trialEndMs) && trialEndMs > now;
+  const requestedPlan = SUBSCRIPTION_PLANS[rec.requestedPlan] ? rec.requestedPlan : "";
+  const requestedCycle = rec.requestedCycle === "annual" ? "annual" : rec.requestedCycle === "monthly" ? "monthly" : "";
+  const effectivePlan = betaActive ? "pro" : (rec.status === "active" && SUBSCRIPTION_PLANS[rec.plan] ? rec.plan : "free");
+  const plan = SUBSCRIPTION_PLANS[effectivePlan] || SUBSCRIPTION_PLANS.free;
+  const usage = await getSubscriptionUsage(env, key, sheetId, token, { refresh: refreshUsage });
+  const limit = betaActive ? null : plan.documentLimit;
+  const percent = limit ? Math.min(999, Math.round((usage.documents / limit) * 100)) : 0;
+  let threshold = "ok";
+  if (limit && percent >= 100) threshold = "limit";
+  else if (limit && percent >= 90) threshold = "warning90";
+  else if (limit && percent >= 80) threshold = "warning80";
+  const enforcement = subscriptionEnforcementEnabled(env);
+  return {
+    ok: true,
+    schema: SUBSCRIPTION_SCHEMA,
+    status: betaActive ? "beta" : (rec.status === "active" ? "active" : "free"),
+    betaActive,
+    trialStartedAt: rec.trialStartedAt || rec.createdAt || "",
+    trialEndsAt: rec.trialEndsAt || "",
+    daysRemaining: betaActive ? Math.max(1, Math.ceil((trialEndMs - now) / 86400000)) : 0,
+    plan: betaActive ? "beta" : effectivePlan,
+    effectivePlan,
+    planName: betaActive ? "Beta ฟรี · สิทธิ์ Pro" : plan.name,
+    cycle: rec.cycle === "annual" ? "annual" : "monthly",
+    priceMonthly: plan.monthly,
+    priceAnnual: plan.annual,
+    documentLimit: limit,
+    usage: { month: usage.monthKey, documents: usage.documents, percent, threshold },
+    blocked: Boolean(enforcement && !betaActive && limit && usage.documents >= limit),
+    enforcement,
+    requestedPlan,
+    requestedPlanName: requestedPlan ? SUBSCRIPTION_PLANS[requestedPlan].name : "",
+    requestedCycle,
+    upgradeRequestedAt: rec.upgradeRequestedAt || "",
+    catalog: SUBSCRIPTION_PLANS,
+  };
+}
+
+async function requestSubscriptionUpgrade(env, key, sheetId, token, body = {}) {
+  const plan = String(body.plan || "").trim().toLowerCase();
+  const cycle = body.cycle === "annual" ? "annual" : "monthly";
+  if (!SUBSCRIPTION_PLANS[plan]) return { ok: false, reason: "invalid_plan" };
+  await saveSubscriptionRecord(env, key, {
+    requestedPlan: plan,
+    requestedCycle: cycle,
+    upgradeRequestedAt: new Date().toISOString(),
+  });
+  return await getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage: true });
+}
+
+async function subscriptionQuotaMessage(env, key, snapshot) {
+  const base = await dashUrl(env, key);
+  const upgradeUrl = `${base}${base.includes("?") ? "&" : "?"}page=billing`;
+  const used = Number(snapshot?.usage?.documents || 0);
+  const limit = Number(snapshot?.documentLimit || 0);
+  return textMsg(`โควตาเอกสารเดือนนี้ครบแล้ว (${used}/${limit})\nรายการเดิมยังดู แก้ และดาวน์โหลดได้ตามปกติ\nอัปเกรดแพ็กเกจเพื่อรับเอกสารใหม่ต่อ:\n${upgradeUrl}`);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -234,6 +427,32 @@ export default {
       }
     }
 
+    if (url.pathname === "/admin/subscription" && request.method === "POST") {
+      if (!adminOk(env, url)) return json({ error: "unauthorized" }, 401);
+      const key = url.searchParams.get("tenant");
+      if (!key) return json({ error: "missing tenant" }, 400);
+      const sheetId = (await env.KV.get(`tenant:${key}`)) || env.DEFAULT_SHEET_ID;
+      if (!sheetId) return json({ error: "no sheet for tenant" }, 404);
+      try {
+        const token = await getUserToken(env, key);
+        const b = await request.json().catch(() => ({}));
+        const plan = String(b.plan || "free").trim().toLowerCase();
+        if (!SUBSCRIPTION_PLANS[plan]) return json({ error: "invalid plan" }, 400);
+        const status = b.status === "active" ? "active" : b.status === "beta" ? "beta" : "free";
+        const patch = {
+          status,
+          plan: status === "active" ? plan : status === "free" ? "free" : (plan === "free" ? "pro" : plan),
+          cycle: b.cycle === "annual" ? "annual" : "monthly",
+          activatedAt: status === "active" ? new Date().toISOString() : "",
+        };
+        if (b.clearRequest === true) Object.assign(patch, { requestedPlan: "", requestedCycle: "", upgradeRequestedAt: "" });
+        await saveSubscriptionRecord(env, key, patch);
+        return json(await getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage: true }));
+      } catch (e) {
+        return json({ error: String(e) }, 500);
+      }
+    }
+
     if (url.pathname === "/admin/migrate") {
       if (!adminOk(env, url)) return json({ error: "unauthorized" }, 401);
       const key = url.searchParams.get("tenant");
@@ -274,6 +493,16 @@ export default {
 
       try {
         const token = await getUserToken(env, key);
+
+        if (url.pathname === "/api/subscription") {
+          return cors(json(await getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage: true })));
+        }
+
+        if (url.pathname === "/api/subscription/request-upgrade" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await requestSubscriptionUpgrade(env, key, sheetId, token, b);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
 
         if (url.pathname === "/api/expenses") {
           return cors(json(await readExpenses(env, sheetId, token)));
@@ -406,8 +635,11 @@ export default {
         }
 
         if (url.pathname === "/api/email-approve" && request.method === "POST") {
+          const quota = await getSubscriptionSnapshot(env, key, sheetId, token);
+          if (quota.blocked) return cors(json({ ok: false, reason: "subscription_limit", subscription: quota }, 402));
           const b = await request.json();
           const out = await approveEmailDocument(env, sheetId, b.id, token, { force: b.force === true });
+          if (out.ok) await syncSubscriptionUsageAfterSavedExpense(env, key, sheetId, token).catch((e) => console.warn("subscription usage email", e?.message || e));
           return cors(json(out, out.ok ? 200 : (out.reason === "duplicate" ? 409 : 400)));
         }
 
@@ -1058,6 +1290,10 @@ async function handleImage(event, env, key, mode = "reply") {
     return respond(await renderSaved(env, key, sheet, out.record));
   }
 
+  // ช่วง Beta รับเอกสารไม่จำกัด; หลัง Beta บังคับโควตาตามแพ็กเกจก่อนเรียก AI
+  const subscription = await getSubscriptionSnapshot(env, key, sheet.sheetId, sheet.token);
+  if (subscription.blocked) return respond(await subscriptionQuotaMessage(env, key, subscription));
+
   // อัป Drive และสร้างลายนิ้วมือทำพร้อมกัน ส่วน OCR แยกจับ error
   // เพื่อให้รูปไม่หายจากชุดแม้ AI อ่านไม่สำเร็จ — ผู้ใช้ยังจัดรูปเองได้
   const [driveLink, imageHash] = await Promise.all([
@@ -1227,6 +1463,10 @@ async function handlePostback(event, env, key, mode = "reply") {
       { sender: pending.sender, driveLink: pending.driveLink, payerName: resolvedPayerName, payerId: uid || "" },
       token
     );
+    // อัปเดต usage หลังบันทึกรายการสำเร็จ (1 รายการที่บันทึก = 1 เอกสารในโควตา)
+    await syncSubscriptionUsageAfterSavedExpense(env, key, pending.sheetId, token)
+      .catch((e) => console.warn("subscription usage line", e?.message || e));
+
     // กันกดซ้ำทันทีหลังบันทึกแถวสำเร็จ แม้ขั้นสร้าง PDF จะมีปัญหา
     await env.KV.delete(`pending:${id}`);
 
