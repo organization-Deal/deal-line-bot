@@ -170,13 +170,191 @@ function documentSettingsReady(s = {}) {
 }
 
 
+
+/* ══════════════ Multi-business account / workspace ══════════════ */
+const BUSINESS_ACCOUNT_SCHEMA = "BUSINESS_ACCOUNT_V1_20260807";
+function accountRootMapKey(tenant) { return `accountroot:v1:${tenant}`; }
+function businessAccountKey(rootTenant) { return `businessaccount:v1:${rootTenant}`; }
+function businessMetaKey(tenant) { return `businessmeta:v1:${tenant}`; }
+function businessInviteKey(code) { return `businessinvite:v1:${String(code || "").toUpperCase()}`; }
+
+async function getAccountRoot(env, tenant) {
+  const key = String(tenant || "").trim();
+  if (!key) return "";
+  return (await env.KV.get(accountRootMapKey(key))) || key;
+}
+
+async function ensureBusinessAccount(env, tenant) {
+  const rootTenant = await getAccountRoot(env, tenant);
+  let account = await env.KV.get(businessAccountKey(rootTenant), "json").catch(() => null);
+  if (!account || typeof account !== "object") {
+    account = { schema: BUSINESS_ACCOUNT_SCHEMA, rootTenant, businesses: [rootTenant], createdAt: new Date().toISOString() };
+  }
+  const list = Array.from(new Set([rootTenant, ...(Array.isArray(account.businesses) ? account.businesses : [])].filter(Boolean)));
+  account = { ...account, schema: BUSINESS_ACCOUNT_SCHEMA, rootTenant, businesses: list, updatedAt: new Date().toISOString() };
+  await Promise.all([
+    env.KV.put(businessAccountKey(rootTenant), JSON.stringify(account)),
+    ...list.map((businessTenant) => env.KV.put(accountRootMapKey(businessTenant), rootTenant)),
+  ]);
+  return account;
+}
+
+async function readBusinessMeta(env, tenant) {
+  return (await env.KV.get(businessMetaKey(tenant), "json").catch(() => null)) || {};
+}
+
+async function saveBusinessMeta(env, tenant, patch = {}) {
+  const current = await readBusinessMeta(env, tenant);
+  const next = { ...current, ...patch, tenant, updatedAt: new Date().toISOString() };
+  await env.KV.put(businessMetaKey(tenant), JSON.stringify(next));
+  return next;
+}
+
+function randomBusinessInviteCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(7));
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}
+
+async function listBusinessWorkspaces(env, currentTenant) {
+  const account = await ensureBusinessAccount(env, currentTenant);
+  const rootTenant = account.rootTenant;
+  const rootSheetId = (await env.KV.get(`tenant:${rootTenant}`)) || env.DEFAULT_SHEET_ID;
+  const rootToken = rootSheetId ? await getUserToken(env, rootTenant) : null;
+  const subscription = rootSheetId
+    ? await getSubscriptionSnapshot(env, rootTenant, rootSheetId, rootToken, { refreshUsage: false })
+    : null;
+  const businessLimit = Number(subscription?.businessLimit || 1);
+  const betaActive = subscription?.betaActive === true;
+  const businesses = [];
+  for (let i = 0; i < account.businesses.length; i++) {
+    const tenant = account.businesses[i];
+    const sheetId = await env.KV.get(`tenant:${tenant}`);
+    if (!sheetId) continue;
+    const token = await getUserToken(env, tenant);
+    const settings = token ? await readSettings(env, sheetId, token).catch(() => ({})) : {};
+    const meta = await readBusinessMeta(env, tenant);
+    const name = settingValue(settings, "company_name") || String(meta.name || "").trim() || (i === 0 ? "ธุรกิจหลัก" : `ธุรกิจ ${i + 1}`);
+    businesses.push({
+      tenant,
+      name,
+      isRoot: tenant === rootTenant,
+      isCurrent: tenant === currentTenant,
+      locked: !betaActive && i >= businessLimit,
+      sheetId,
+      dashboardUrl: await dashUrl(env, tenant),
+      createdAt: meta.createdAt || "",
+    });
+  }
+  return {
+    ok: true,
+    rootTenant,
+    currentTenant,
+    businesses,
+    businessCount: businesses.length,
+    businessLimit,
+    canAddBusiness: businesses.length < businessLimit,
+    effectivePlan: subscription?.effectivePlan || "free",
+    planName: subscription?.planName || "ฟรี",
+    betaActive,
+  };
+}
+
+async function createBusinessInvite(env, currentTenant) {
+  const info = await listBusinessWorkspaces(env, currentTenant);
+  if (!info.canAddBusiness) {
+    return {
+      ok: false,
+      reason: "business_limit",
+      message: info.businessLimit <= 1 ? "เพิ่มธุรกิจได้ตั้งแต่แพ็กเกจ Pro" : `แพ็กเกจนี้รองรับสูงสุด ${info.businessLimit} ธุรกิจ`,
+      ...info,
+    };
+  }
+  const code = randomBusinessInviteCode();
+  const now = Date.now();
+  const expiresAt = new Date(now + 30 * 60 * 1000).toISOString();
+  await env.KV.put(businessInviteKey(code), JSON.stringify({
+    schema: BUSINESS_ACCOUNT_SCHEMA,
+    code,
+    rootTenant: info.rootTenant,
+    createdByTenant: currentTenant,
+    createdAt: new Date(now).toISOString(),
+    expiresAt,
+  }), { expirationTtl: 30 * 60 });
+  return {
+    ok: true,
+    code,
+    expiresAt,
+    businessCount: info.businessCount,
+    businessLimit: info.businessLimit,
+    instruction: `เพิ่ม LINE OA เข้ากลุ่มของธุรกิจใหม่ แล้วพิมพ์ “เชื่อมธุรกิจ ${code}” ในกลุ่มนั้น`,
+  };
+}
+
+async function linkBusinessFromInvite(env, event, currentTenant, codeRaw) {
+  const code = String(codeRaw || "").trim().toUpperCase();
+  if (!event.source?.groupId) return { ok: false, reason: "group_required", message: "การเพิ่มธุรกิจต้องทำในกลุ่ม LINE ของธุรกิจใหม่" };
+  const invite = await env.KV.get(businessInviteKey(code), "json").catch(() => null);
+  if (!invite?.rootTenant) return { ok: false, reason: "invalid_invite", message: "รหัสเพิ่มธุรกิจไม่ถูกต้องหรือหมดอายุแล้ว กรุณาสร้างรหัสใหม่จาก Dashboard" };
+  if (Date.parse(invite.expiresAt || "") <= Date.now()) {
+    await env.KV.delete(businessInviteKey(code));
+    return { ok: false, reason: "expired_invite", message: "รหัสเพิ่มธุรกิจหมดอายุแล้ว กรุณาสร้างรหัสใหม่จาก Dashboard" };
+  }
+
+  const rootTenant = await getAccountRoot(env, invite.rootTenant);
+  const existingRoot = await env.KV.get(accountRootMapKey(currentTenant));
+  const existingSheet = await env.KV.get(`tenant:${currentTenant}`);
+  if ((existingRoot && existingRoot !== rootTenant) || (existingSheet && currentTenant !== rootTenant)) {
+    return { ok: false, reason: "already_linked", message: "กลุ่ม LINE นี้มีธุรกิจ/ข้อมูลเดิมอยู่แล้ว จึงไม่สามารถนำไปผูกทับกับบัญชีอื่นได้" };
+  }
+
+  const rootSheetId = (await env.KV.get(`tenant:${rootTenant}`)) || env.DEFAULT_SHEET_ID;
+  const rootToken = rootSheetId ? await getUserToken(env, rootTenant) : null;
+  if (!rootToken) return { ok: false, reason: "google_required", message: "บัญชีหลักยังไม่มีสิทธิ์ Google Drive กรุณาเชื่อม Google ที่ธุรกิจหลักก่อน" };
+  const subscription = await getSubscriptionSnapshot(env, rootTenant, rootSheetId, rootToken, { refreshUsage: false });
+  const account = await ensureBusinessAccount(env, rootTenant);
+  const limit = Number(subscription.businessLimit || 1);
+  if (!account.businesses.includes(currentTenant) && account.businesses.length >= limit) {
+    return { ok: false, reason: "business_limit", message: limit <= 1 ? "เพิ่มธุรกิจได้ตั้งแต่แพ็กเกจ Pro" : `สิทธิ์ปัจจุบันเพิ่มได้สูงสุด ${limit} ธุรกิจ` };
+  }
+
+  const rootRefresh = await env.KV.get(`gtoken:${rootTenant}`);
+  if (!rootRefresh) return { ok: false, reason: "google_required", message: "ไม่พบสิทธิ์ Google ของบัญชีหลัก กรุณาเชื่อม Google ใหม่" };
+  await env.KV.put(`gtoken:${currentTenant}`, rootRefresh);
+
+  let sheetId = await env.KV.get(`tenant:${currentTenant}`);
+  if (!sheetId) {
+    const groupName = (await tenantTitle(env, event.source)) || `ธุรกิจ ${account.businesses.length + 1}`;
+    const token = await getUserToken(env, currentTenant);
+    sheetId = (await createUserSheet(env, token, `รับจ่ายแบบไม่จำกัด · ${groupName}`)).sheetId;
+    await env.KV.put(`tenant:${currentTenant}`, sheetId);
+    await saveBusinessMeta(env, currentTenant, { name: groupName, createdAt: new Date().toISOString(), linkedFrom: rootTenant });
+  }
+
+  const nextBusinesses = Array.from(new Set([...account.businesses, currentTenant]));
+  await Promise.all([
+    env.KV.put(accountRootMapKey(currentTenant), rootTenant),
+    env.KV.put(businessAccountKey(rootTenant), JSON.stringify({ ...account, businesses: nextBusinesses, updatedAt: new Date().toISOString() })),
+    env.KV.delete(businessInviteKey(code)),
+  ]);
+  await getDashToken(env, currentTenant);
+  return {
+    ok: true,
+    rootTenant,
+    tenant: currentTenant,
+    businessCount: nextBusinesses.length,
+    businessLimit: limit,
+    dashboardUrl: await dashUrl(env, currentTenant),
+  };
+}
+
 /* ══════════════ Subscription / Beta access ══════════════ */
 const SUBSCRIPTION_SCHEMA = "SUBSCRIPTION_V1_20260807";
 const SUBSCRIPTION_PLANS = Object.freeze({
-  free:     { id: "free",     name: "ฟรี",      monthly: 0,   annual: 0,    documentLimit: 10 },
-  starter:  { id: "starter",  name: "Starter",  monthly: 199, annual: 1990, documentLimit: 50 },
-  pro:      { id: "pro",      name: "Pro",      monthly: 399, annual: 3990, documentLimit: 300 },
-  business: { id: "business", name: "Business", monthly: 990, annual: 9900, documentLimit: 1500 },
+  free:     { id: "free",     name: "ฟรี",      monthly: 0,   annual: 0,    documentLimit: 10,   businessLimit: 1 },
+  starter:  { id: "starter",  name: "Starter",  monthly: 199, annual: 1990, documentLimit: 50,   businessLimit: 1 },
+  pro:      { id: "pro",      name: "Pro",      monthly: 399, annual: 3990, documentLimit: 300,  businessLimit: 3 },
+  business: { id: "business", name: "Business", monthly: 990, annual: 9900, documentLimit: 1500, businessLimit: 10 },
 });
 
 function subscriptionMonthKey(value = new Date()) {
@@ -211,6 +389,8 @@ function configuredBetaEnd(env, startedAt = Date.now()) {
 }
 
 async function getSubscriptionRecord(env, key) {
+  key = await getAccountRoot(env, key);
+  await ensureBusinessAccount(env, key);
   const storageKey = subscriptionRecordKey(key);
   let rec = await env.KV.get(storageKey, "json").catch(() => null);
   const now = Date.now();
@@ -246,6 +426,7 @@ async function getSubscriptionRecord(env, key) {
 }
 
 async function saveSubscriptionRecord(env, key, patch = {}) {
+  key = await getAccountRoot(env, key);
   const current = await getSubscriptionRecord(env, key);
   const next = { ...current, ...patch, schema: SUBSCRIPTION_SCHEMA, updatedAt: new Date().toISOString() };
   await env.KV.put(subscriptionRecordKey(key), JSON.stringify(next));
@@ -261,8 +442,9 @@ function countCurrentMonthExpenses(rows = [], monthKey = subscriptionMonthKey())
 }
 
 async function getSubscriptionUsage(env, key, sheetId, token, { refresh = false } = {}) {
+  const rootTenant = await getAccountRoot(env, key);
   const monthKey = subscriptionMonthKey();
-  const cacheKey = subscriptionUsageKey(key, monthKey);
+  const cacheKey = subscriptionUsageKey(rootTenant, monthKey);
   if (!refresh) {
     const cached = await env.KV.get(cacheKey);
     if (cached !== null && cached !== undefined && cached !== "") {
@@ -272,8 +454,14 @@ async function getSubscriptionUsage(env, key, sheetId, token, { refresh = false 
   }
   let documents = 0;
   try {
-    const rows = await readExpenses(env, sheetId, token);
-    documents = countCurrentMonthExpenses(rows, monthKey);
+    const account = await ensureBusinessAccount(env, rootTenant);
+    for (const businessTenant of account.businesses) {
+      const businessSheetId = (await env.KV.get(`tenant:${businessTenant}`)) || (businessTenant === key ? sheetId : "");
+      if (!businessSheetId) continue;
+      const businessToken = businessTenant === key && token ? token : await getUserToken(env, businessTenant);
+      const rows = await readExpenses(env, businessSheetId, businessToken);
+      documents += countCurrentMonthExpenses(rows, monthKey);
+    }
   } catch (e) {
     console.warn("subscription usage refresh", e?.message || e);
     const cached = Number(await env.KV.get(cacheKey));
@@ -282,10 +470,10 @@ async function getSubscriptionUsage(env, key, sheetId, token, { refresh = false 
   await env.KV.put(cacheKey, String(documents), { expirationTtl: 60 * 60 * 24 * 120 });
   return { monthKey, documents };
 }
-
 async function syncSubscriptionUsageAfterSavedExpense(env, key, sheetId, token) {
+  const rootTenant = await getAccountRoot(env, key);
   const monthKey = subscriptionMonthKey();
-  const cacheKey = subscriptionUsageKey(key, monthKey);
+  const cacheKey = subscriptionUsageKey(rootTenant, monthKey);
   const cachedRaw = await env.KV.get(cacheKey);
   if (cachedRaw !== null && cachedRaw !== undefined && cachedRaw !== "") {
     const cached = Number(cachedRaw);
@@ -316,6 +504,13 @@ async function getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage 
   else if (limit && percent >= 90) threshold = "warning90";
   else if (limit && percent >= 80) threshold = "warning80";
   const enforcement = subscriptionEnforcementEnabled(env);
+  const account = await ensureBusinessAccount(env, key);
+  const businessLimit = Number(plan.businessLimit || 1);
+  const businessCount = account.businesses.length;
+  const businessIndex = Math.max(0, account.businesses.indexOf(key));
+  const businessAccessAllowed = betaActive || businessIndex < businessLimit;
+  const documentBlocked = Boolean(enforcement && !betaActive && limit && usage.documents >= limit);
+  const businessBlocked = Boolean(enforcement && !businessAccessAllowed);
   return {
     ok: true,
     schema: SUBSCRIPTION_SCHEMA,
@@ -331,8 +526,16 @@ async function getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage 
     priceMonthly: plan.monthly,
     priceAnnual: plan.annual,
     documentLimit: limit,
+    businessLimit,
+    businessCount,
+    canAddBusiness: businessCount < businessLimit,
+    accountRootTenant: account.rootTenant,
+    businessIndex,
+    businessAccessAllowed,
+    businessBlocked,
     usage: { month: usage.monthKey, documents: usage.documents, percent, threshold },
-    blocked: Boolean(enforcement && !betaActive && limit && usage.documents >= limit),
+    blocked: Boolean(documentBlocked || businessBlocked),
+    blockedReason: businessBlocked ? "business_limit" : documentBlocked ? "document_limit" : "",
     enforcement,
     requestedPlan,
     requestedPlanName: requestedPlan ? SUBSCRIPTION_PLANS[requestedPlan].name : "",
@@ -357,9 +560,20 @@ async function requestSubscriptionUpgrade(env, key, sheetId, token, body = {}) {
 async function subscriptionQuotaMessage(env, key, snapshot) {
   const base = await dashUrl(env, key);
   const upgradeUrl = `${base}${base.includes("?") ? "&" : "?"}page=billing`;
+  if (snapshot?.blockedReason === "business_limit") {
+    return textMsg(`ธุรกิจนี้อยู่นอกสิทธิ์แพ็กเกจปัจจุบัน
+แพ็กเกจ Pro รองรับสูงสุด 3 ธุรกิจ
+ข้อมูลเดิมยังเปิดดูและจัดการได้ แต่การรับเอกสารใหม่ของธุรกิจนี้ถูกพักไว้
+
+อัปเกรดแพ็กเกจ:
+${upgradeUrl}`);
+  }
   const used = Number(snapshot?.usage?.documents || 0);
   const limit = Number(snapshot?.documentLimit || 0);
-  return textMsg(`โควตาเอกสารเดือนนี้ครบแล้ว (${used}/${limit})\nรายการเดิมยังดู แก้ และดาวน์โหลดได้ตามปกติ\nอัปเกรดแพ็กเกจเพื่อรับเอกสารใหม่ต่อ:\n${upgradeUrl}`);
+  return textMsg(`โควตาเอกสารเดือนนี้ครบแล้ว (${used}/${limit})
+รายการเดิมยังดู แก้ และดาวน์โหลดได้ตามปกติ
+อัปเกรดแพ็กเกจเพื่อรับเอกสารใหม่ต่อ:
+${upgradeUrl}`);
 }
 
 export default {
@@ -502,6 +716,16 @@ export default {
           const b = await request.json().catch(() => ({}));
           const out = await requestSubscriptionUpgrade(env, key, sheetId, token, b);
           return cors(json(out, out.ok ? 200 : 400));
+        }
+
+
+        if (url.pathname === "/api/businesses") {
+          return cors(json(await listBusinessWorkspaces(env, key)));
+        }
+
+        if (url.pathname === "/api/businesses/invite" && request.method === "POST") {
+          const out = await createBusinessInvite(env, key);
+          return cors(json(out, out.ok ? 200 : 402));
         }
 
         if (url.pathname === "/api/expenses") {
@@ -1658,6 +1882,21 @@ function promptFor(field) {
 async function handleText(event, env, key) {
   const text = (event.message.text || "").trim();
   const uid = event.source.userId;
+
+  const businessInviteMatch = text.match(/^เชื่อมธุรกิจ\s+([A-Z0-9]{6,10})$/i);
+  if (businessInviteMatch) {
+    try {
+      const out = await linkBusinessFromInvite(env, event, key, businessInviteMatch[1]);
+      if (!out.ok) return reply(env, event.replyToken, textMsg(out.message || "เพิ่มธุรกิจไม่สำเร็จ"));
+      return reply(env, event.replyToken, textMsg(
+        `เพิ่มธุรกิจสำเร็จ ✅\nธุรกิจในบัญชีนี้ ${out.businessCount}/${out.businessLimit}\n\n` +
+        `ขั้นต่อไป: เปิด Dashboard แล้วตั้งค่าข้อมูลบริษัท Gmail และช่องทางการเงินของธุรกิจนี้\n${out.dashboardUrl || ""}`
+      ));
+    } catch (e) {
+      console.error("link business invite", e);
+      return reply(env, event.replyToken, textMsg("เพิ่มธุรกิจไม่สำเร็จ กรุณาสร้างรหัสใหม่จาก Dashboard แล้วลองอีกครั้ง"));
+    }
+  }
 
   const editRaw = uid ? await env.KV.get(`edit:${uid}`) : null;
   if (editRaw) {
