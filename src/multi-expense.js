@@ -10,6 +10,7 @@ import {
 } from "./sheets.js";
 import { createExpenseDocuments } from "./documents.js";
 import { createIncomeFromOcr } from "./income.js";
+import { assertPeriodOpen, postExpenseJournal, postIncomeInvoiceJournal, postIncomePaymentJournal, writeAudit, upsertContact } from "./accounting-suite.js";
 import {
   createMemberOnboardingUrl, getMemberProfile,
   memberProfileComplete, missingMemberFields,
@@ -1115,10 +1116,15 @@ export class MultiExpenseSession {
       }
       const anchorUrl = rec.imageUrl || splitList(rec.attReceipt)[0] || splitList(rec.attSlip)[0] || "";
       let savedRec;
+      try{await assertPeriodOpen(this.env,sheetId,rec.date||new Date(),token);}catch(e){throw new Error(e.message||"งวดนี้ถูกปิดบัญชีแล้ว");}
       if (["รายรับ", "income"].includes(String(rec.type || ""))) {
         const incomeOut = await createIncomeFromOcr(this.env, sheetId, rec, { driveLink: anchorUrl, paymentChannelId: rec.paymentChannelId || "" }, token);
         if (!incomeOut.ok) throw new Error(incomeOut.message || "บันทึกรายรับไม่สำเร็จ");
         const ir = incomeOut.record || {};
+        await postIncomeInvoiceJournal(this.env,sheetId,ir,token,s.displayName||"LINE").catch(e=>console.warn("multi income journal",e.message));
+        if(incomeOut.payment)await postIncomePaymentJournal(this.env,sheetId,incomeOut.payment,token,s.displayName||"LINE").catch(e=>console.warn("multi income payment journal",e.message));
+        if(ir.customer&&!/ทั่วไป|ไม่ระบุ/.test(ir.customer))await upsertContact(this.env,sheetId,{type:"ลูกค้า",name:ir.customer,taxId:ir.customerTaxId,branch:ir.customerBranch,source:"Auto LINE Income"},token,s.displayName||"LINE").catch(()=>{});
+        await writeAudit(this.env,sheetId,token,{actor:s.displayName||"LINE",action:"CREATE_INCOME",entityType:"income",entityId:ir.id||"",summary:`บันทึกรายรับจาก LINE ${ir.customer||""} ${ir.grossAmount||0}`,after:ir,source:"LINE"});
         savedRec = {
           ...rec,
           id: ir.id,
@@ -1150,6 +1156,8 @@ export class MultiExpenseSession {
           claimPdfUrl: "",
           receiptPdfUrl: "",
         };
+        await postExpenseJournal(this.env,sheetId,savedRec,token,s.displayName||"LINE").catch(e=>console.warn("multi expense journal",e.message));
+        await writeAudit(this.env,sheetId,token,{actor:s.displayName||"LINE",action:"CREATE_EXPENSE",entityType:"expense",entityId:savedRec.id||"",summary:`บันทึกรายจ่ายจาก LINE ${savedRec.vendor||""} ${savedRec.amount||0}`,after:savedRec,source:"LINE"});
       }
       s.saved.push(savedRec);
       s.saveProgress.rows = i + 1;

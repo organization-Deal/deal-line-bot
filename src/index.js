@@ -54,10 +54,18 @@ import {
   forceMultiSummary, cancelMultiSession, confirmMultiSession, setMultiGroupType, handleMultiHttp,
 } from "./multi-expense.js";
 import { classifyTransferByCompanyAccounts } from "./account-direction.js";
+import {
+  ACCOUNTING_SUITE_VERSION, ensureAccountingSuiteTabs, getContacts, upsertContact, getContactStatement,
+  getPayables, createPayable, updatePayable, addPayablePayment,
+  getOpeningBalances, addOpeningBalance, getMigrationDashboard, importMigration,
+  getPeriodDashboard, closePeriod, reopenPeriod, assertPeriodOpen,
+  getTaxCenter, getAudit, getLedger, getTodayWork, searchAccounting, getBackup,
+  writeAudit, postJournal, postExpenseJournal, postIncomeInvoiceJournal, postIncomePaymentJournal, postReimbursementPaymentJournal,
+} from "./accounting-suite.js";
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v5.1_ACCOUNT_DIRECTION_20260808";
+const VERSION = "DEAL_LINE_BOT_v7.1_ACCOUNTING_SUITE_20260809";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -88,6 +96,42 @@ function safeEqual(a, b) {
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
 }
+
+const DASH_ROLES={owner:"เจ้าของ",accountant:"บัญชี",approver:"ผู้อนุมัติ",viewer:"ดูอย่างเดียว"};
+async function resolveDashAccess(env,key,provided){
+  const root=await getDashToken(env,key,{create:false});
+  if(root&&safeEqual(String(provided||""),root))return {ok:true,role:"owner",name:"Workspace owner",root:true};
+  if(!provided)return {ok:false};
+  const rec=await env.KV.get(`daccess:${key}:${provided}`,"json").catch(()=>null);
+  if(!rec||rec.active===false)return {ok:false};
+  return {ok:true,role:["accountant","approver","viewer"].includes(rec.role)?rec.role:"viewer",name:rec.name||DASH_ROLES[rec.role]||"ผู้ใช้งาน",lineUserId:rec.lineUserId||"",root:false,token:provided};
+}
+function accessCan(access,path,method="GET"){
+  if(access?.role==="owner")return true;
+  const write=method!=="GET"&&method!=="HEAD";
+  if(access?.role==="accountant"){
+    if(path==="/api/subscription"&&!write)return true;
+    if(path.startsWith("/api/subscription/")||path.startsWith("/api/businesses/invite")||path.startsWith("/api/accounting/access"))return false;
+    return true;
+  }
+  if(access?.role==="approver"){
+    if(!write)return ["/api/expenses","/api/batches","/api/settings","/api/workspace-links","/api/subscription","/api/businesses","/api/accounting/today","/api/accounting/whoami"].some(p=>path===p||path.startsWith(p+"/"));
+    return ["/api/expense-workflow","/api/batch-workflow","/api/batch-status"].includes(path);
+  }
+  if(access?.role==="viewer")return !write&&!path.includes("/backup")&&!path.includes("/access");
+  return false;
+}
+async function listDashAccess(env,key){
+  const listed=await env.KV.list({prefix:`daccess:${key}:`});const rows=[];
+  for(const k of listed.keys||[]){const rec=await env.KV.get(k.name,"json").catch(()=>null);if(rec)rows.push({...rec,token:k.name.split(":").at(-1)});}
+  return rows.sort((a,b)=>String(a.name||"").localeCompare(String(b.name||""),"th"));
+}
+async function createDashAccess(env,key,{name="",role="viewer",lineUserId=""}={}){
+  const r=["accountant","approver","viewer"].includes(role)?role:"viewer",token=crypto.randomUUID().replace(/-/g,"").slice(0,24);
+  const rec={name:String(name||DASH_ROLES[r]).trim().slice(0,120),role:r,lineUserId:String(lineUserId||"").trim().slice(0,120),active:true,createdAt:new Date().toISOString()};
+  await env.KV.put(`daccess:${key}:${token}`,JSON.stringify(rec));return {...rec,token};
+}
+async function revokeDashAccess(env,key,token){await env.KV.delete(`daccess:${key}:${token}`);return {ok:true};}
 
 /* ═══════════ เช็คว่าตั้งค่าข้อมูลบริษัทครบหรือยัง ═══════════ */
 
@@ -687,7 +731,8 @@ export default {
         const batchTab = await ensureBatchTab(env, sheetId, token);
         const reconciliationTab = await ensureReconciliationTab(env, sheetId, token);
         const incomeTabs = await ensureIncomeTabs(env, sheetId, token);
-        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox, batchTab, reconciliationTab, incomeTabs });
+        const accountingSuite = await ensureAccountingSuiteTabs(env, sheetId, token);
+        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox, batchTab, reconciliationTab, incomeTabs, accountingSuite });
       } catch (e) {
         console.error("migrate", e);
         return json({ error: String(e) }, 500);
@@ -700,12 +745,12 @@ export default {
       const key = url.searchParams.get("tenant");
       if (!key) return cors(json({ error: "missing tenant" }, 400));
 
-      const expected = await getDashToken(env, key, { create: false });
-      if (!expected || !safeEqual(url.searchParams.get("k") || "", expected)) {
-        return cors(json({
-          error: "unauthorized",
-          hint: 'ลิงก์ไม่ถูกต้องหรือถูกยกเลิกแล้ว — พิมพ์ "แดชบอร์ด" ในกลุ่ม LINE เพื่อขอลิงก์ใหม่',
-        }, 401));
+      const access = await resolveDashAccess(env,key,url.searchParams.get("k")||"");
+      if (!access.ok) {
+        return cors(json({error:"unauthorized",hint:'ลิงก์ไม่ถูกต้องหรือถูกยกเลิกแล้ว — พิมพ์ "แดชบอร์ด" ในกลุ่ม LINE เพื่อขอลิงก์ใหม่'},401));
+      }
+      if(!accessCan(access,url.pathname,request.method)){
+        return cors(json({error:"forbidden",message:`สิทธิ์ ${DASH_ROLES[access.role]||access.role} ไม่สามารถทำรายการนี้ได้`},403));
       }
 
       const sheetId = (await env.KV.get(`tenant:${key}`)) || env.DEFAULT_SHEET_ID;
@@ -726,7 +771,13 @@ export default {
 
 
         if (url.pathname === "/api/businesses") {
-          return cors(json(await listBusinessWorkspaces(env, key)));
+          const info=await listBusinessWorkspaces(env,key);
+          if(access.role!=="owner"){
+            const current=(info.businesses||[]).find(b=>b.isCurrent)||(info.businesses||[])[0];
+            const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
+            return cors(json({...info,businesses:current?[{...current,dashboardUrl:`${base}?tenant=${encodeURIComponent(key)}&k=${encodeURIComponent(url.searchParams.get("k")||"")}`}]:[],businessCount:1,businessLimit:1,canAddBusiness:false,restrictedByRole:true}));
+          }
+          return cors(json(info));
         }
 
         if (url.pathname === "/api/businesses/invite" && request.method === "POST") {
@@ -735,29 +786,60 @@ export default {
         }
 
         if (url.pathname === "/api/expenses") {
-          return cors(json(await readExpenses(env, sheetId, token)));
+          const rows = await readExpenses(env, sheetId, token);
+          // Dashboard projection: keep the accounting data intact in Sheets, but do not
+          // ship heavy/duplicated fields (attachments array + batch internals) to the
+          // browser when the dashboard only needs the expense/document view.
+          if (url.searchParams.get("view") === "dashboard") {
+            const dashboardFields = [
+              "_row","dateText","date","dateISO","amount","vendor","category","note",
+              "sender","imageUrl","img","status","createdAt","id","paid","needSlip",
+              "type","subCategory","docType","payerName","payerId","vat","whtRate",
+              "slipNo","transferor","claimPdfUrl","receiptPdfUrl","duplicateStatus","duplicateOf"
+            ];
+            return cors(json(rows.map((row) => {
+              const out = {};
+              for (const key of dashboardFields) out[key] = row[key] ?? "";
+              return out;
+            })));
+          }
+          return cors(json(rows));
         }
 
         /* รายรับ SME ไทย — ลูกหนี้, VAT, WHT และรับชำระบางส่วน */
         if (url.pathname === "/api/income") {
-          return cors(json(await getIncomeDashboard(env, sheetId, token)));
+          const includeReconciliation = url.searchParams.get("reconciliation") !== "0";
+          return cors(json(await getIncomeDashboard(env, sheetId, token, { includeReconciliation })));
         }
 
         if (url.pathname === "/api/income-create" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
+          await assertPeriodOpen(env, sheetId, b.issueDate || b.date || new Date(), token);
           const out = await createIncome(env, sheetId, b, token);
+          if(out.ok){
+            await postIncomeInvoiceJournal(env,sheetId,out.record,token,access.name||"Dashboard").catch(e=>console.warn("income journal",e.message));
+            if(out.payment)await postIncomePaymentJournal(env,sheetId,out.payment,token,access.name||"Dashboard").catch(e=>console.warn("income payment journal",e.message));
+            if(out.record?.customer&&!/ทั่วไป|ไม่ระบุ/.test(out.record.customer))await upsertContact(env,sheetId,{type:"ลูกค้า",name:out.record.customer,taxId:out.record.customerTaxId,branch:out.record.customerBranch,source:"Auto Income"},token,access.name||"Dashboard").catch(()=>{});
+            await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"CREATE_INCOME",entityType:"income",entityId:out.record?.id||"",summary:`บันทึกรายรับ ${out.record?.customer||""} ${out.record?.grossAmount||0}`,after:out.record});
+          }
           return cors(json(out, out.ok ? 200 : 400));
         }
 
         if (url.pathname === "/api/income-update" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
+          const before=(await getIncomeDashboard(env,sheetId,token,{includeReconciliation:false})).records?.find(r=>String(r.id)===String(b.id||b.incomeId));
+          if(before)await assertPeriodOpen(env,sheetId,b.patch?.issueDate||before.issueDate,token);
           const out = await updateIncome(env, sheetId, b.id || b.incomeId, b.patch || b, token);
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"UPDATE_INCOME",entityType:"income",entityId:out.record?.id||b.id||b.incomeId,summary:`แก้ไขรายรับ ${out.record?.customer||""}`,before,after:out.record});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
         if (url.pathname === "/api/income-payment" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
-          const out = await addIncomePayment(env, sheetId, b.id || b.incomeId, b.payment || b, token);
+          const pay=b.payment||b;
+          await assertPeriodOpen(env,sheetId,pay.receivedDate||new Date(),token);
+          const out = await addIncomePayment(env, sheetId, b.id || b.incomeId, pay, token);
+          if(out.ok){await postIncomePaymentJournal(env,sheetId,out.payment,token,access.name||"Dashboard").catch(e=>console.warn("income payment journal",e.message));await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"RECEIVE_INCOME",entityType:"income",entityId:out.record?.id||b.id||b.incomeId,summary:`รับชำระ ${out.payment?.cashAmount||0} + WHT ${out.payment?.whtAmount||0}`,after:out.payment});}
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -796,6 +878,100 @@ export default {
           if (!b.base64) return cors(json({ ok:false, error:"no_file" }, 400));
           const link = await uploadTenantImage(env, key, b.base64, b.mediaType || "image/jpeg", b.name || `income-${Date.now()}`, token, { category:"originals" });
           return cors(json({ ok:true, url:link }));
+        }
+
+        /* Accounting Suite v7 — migration / AP / close / tax / audit / ledger */
+        if (url.pathname === "/api/accounting/bootstrap") {
+          await ensureAccountingSuiteTabs(env, sheetId, token);
+          return cors(json({ ok:true, version:ACCOUNTING_SUITE_VERSION }));
+        }
+        if (url.pathname === "/api/accounting/access") {
+          if(access.role!=="owner")return cors(json({ok:false,error:"owner_only"},403));
+          if(request.method==="POST"){const b=await request.json().catch(()=>({}));const rec=await createDashAccess(env,key,b);const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");return cors(json({ok:true,record:{...rec,url:`${base}?tenant=${encodeURIComponent(key)}&k=${rec.token}`}}));}
+          const rows=await listDashAccess(env,key);const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");return cors(json({ok:true,role:access.role,rows:rows.map(r=>({...r,url:`${base}?tenant=${encodeURIComponent(key)}&k=${r.token}`}))}));
+        }
+        if (url.pathname === "/api/accounting/access-revoke" && request.method === "POST") {
+          if(access.role!=="owner")return cors(json({ok:false,error:"owner_only"},403));const b=await request.json().catch(()=>({}));return cors(json(await revokeDashAccess(env,key,b.token||"")));
+        }
+        if (url.pathname === "/api/accounting/whoami") return cors(json({ok:true,role:access.role,roleLabel:DASH_ROLES[access.role]||access.role,name:access.name||"",lineUserId:access.lineUserId||""}));
+        if (url.pathname === "/api/accounting/search") return cors(json(await searchAccounting(env, sheetId, token, { q: url.searchParams.get("q") || "", limit: url.searchParams.get("limit") || 80 })));
+        if (url.pathname === "/api/accounting/today") return cors(json(await getTodayWork(env, sheetId, token)));
+        if (url.pathname === "/api/accounting/contacts") {
+          if (request.method === "POST") {
+            const b=await request.json().catch(()=>({}));
+            const out=await upsertContact(env,sheetId,b,token,access.name||"Dashboard");
+            return cors(json(out,out.ok?200:400));
+          }
+          return cors(json(await getContacts(env,sheetId,token)));
+        }
+        if (url.pathname === "/api/accounting/contact-statement") {
+          return cors(json(await getContactStatement(env,sheetId,{contactId:url.searchParams.get("contactId")||"",name:url.searchParams.get("name")||"",taxId:url.searchParams.get("taxId")||""},token)));
+        }
+        if (url.pathname === "/api/accounting/payables") {
+          if (request.method === "POST") {
+            const b=await request.json().catch(()=>({}));
+            const out=await createPayable(env,sheetId,b,token,access.name||"Dashboard");
+            return cors(json(out,out.ok?200:400));
+          }
+          return cors(json(await getPayables(env,sheetId,token)));
+        }
+        if (url.pathname === "/api/accounting/payable-update" && request.method === "POST") {
+          const b=await request.json().catch(()=>({}));
+          const out=await updatePayable(env,sheetId,b.id||b.apId,b.patch||b,token,access.name||"Dashboard");
+          return cors(json(out,out.ok?200:400));
+        }
+        if (url.pathname === "/api/accounting/payable-payment" && request.method === "POST") {
+          const b=await request.json().catch(()=>({}));
+          const out=await addPayablePayment(env,sheetId,b.id||b.apId,b.payment||b,token,access.name||"Dashboard");
+          return cors(json(out,out.ok?200:400));
+        }
+        if (url.pathname === "/api/accounting/opening") {
+          if (request.method === "POST") {
+            const b=await request.json().catch(()=>({}));
+            const out=await addOpeningBalance(env,sheetId,b,token,access.name||"Dashboard");
+            return cors(json(out,out.ok?200:400));
+          }
+          return cors(json(await getOpeningBalances(env,sheetId,token)));
+        }
+        if (url.pathname === "/api/accounting/migration") {
+          if (request.method === "POST") {
+            const b=await request.json().catch(()=>({}));
+            const out=await importMigration(env,sheetId,b,token,access.name||"Dashboard");
+            return cors(json(out,out.ok?200:400));
+          }
+          return cors(json(await getMigrationDashboard(env,sheetId,token)));
+        }
+        if (url.pathname === "/api/accounting/period") {
+          const period=url.searchParams.get("period")||"";
+          return cors(json(await getPeriodDashboard(env,sheetId,period,token)));
+        }
+        if (url.pathname === "/api/accounting/period-close" && request.method === "POST") {
+          const b=await request.json().catch(()=>({}));
+          const out=await closePeriod(env,sheetId,b.period,b,token,access.name||"Dashboard");
+          return cors(json(out,out.ok?200:409));
+        }
+        if (url.pathname === "/api/accounting/period-reopen" && request.method === "POST") {
+          const b=await request.json().catch(()=>({}));
+          const out=await reopenPeriod(env,sheetId,b.period,b.reason,token,access.name||"Dashboard");
+          return cors(json(out,out.ok?200:400));
+        }
+        if (url.pathname === "/api/accounting/tax") {
+          return cors(json(await getTaxCenter(env,sheetId,url.searchParams.get("period")||"",token)));
+        }
+        if (url.pathname === "/api/accounting/audit") {
+          return cors(json(await getAudit(env,sheetId,token,{limit:url.searchParams.get("limit")||300})));
+        }
+        if (url.pathname === "/api/accounting/ledger") {
+          return cors(json(await getLedger(env,sheetId,token,{from:url.searchParams.get("from")||"",to:url.searchParams.get("to")||""})));
+        }
+        if (url.pathname === "/api/accounting/journal" && request.method === "POST") {
+          const b=await request.json().catch(()=>({}));
+          const out=await postJournal(env,sheetId,{date:b.date||new Date(),reference:b.reference||"",description:b.description||"รายการปรับปรุง",sourceType:"manual",sourceId:b.sourceId||crypto.randomUUID(),actor:access.name||"Dashboard",lines:Array.isArray(b.lines)?b.lines:[]},token);
+          if(out.ok&&!out.duplicate)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"POST_JOURNAL",entityType:"journal",entityId:out.journalId||"",summary:`ลงรายการปรับปรุง ${b.reference||""} เดบิต/เครดิต ${out.debit||0}`,after:b});
+          return cors(json(out,out.ok?200:400));
+        }
+        if (url.pathname === "/api/accounting/backup") {
+          return cors(json(await getBackup(env,sheetId,token)));
         }
 
         // ลิงก์ทางลัดจาก Dashboard ไปยังพื้นที่เอกสารของบริษัทจริง
@@ -860,6 +1036,7 @@ export default {
         if (url.pathname === "/api/settings") {
           if (request.method === "POST") {
             const b = await request.json();
+            const beforeSettings=await readSettings(env,sheetId,token).catch(()=>({}));
             const saved = await writeSettings(env, sheetId, b, token);
             await ensureTenantDriveFolders(env, key, token, {
               companyName: b.company_name || saved.company_name || "พื้นที่บริษัท",
@@ -868,6 +1045,7 @@ export default {
             await env.KV.delete(`setup:${key}`);              // ของเก่า
             await env.KV.delete(`setup:${key}:${sheetId}`);   // ให้เช็คใหม่รอบหน้า
             await env.KV.delete(`companysetup:v3:${key}:${sheetId}`);
+            await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"UPDATE_SETTINGS",entityType:"settings",entityId:key,summary:`แก้ไขตั้งค่าบริษัท ${Object.keys(b||{}).join(", ")}`,before:beforeSettings,after:saved});
             return cors(json(saved));
           }
           return cors(json(await readSettings(env, sheetId, token)));
@@ -915,12 +1093,14 @@ export default {
         if (url.pathname === "/api/email-update" && request.method === "POST") {
           const b = await request.json();
           const out = await patchEmailDocument(env, sheetId, b.id, b.patch || {}, token);
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"UPDATE_EMAIL_DOC",entityType:"email_document",entityId:b.id,summary:"แก้ไขเอกสารจากอีเมล",after:b.patch||{}});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
         if (url.pathname === "/api/email-ignore" && request.method === "POST") {
           const b = await request.json();
           const out = await patchEmailDocument(env, sheetId, b.id, { status: "ข้ามแล้ว" }, token);
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"IGNORE_EMAIL_DOC",entityType:"email_document",entityId:b.id,summary:"ข้ามเอกสารจากอีเมล",after:{status:"ข้ามแล้ว"}});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -929,7 +1109,7 @@ export default {
           if (quota.blocked) return cors(json({ ok: false, reason: "subscription_limit", subscription: quota }, 402));
           const b = await request.json();
           const out = await approveEmailDocument(env, sheetId, b.id, token, { force: b.force === true });
-          if (out.ok) await syncSubscriptionUsageAfterSavedExpense(env, key, sheetId, token).catch((e) => console.warn("subscription usage email", e?.message || e));
+          if (out.ok) {await syncSubscriptionUsageAfterSavedExpense(env, key, sheetId, token).catch((e) => console.warn("subscription usage email", e?.message || e));await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"APPROVE_EMAIL_DOC",entityType:"email_document",entityId:b.id,summary:"อนุมัติเอกสารจากอีเมลเข้าสู่ระบบ",after:out});}
           return cors(json(out, out.ok ? 200 : (out.reason === "duplicate" ? 409 : 400)));
         }
 
@@ -947,6 +1127,7 @@ export default {
             batchIds: Array.isArray(b.batchIds) ? b.batchIds : [],
             note: b.note || "สร้างหรือรวมใบเบิกด้วยตนเองจาก Dashboard",
           });
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"CREATE_BATCH",entityType:"reimbursement_batch",entityId:out.batchId||out.id||"",summary:`สร้าง/รวมรอบเบิก ${b.type||"ปกติ"}`,after:out});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -954,18 +1135,21 @@ export default {
           const b = await request.json().catch(() => ({}));
           const ids = Array.isArray(b.expenseIds) ? b.expenseIds : [b.id].filter(Boolean);
           const out = await requestUrgentBatch(env, key, sheetId, token, ids);
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"REQUEST_URGENT",entityType:"expense",entityId:ids.join(","),summary:`ขอเบิกด่วน ${ids.length} รายการ`,after:out});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
         if (url.pathname === "/api/batch-status" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
           const out = await updateReimbursementBatchStatus(env, sheetId, b.batchId, b.status, token);
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"BATCH_STATUS",entityType:"reimbursement_batch",entityId:b.batchId,summary:`เปลี่ยนสถานะรอบเบิกเป็น ${b.status}`,after:{status:b.status}});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
         if (url.pathname === "/api/batch-workflow" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
           const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token, { tenant: key });
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:`BATCH_${String(b.action||"WORKFLOW").toUpperCase()}`,entityType:"reimbursement_batch",entityId:b.batchId,summary:`ดำเนินการรอบเบิก: ${b.action||"workflow"}`,after:b.payload||{}});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -973,7 +1157,10 @@ export default {
         // ถ้ากดผ่าน ระบบจะสร้างใบเบิก 1 รายการเบื้องหลัง แล้วเข้าสู่รอโอน
         if (url.pathname === "/api/expense-workflow" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
+          const before=await getExpenseById(env,sheetId,b.expenseId,token);
+          if(before)await assertPeriodOpen(env,sheetId,before.dateISO||before.dateText||new Date(),token);
           const out = await updateExpenseReviewWorkflow(env, key, sheetId, b.expenseId, b.action, b.payload || {}, token);
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:`EXPENSE_${String(b.action||"WORKFLOW").toUpperCase()}`,entityType:"expense",entityId:b.expenseId,summary:`ดำเนินการรายจ่าย: ${b.action||"workflow"}`,before,after:out});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -983,6 +1170,10 @@ export default {
           const paymentChannelId = String(form.get("paymentChannelId") || "");
           const file = form.get("file");
           const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token, { paymentChannelId, tenant: key });
+          if(out.ok){
+            await postReimbursementPaymentJournal(env,sheetId,out.record||{id:batchId,batchId,total:out.total,paidAt:new Date().toISOString()},token,access.name||"Dashboard").catch(e=>console.warn("reimbursement payment journal",e.message));
+            await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"UPLOAD_PAYMENT_SLIP",entityType:"reimbursement_batch",entityId:batchId,summary:"อัปโหลดหลักฐานโอนเงินคืน",after:{paymentChannelId}});
+          }
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -1001,18 +1192,21 @@ export default {
         if (url.pathname === "/api/reconciliation-confirm" && request.method === "POST") {
           const body = await request.json().catch(() => ({}));
           const out = await confirmReconciliationMatches(env, sheetId, body, token);
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"RECONCILE_CONFIRM",entityType:"reconciliation",entityId:"multiple",summary:`ยืนยันกระทบยอด ${Array.isArray(body.pairs)?body.pairs.length:1} รายการ`,after:body});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
         if (url.pathname === "/api/reconciliation-unlink" && request.method === "POST") {
           const body = await request.json().catch(() => ({}));
           const out = await unlinkReconciliationMatch(env, sheetId, body.reconciliationId || body.id, token);
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"RECONCILE_UNLINK",entityType:"reconciliation",entityId:body.reconciliationId||body.id,summary:"ยกเลิกการจับคู่กระทบยอด",after:body});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
         if (url.pathname === "/api/reconciliation-ignore" && request.method === "POST") {
           const body = await request.json().catch(() => ({}));
           const out = await ignoreReconciliationRow(env, sheetId, body.reconciliationId || body.id, body.note || "", token);
+          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"RECONCILE_IGNORE",entityType:"reconciliation",entityId:body.reconciliationId||body.id,summary:"ข้ามรายการกระทบยอด",after:body});
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -1060,6 +1254,7 @@ export default {
             receiptPdfUrl: docs.receiptUrl,
           };
           await updateExpenseById(env, sheetId, rec.id, patch, token);
+          await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"GENERATE_DOCS",entityType:"expense",entityId:rec.id,summary:"สร้าง/สร้างใหม่ใบเบิกและใบแทน",before:{claimPdfUrl:rec.claimPdfUrl,receiptPdfUrl:rec.receiptPdfUrl},after:patch});
           return cors(json({ ok: true, record: { ...rec, ...patch } }));
         }
 
@@ -1770,11 +1965,16 @@ async function handlePostback(event, env, key, mode = "reply") {
 
     // รายรับไม่เข้ารอบเบิก — บันทึกเข้า master รายรับ + รับชำระโดยตรง
     if (isIncome) {
+      try{await assertPeriodOpen(env,pending.sheetId,pending.record?.date||new Date(),token);}catch(e){return respond(textMsg(e.message||"งวดนี้ถูกปิดบัญชีแล้ว"));}
       const out = await createIncomeFromOcr(env, pending.sheetId, {
         ...pending.record,
         imageUrl: pending.driveLink || pending.record?.imageUrl || "",
       }, { driveLink: pending.driveLink || "" }, token);
       if (!out.ok) return respond(textMsg(out.message || "บันทึกรายรับไม่สำเร็จ กรุณาลองใหม่"));
+      await postIncomeInvoiceJournal(env,pending.sheetId,out.record||{},token,pending.sender||"LINE").catch(e=>console.warn("line income journal",e.message));
+      if(out.payment)await postIncomePaymentJournal(env,pending.sheetId,out.payment,token,pending.sender||"LINE").catch(e=>console.warn("line income payment journal",e.message));
+      if(out.record?.customer&&!/ทั่วไป|ไม่ระบุ/.test(out.record.customer))await upsertContact(env,pending.sheetId,{type:"ลูกค้า",name:out.record.customer,taxId:out.record.customerTaxId,branch:out.record.customerBranch,source:"Auto LINE Income"},token,pending.sender||"LINE").catch(()=>{});
+      await writeAudit(env,pending.sheetId,token,{actor:pending.sender||"LINE",action:"CREATE_INCOME",entityType:"income",entityId:out.record?.id||"",summary:`บันทึกรายรับจาก LINE ${out.record?.customer||""} ${out.record?.grossAmount||0}`,after:out.record,source:"LINE"});
       await env.KV.delete(`pending:${id}`);
       const r = out.record || {};
       return respond(textMsg(`บันทึกรายรับแล้ว ✅
@@ -1820,6 +2020,8 @@ ${r.customer || pending.record?.transferor || "ลูกค้าทั่วไ
       ...dupMeta,
     };
 
+    try{await assertPeriodOpen(env,pending.sheetId,pending.record?.date||new Date(),token);}catch(e){return respond(textMsg(e.message||"งวดนี้ถูกปิดบัญชีแล้ว"));}
+
     const { id: rowId, row } = await appendExpense(
       env, pending.sheetId, toSave,
       { sender: pending.sender, driveLink: pending.driveLink, payerName: resolvedPayerName, payerId: uid || "" },
@@ -1856,6 +2058,8 @@ ${r.customer || pending.record?.transferor || "ลูกค้าทั่วไ
       batchDocId: "",
       batchClaimPdfUrl: "",
     };
+    await postExpenseJournal(env,pending.sheetId,rec,token,pending.sender||"LINE").catch(e=>console.warn("line expense journal",e.message));
+    await writeAudit(env,pending.sheetId,token,{actor:pending.sender||"LINE",action:"CREATE_EXPENSE",entityType:"expense",entityId:rowId,summary:`บันทึกรายจ่ายจาก LINE ${rec.vendor||""} ${rec.amount||0}`,after:rec,source:"LINE"});
 
     // กดบันทึกครั้งเดียว → สร้างใบเบิก + ใบแทนเป็น PDF → อัป Drive → เขียนลิงก์ลงชีท
     try {
