@@ -56,6 +56,10 @@ Extract data from this image as JSON only.
     "บัญชีปลายทาง". NEVER put the sender here.
 - transferor = the person or account that SENT the money on a transfer slip,
   labelled "จาก" / "ผู้โอน" / "บัญชีต้นทาง". For non-transfer documents return "".
+- fromAccountNumber = readable source account / PromptPay / wallet identifier on a transfer slip. Keep masked characters if printed; else "".
+- toAccountNumber = readable destination account / PromptPay / wallet identifier on a transfer slip. Keep masked characters if printed; else "".
+- fromBank = source bank/provider name if visible, else "".
+- toBank = destination bank/provider name if visible, else "".
 - PromptPay with only a phone number: use the display name shown next to it, else "".
 - Copy Thai names EXACTLY, character by character, only what you can clearly see.
 - If any part of a name is blurry or masked, DO NOT invent or complete it. Return only
@@ -101,6 +105,10 @@ A clean screenshot with no surroundings gives no signal — judge from the text 
 - amount   : number. For PROOF/OTHER with no monetary total, use 0
 - vendor   : string — ผู้รับ/ปลายทาง (keep Thai text as printed)
 - transferor : string — ผู้โอน/ต้นทาง; only for transfer slips, else ""
+- fromAccountNumber : string — เลข/หมายเลขบัญชีต้นทางตามที่มองเห็นบนสลิป, else ""
+- toAccountNumber : string — เลข/หมายเลขบัญชีปลายทางตามที่มองเห็นบนสลิป, else ""
+- fromBank : string — ธนาคาร/ผู้ให้บริการต้นทาง, else ""
+- toBank : string — ธนาคาร/ผู้ให้บริการปลายทาง, else ""
 - date     : "YYYY-MM-DD" Gregorian
 - category : pick exactly one category from the correct expense/income list above
 - docType  : pick exactly one from ${JSON.stringify(DOC_TYPES)}
@@ -341,6 +349,10 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
     amount,
     vendor,
     transferor,
+    fromAccountNumber: String(data.fromAccountNumber || "").trim().slice(0, 100),
+    toAccountNumber: String(data.toAccountNumber || "").trim().slice(0, 100),
+    fromBank: String(data.fromBank || "").trim().slice(0, 80),
+    toBank: String(data.toBank || "").trim().slice(0, 80),
     date:     cleanDate(data.date),
     category: CATEGORIES.includes(data.category) ? data.category : "อื่น ๆ",
     note:     (data.note || "").trim(),

@@ -39,6 +39,10 @@ export function normalizePaymentChannel(raw = {}, index = 0) {
     name: ownerName,
     currency: clean(raw.currency || "THB", 12).toUpperCase() || "THB",
     active: bool(raw.active, true),
+    // บัญชีบริษัทแต่ละใบกำหนดได้ว่าใช้รับ/จ่าย และให้ระบบใช้ตรวจทิศทางจากสลิปหรือไม่
+    canReceive: bool(raw.canReceive ?? raw.receiveEnabled, type !== "cash"),
+    canPay: bool(raw.canPay ?? raw.payEnabled, type !== "cash"),
+    autoDetect: bool(raw.autoDetect ?? raw.trackTransfers, type !== "cash"),
     isDefault: bool(raw.isDefault ?? raw.default, false),
     createdAt: clean(raw.createdAt || "", 50),
     updatedAt: clean(raw.updatedAt || "", 50),
@@ -81,6 +85,9 @@ export function channelSnapshot(channel = {}) {
     paymentChannelBank: String(channel.bank || ""),
     paymentChannelNumber: String(channel.number || ""),
     paymentChannelName: String(channel.name || ""),
+    paymentChannelCanReceive: channel.canReceive !== false,
+    paymentChannelCanPay: channel.canPay !== false,
+    paymentChannelAutoDetect: channel.autoDetect !== false,
   };
 }
 

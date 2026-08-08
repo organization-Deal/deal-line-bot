@@ -51,12 +51,13 @@ import {
 } from "./member-profile.js";
 import {
   MultiExpenseSession, touchMultiSession, addMultiImage,
-  forceMultiSummary, cancelMultiSession, confirmMultiSession, handleMultiHttp,
+  forceMultiSummary, cancelMultiSession, confirmMultiSession, setMultiGroupType, handleMultiHttp,
 } from "./multi-expense.js";
+import { classifyTransferByCompanyAccounts } from "./account-direction.js";
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v5.0_INCOME_SME_TH_BASE_20260808";
+const VERSION = "DEAL_LINE_BOT_v5.1_ACCOUNT_DIRECTION_20260808";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -1559,6 +1560,10 @@ async function handleImage(event, env, key, mode = "reply") {
 
   if (!sheet) return respond(connectMsg(env, key));
   console.log(`[image] tenant=${key} sheetId=${sheet.sheetId} oauth=${!!sheet.token}`);
+  const settingsPromise = readSettings(env, sheet.sheetId, sheet.token).catch((e) => {
+    console.warn(`[image] settings unavailable tenant=${key}:`, e?.message || e);
+    return {};
+  });
 
   const { base64, mediaType } = content;
   const drivePromise = uploadTenantImage(
@@ -1605,6 +1610,10 @@ async function handleImage(event, env, key, mode = "reply") {
       amount: 0,
       vendor: "",
       transferor: "",
+      fromAccountNumber: "",
+      toAccountNumber: "",
+      fromBank: "",
+      toBank: "",
       date: "",
       category: "อื่น ๆ",
       note: "AI อ่านรูปไม่สำเร็จ — กรุณาจัดรูปและกรอกข้อมูลเอง",
@@ -1630,13 +1639,50 @@ async function handleImage(event, env, key, mode = "reply") {
     };
   }
 
+  // Source of truth หลักสำหรับสลิป: เทียบผู้โอน/ผู้รับกับ Master บัญชีบริษัท
+  // ถ้าปลายทางตรงบัญชีบริษัท => รายรับ, ต้นทางตรงบัญชีบริษัท => รายจ่าย
+  // AI ใช้อ่านข้อมูล แต่ไม่ได้เป็นคนตัดสินทิศทางเพียงลำพัง
+  try {
+    const settings = await settingsPromise;
+    const direction = classifyTransferByCompanyAccounts(record, settings);
+    record.accountDirection = direction.direction || "unknown";
+    record.accountDirectionType = direction.type || "";
+    record.accountDirectionReason = direction.reason || "";
+    record.accountDirectionConfidence = Number(direction.confidence || 0);
+    record.matchedPaymentChannelId = direction.matchedPaymentChannelId || "";
+    record.matchedPaymentChannelLabel = direction.matchedPaymentChannelLabel || "";
+    record.sourceChannelId = direction.sourceChannelId || "";
+    record.destinationChannelId = direction.destinationChannelId || "";
+    if (direction.type === "รายรับ") {
+      record.type = "รายรับ";
+      if (!INCOME_CATEGORIES.includes(record.category)) record.category = "รายได้อื่น";
+    } else if (direction.type === "รายจ่าย") {
+      record.type = "รายจ่าย";
+      if (!EXPENSE_CATEGORIES.includes(record.category)) record.category = "อื่น ๆ";
+    } else if (direction.direction === "internal_transfer") {
+      const prefix = "พบต้นทางและปลายทางเป็นบัญชีบริษัท — อาจเป็นโอนระหว่างบัญชี กรุณาตรวจประเภท";
+      record.flag = record.flag ? `${prefix} · ${record.flag}`.slice(0, 180) : prefix;
+    }
+    console.log(`[direction] tenant=${key} dir=${direction.direction} type=${direction.type || "manual"} confidence=${direction.confidence || 0} channel=${direction.matchedPaymentChannelId || "-"}`);
+  } catch (e) {
+    console.warn(`[direction] classify failed tenant=${key}:`, e?.message || e);
+  }
+
   // ผู้ใช้สามารถพิมพ์ “รายรับ” หรือ “รายจ่าย” ก่อนส่งรูป เพื่อบังคับทิศทางรายการ
   // มีประโยชน์กับสลิปธนาคารที่ภาพอย่างเดียวบอกไม่ได้ว่าบัญชีไหนเป็นของบริษัทนี้
   if (documentMode === "รายรับ") {
+    if (record.accountDirection && record.accountDirection !== "incoming") {
+      record.matchedPaymentChannelId = "";
+      record.matchedPaymentChannelLabel = "";
+    }
     record.type = "รายรับ";
+    record.accountDirectionType = "รายรับ";
+    record.accountDirectionReason = "ผู้ใช้เปิดโหมดรายรับใน LINE";
     if (!INCOME_CATEGORIES.includes(record.category)) record.category = "รายได้อื่น";
   } else if (documentMode === "รายจ่าย") {
     record.type = "รายจ่าย";
+    record.accountDirectionType = "รายจ่าย";
+    record.accountDirectionReason = "ผู้ใช้เปิดโหมดรายจ่ายใน LINE";
     if (!EXPENSE_CATEGORIES.includes(record.category)) record.category = "อื่น ๆ";
   }
 
@@ -1854,6 +1900,19 @@ ${out.profileUrl}`));
 ${out.reviewUrl}` : "";
     return respond(textMsg(`ยังยืนยันรายการไม่ได้ครับ
 ${out.error || "กรุณาตรวจข้อมูลอีกครั้ง"}${reviewText}`));
+  }
+
+  if (act === "multi_set_type") {
+    const groupId = p.get("g") || "";
+    const targetType = p.get("t") || "";
+    try {
+      const out = await setMultiGroupType(env, key, uid || key, groupId, targetType);
+      if (!out.ok) return respond(textMsg(out.error || "เปลี่ยนประเภทรายการไม่สำเร็จ"));
+      return respond(textMsg(`เปลี่ยนเป็น${out.type}แล้วครับ ✅
+การ์ดล่าสุดถูกอัปเดตให้แล้ว`));
+    } catch (e) {
+      return respond(textMsg("เปลี่ยนประเภทรายการไม่สำเร็จ: " + String(e.message || e).slice(0, 120)));
+    }
   }
 
   if (act === "multi_cancel") {

@@ -15,7 +15,7 @@ import {
   memberProfileComplete, missingMemberFields,
 } from "./member-profile.js";
 
-export const MULTI_CARD_VERSION = "MULTI_CARD_3_BUTTONS_20260805";
+export const MULTI_CARD_VERSION = "MULTI_CARD_ACCOUNT_DIRECTION_20260808";
 
 const SESSION_IDLE_MS = 60 * 60 * 1000;
 const DEBOUNCE_MS = 2200;
@@ -177,6 +177,19 @@ export async function confirmMultiSession(env, tenant, userId, { force = false }
   return { ...data, ok: res.ok && data.ok !== false, statusCode: res.status };
 }
 
+export async function setMultiGroupType(env, tenant, userId, groupId, type) {
+  const sid = await multiSessionKey(tenant, userId);
+  const res = await stubFor(env, sid).fetch("https://multi.local/internal-set-type", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sid, groupId, type }),
+  });
+  const text = await res.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text || "ระบบตอบกลับไม่ถูกต้อง" }; }
+  return { ...data, ok: res.ok && data.ok !== false, statusCode: res.status };
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
@@ -265,6 +278,11 @@ function groupTemplate() {
     vatAmount: 0,
     manualVat: false,
     manualType: false,
+    autoDirection: "unknown",
+    autoDirectionReason: "",
+    autoDirectionConfidence: 0,
+    matchedPaymentChannelId: "",
+    matchedPaymentChannelLabel: "",
     whtRate: 0,
     warning: "",
     matchConfidence: 0,
@@ -292,7 +310,15 @@ function recomputeGroup(s, g) {
   if (!g.manualDate) g.date = String(primary.date || slip.date || g.date || "");
   if (!g.manualCategory) g.category = String(primary.category || g.category || "อื่น ๆ");
   if (!g.manualNote) g.note = String(primary.note || primary.matchHint || g.note || "");
-  if (!g.manualType) g.type = primary.type || g.type || "รายจ่าย";
+  const directionItem = items
+    .filter((x) => ["รายรับ", "รายจ่าย"].includes(String(x.accountDirectionType || "")))
+    .sort((a, b) => Number(b.accountDirectionConfidence || 0) - Number(a.accountDirectionConfidence || 0))[0];
+  if (!g.manualType) g.type = directionItem?.accountDirectionType || primary.type || g.type || "รายจ่าย";
+  g.autoDirection = directionItem?.accountDirection || "unknown";
+  g.autoDirectionReason = directionItem?.accountDirectionReason || "";
+  g.autoDirectionConfidence = Number(directionItem?.accountDirectionConfidence || 0);
+  g.matchedPaymentChannelId = directionItem?.matchedPaymentChannelId || "";
+  g.matchedPaymentChannelLabel = directionItem?.matchedPaymentChannelLabel || "";
   g.docType = primary.docType || (slip.docType || "");
   if (!g.manualVat) {
     const vatItem = items.find(explicitVatItem);
@@ -306,7 +332,9 @@ function recomputeGroup(s, g) {
   const hasSlip = items.some((x) => x.role === "PAYSLIP");
   const mismatch = g.amount > 0 && g.payAmount > 0 && Math.abs(g.amount - g.payAmount) > AMOUNT_TOLERANCE;
   const isIncome = ["รายรับ", "income"].includes(String(g.type || ""));
+  const hasInternalTransfer = items.some((x) => x.accountDirection === "internal_transfer");
   if (!items.length) g.warning = "ไม่มีรูปในรายการ";
+  else if (hasInternalTransfer && !g.manualType) g.warning = "พบการโอนระหว่างบัญชีบริษัท กรุณาเลือกประเภทก่อนบันทึก";
   else if (!g.amount) g.warning = "ยังอ่านยอดไม่ได้";
   else if (isIncome && g.payAmount > g.amount + AMOUNT_TOLERANCE) g.warning = `เงินเข้าจริง ฿${money(g.payAmount)} มากกว่ายอดตามเอกสาร ฿${money(g.amount)}`;
   else if (!isIncome && mismatch) g.warning = `ยอดเอกสาร ฿${money(g.amount)} ไม่ตรงกับยอดจ่าย ฿${money(g.payAmount)}`;
@@ -421,6 +449,9 @@ function mergeCompatibleGroups(s) {
 
         const aItems = groupItems(s, a);
         const bItems = groupItems(s, b);
+        const aDirection = aItems.find((x) => ["รายรับ", "รายจ่าย"].includes(String(x.accountDirectionType || "")))?.accountDirectionType || "";
+        const bDirection = bItems.find((x) => ["รายรับ", "รายจ่าย"].includes(String(x.accountDirectionType || "")))?.accountDirectionType || "";
+        if (aDirection && bDirection && aDirection !== bDirection) continue;
         const aPrimary = aItems.some((x) => primaryRole(x.role));
         const bPrimary = bItems.some((x) => primaryRole(x.role));
         const aSlip = groupHasRole(s, a, "PAYSLIP");
@@ -606,7 +637,9 @@ function summaryCard(s, env) {
               ],
             },
             { type: "text", text: detail, size: "xs", color: "#6E6E73", wrap: true, maxLines: 2, margin: "xs" },
-            { type: "text", text: `${payType} · ${g.images.length} รูป`, size: "xxs", color: "#8E8E93", margin: "xs" },
+            { type: "text", text: `${g.type === "รายรับ" ? "รายรับ" : "รายจ่าย"} · ${payType} · ${g.images.length} รูป`, size: "xxs", color: g.type === "รายรับ" ? "#248A3D" : "#6E6E73", weight: "bold", margin: "xs" },
+            ...(g.autoDirectionReason ? [{ type: "text", text: `ตรวจจากบัญชีบริษัท: ${g.autoDirectionReason}`, size: "xxs", color: "#6E6E73", wrap: true, maxLines: 2, margin: "xs" }] : []),
+            { type: "button", style: "secondary", height: "sm", margin: "sm", action: { type: "postback", label: g.type === "รายรับ" ? "เปลี่ยนเป็นรายจ่าย" : "เปลี่ยนเป็นรายรับ", data: `act=multi_set_type&g=${encodeURIComponent(g.id)}&t=${g.type === "รายรับ" ? "expense" : "income"}` } },
           ],
         },
       ],
@@ -719,6 +752,11 @@ function buildRecordFromGroup(s, g, profile) {
     vatRate: Number(g.vatRate) || 0,
     whtRate: Number(g.whtRate) || 0,
     paymentAmount: Number(g.payAmount) || 0,
+    paymentChannelId: (g.type === "รายรับ" && (!g.manualType || g.autoDirection === "incoming")) ? (g.matchedPaymentChannelId || "") : "",
+    paymentChannelLabel: (g.type === "รายรับ" && (!g.manualType || g.autoDirection === "incoming")) ? (g.matchedPaymentChannelLabel || "") : "",
+    accountDirection: g.autoDirection || "unknown",
+    accountDirectionReason: g.autoDirectionReason || "",
+    accountDirectionConfidence: Number(g.autoDirectionConfidence || 0),
     hasPaymentEvidence: slip.length > 0,
     needSlip: true,
     imageUrl: mainImage,
@@ -836,6 +874,22 @@ export class MultiExpenseSession {
       await this.save(s);
       await this.ctx.storage.setAlarm(Date.now() + (s.inflight > 0 ? 5000 : DEBOUNCE_MS));
       return json({ ok: true, itemId: item.id, counts: publicState(s).counts });
+    }
+
+    if (url.pathname === "/internal-set-type" && request.method === "POST") {
+      if (!s || !Object.keys(s.items || {}).length) return json({ error: "ยังไม่มีชุดเอกสาร" }, 404);
+      const b = await parseBody(request);
+      const g = s.groups.find((x) => x.id === String(b.groupId || ""));
+      const type = b.type === "income" || b.type === "รายรับ" ? "รายรับ" : b.type === "expense" || b.type === "รายจ่าย" ? "รายจ่าย" : "";
+      if (!g || !type) return json({ error: "ไม่พบรายการหรือประเภทไม่ถูกต้อง" }, 400);
+      g.type = type;
+      g.manualType = true;
+      const allowed = type === "รายรับ" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+      if (!allowed.includes(g.category)) g.category = type === "รายรับ" ? "รายได้อื่น" : "อื่น ๆ";
+      recomputeGroup(s, g);
+      await this.save(s);
+      await this.pushSummary(s);
+      return json({ ok: true, groupId: g.id, type, ...publicState(s) });
     }
 
     if (url.pathname === "/internal-summary") {
@@ -1062,7 +1116,7 @@ export class MultiExpenseSession {
       const anchorUrl = rec.imageUrl || splitList(rec.attReceipt)[0] || splitList(rec.attSlip)[0] || "";
       let savedRec;
       if (["รายรับ", "income"].includes(String(rec.type || ""))) {
-        const incomeOut = await createIncomeFromOcr(this.env, sheetId, rec, { driveLink: anchorUrl }, token);
+        const incomeOut = await createIncomeFromOcr(this.env, sheetId, rec, { driveLink: anchorUrl, paymentChannelId: rec.paymentChannelId || "" }, token);
         if (!incomeOut.ok) throw new Error(incomeOut.message || "บันทึกรายรับไม่สำเร็จ");
         const ir = incomeOut.record || {};
         savedRec = {
@@ -1251,7 +1305,7 @@ function render(){
 function renderGroups(){
   const root=q('#groups');
   if(!D.groups.length){root.innerHTML='<div class="empty">ยังไม่มีรายการ กด “+ เพิ่มรายการ” หรือจัดรูปด้านล่างเข้ารายการ</div>';return}
-  root.innerHTML=D.groups.map(g=>'<section class="group"><div class="ghead"><div><div class="gindex">รายการ '+g.number+'</div><div class="gtitle">'+esc(titleOf(g))+'</div><div class="gdesc">'+esc(g.note||g.vendor||'ยังไม่มีรายละเอียด')+' · '+g.images.length+' รูป</div></div><div><div class="gamount">฿'+Number(g.amount||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})+'</div><div class="statusBadge '+(!g.warning?'ready':'')+'">'+esc(g.warning?'ตรวจข้อมูล':'พร้อมบันทึก')+'</div></div></div><div class="fields"><div class="field"><label>ประเภทรายการ</label><select onchange="patchGroup(\''+g.id+'\',{type:this.value})"><option value="รายจ่าย"'+(g.type!=='รายรับ'?' selected':'')+'>รายจ่าย</option><option value="รายรับ"'+(g.type==='รายรับ'?' selected':'')+'>รายรับ</option></select></div><div class="field"><label>ชื่อรายการ</label><input value="'+esc(g.note||'')+'" onchange="patchGroup(\''+g.id+'\',{note:this.value})"></div><div class="field"><label>ยอดตามเอกสาร (บาท)</label><input type="number" step="0.01" value="'+esc(g.amount||'')+'" onchange="patchGroup(\''+g.id+'\',{amount:this.value})"></div><div class="field"><label>หมวด</label><select onchange="patchGroup(\''+g.id+'\',{category:this.value})">'+categoriesOf(g).map(c=>'<option'+(c===g.category?' selected':'')+'>'+esc(c)+'</option>').join('')+'</select></div><div class="field"><label>'+partyLabel(g)+'</label><input value="'+esc(g.vendor||'')+'" onchange="patchGroup(\''+g.id+'\',{vendor:this.value})"></div><div class="field"><label>วันที่รายการ</label><input type="date" value="'+esc(g.date||'')+'" onchange="patchGroup(\''+g.id+'\',{date:this.value})"></div><div class="field"><label>VAT</label><select onchange="patchGroup(\''+g.id+'\',{vatMode:this.value})"><option value="0"'+(!(g.vat===true&&Number(g.vatRate)>0)?' selected':'')+'>ไม่มี VAT</option><option value="7"'+(g.vat===true&&Number(g.vatRate)===7?' selected':'')+'>VAT 7%</option></select></div></div><div class="docsHead"><div class="docsLabel">เอกสารในรายการ · '+g.images.length+' รูป</div></div><div class="thumbs">'+g.images.map(im=>'<div class="thumb"><a href="'+esc(im.imgUrl)+'" target="_blank" rel="noopener"><img src="'+esc(im.imgUrl)+'"></a><label>ประเภทเอกสาร</label><select onchange="changeRole(\''+im.id+'\',this.value)">'+roleOptions(im.role)+'</select><label>ย้ายรูปไป</label><select class="moveSelect" onchange="assign(\''+im.id+'\',this.value)">'+groupOptions(g.id,'เลือกปลายทาง')+'</select></div>').join('')+'</div><div class="groupActions"><button class="delete" onclick="deleteGroup(\''+g.id+'\')">ลบรายการ</button></div></section>').join('')
+  root.innerHTML=D.groups.map(g=>'<section class="group"><div class="ghead"><div><div class="gindex">รายการ '+g.number+'</div><div class="gtitle">'+esc(titleOf(g))+'</div><div class="gdesc">'+esc(g.note||g.vendor||'ยังไม่มีรายละเอียด')+' · '+g.images.length+' รูป</div></div><div><div class="gamount">฿'+Number(g.amount||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})+'</div><div class="statusBadge '+(!g.warning?'ready':'')+'">'+esc(g.warning?'ตรวจข้อมูล':'พร้อมบันทึก')+'</div></div></div><div class="fields"><div class="field"><label>ประเภทรายการ</label><select onchange="patchGroup(\''+g.id+'\',{type:this.value})"><option value="รายจ่าย"'+(g.type!=='รายรับ'?' selected':'')+'>รายจ่าย</option><option value="รายรับ"'+(g.type==='รายรับ'?' selected':'')+'>รายรับ</option></select><small style="display:block;color:#6e6e73;margin-top:6px;line-height:1.45">'+esc(g.autoDirectionReason?('ตรวจจากบัญชีบริษัท: '+g.autoDirectionReason):'เลือกได้เองหากระบบจัดประเภทไม่ตรง')+'</small></div><div class="field"><label>ชื่อรายการ</label><input value="'+esc(g.note||'')+'" onchange="patchGroup(\''+g.id+'\',{note:this.value})"></div><div class="field"><label>ยอดตามเอกสาร (บาท)</label><input type="number" step="0.01" value="'+esc(g.amount||'')+'" onchange="patchGroup(\''+g.id+'\',{amount:this.value})"></div><div class="field"><label>หมวด</label><select onchange="patchGroup(\''+g.id+'\',{category:this.value})">'+categoriesOf(g).map(c=>'<option'+(c===g.category?' selected':'')+'>'+esc(c)+'</option>').join('')+'</select></div><div class="field"><label>'+partyLabel(g)+'</label><input value="'+esc(g.vendor||'')+'" onchange="patchGroup(\''+g.id+'\',{vendor:this.value})"></div><div class="field"><label>วันที่รายการ</label><input type="date" value="'+esc(g.date||'')+'" onchange="patchGroup(\''+g.id+'\',{date:this.value})"></div><div class="field"><label>VAT</label><select onchange="patchGroup(\''+g.id+'\',{vatMode:this.value})"><option value="0"'+(!(g.vat===true&&Number(g.vatRate)>0)?' selected':'')+'>ไม่มี VAT</option><option value="7"'+(g.vat===true&&Number(g.vatRate)===7?' selected':'')+'>VAT 7%</option></select></div></div><div class="docsHead"><div class="docsLabel">เอกสารในรายการ · '+g.images.length+' รูป</div></div><div class="thumbs">'+g.images.map(im=>'<div class="thumb"><a href="'+esc(im.imgUrl)+'" target="_blank" rel="noopener"><img src="'+esc(im.imgUrl)+'"></a><label>ประเภทเอกสาร</label><select onchange="changeRole(\''+im.id+'\',this.value)">'+roleOptions(im.role)+'</select><label>ย้ายรูปไป</label><select class="moveSelect" onchange="assign(\''+im.id+'\',this.value)">'+groupOptions(g.id,'เลือกปลายทาง')+'</select></div>').join('')+'</div><div class="groupActions"><button class="delete" onclick="deleteGroup(\''+g.id+'\')">ลบรายการ</button></div></section>').join('')
 }
 function renderPool(){
   const root=q('#pool');const list=D.items.filter(x=>!x.groupId&&!x.ignored);
