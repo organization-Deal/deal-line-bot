@@ -7,7 +7,7 @@
 //   • ล้าง flag ทั้งแบบเก่าและแบบผูก sheetId ตอนบันทึกตั้งค่า / migrate
 
 import { verifySignature, getMessageContent, reply, push, textMsg, confirmCard, savedCard, moreCard } from "./line.js";
-import { ocrReceipt } from "./ocr.js";
+import { ocrReceipt, EXPENSE_CATEGORIES, INCOME_CATEGORIES } from "./ocr.js";
 import {
   appendExpense, readExpenses, getExpenseById, updateExpenseById,
   togglePaid, toggleNeedSlip, softDeleteById, listForSlip, normalizeDate,
@@ -32,7 +32,7 @@ import {
 import {
   ensureBatchTab, getBatchDashboard, createReimbursementBatches,
   requestUrgentBatch, updateReimbursementBatchStatus,
-  updateReimbursementBatchWorkflow, uploadReimbursementPaymentSlip,
+  updateReimbursementBatchWorkflow, updateExpenseReviewWorkflow, uploadReimbursementPaymentSlip,
   runScheduledReimbursementBatches,
 } from "./batches.js";
 import {
@@ -41,18 +41,23 @@ import {
   unlinkReconciliationMatch, ignoreReconciliationRow,
 } from "./reconciliation.js";
 import {
+  ensureIncomeTabs, getIncomeDashboard, createIncome, updateIncome, addIncomePayment, updateIncomePayment, createIncomeFromOcr,
+  importIncomeReconciliationRows, confirmIncomeReconciliationMatches, ignoreIncomeReconciliationRow, unlinkIncomeReconciliation,
+} from "./income.js";
+import {
   createMemberOnboardingUrl, handleMemberOnboarding,
   getMemberProfile, memberProfileComplete, missingMemberFields,
   findMemberProfile,
 } from "./member-profile.js";
 import {
   MultiExpenseSession, touchMultiSession, addMultiImage,
-  forceMultiSummary, cancelMultiSession, confirmMultiSession, handleMultiHttp,
+  forceMultiSummary, cancelMultiSession, confirmMultiSession, setMultiGroupType, handleMultiHttp,
 } from "./multi-expense.js";
+import { classifyTransferByCompanyAccounts } from "./account-direction.js";
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v3.2_ASSET_SETTINGS_PERSIST_20260805";
+const VERSION = "DEAL_LINE_BOT_v6.0_DASHBOARD_MEMORY_20260809";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -91,32 +96,489 @@ function safeEqual(a, b) {
  * ใช้ KV flag `setup:{tenant}:{sheetId}` กันอ่านชีทซ้ำทุกครั้งที่บันทึกรายการ
  * ผูกกับ sheetId เพื่อกัน flag ค้างข้ามชีท — ล้างเมื่อบันทึกตั้งค่าใหม่ / migrate / เชื่อมใหม่
  */
+function settingValue(s = {}, ...keys) {
+  for (const key of keys) {
+    const value = String(s[key] || "").trim();
+    if (value) return value;
+  }
+  return "";
+}
+
+function activePaymentChannels(s = {}) {
+  const raw = s.payment_channels;
+  let rows = [];
+  if (Array.isArray(raw)) rows = raw;
+  else if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      rows = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      rows = [];
+    }
+  }
+  return rows.filter((item) => {
+    const value = String(item?.active ?? "true").trim().toLowerCase();
+    return !["false", "0", "no", "off", "inactive", "ปิด"].includes(value);
+  });
+}
+
 async function checkSetup(env, key, sheet) {
-  // ผูก flag กับ sheetId ด้วย — ชีทเปลี่ยนเมื่อไหร่ flag เก่าใช้ไม่ได้ทันที
-  const flag = `setup:${key}:${sheet.sheetId}`;
+  const cacheKey = `companysetup:v3:${key}:${sheet.sheetId}`;
   try {
-    if ((await env.KV.get(flag)) === "1") return null;
+    const gmail = await getGmailStatus(env, key);
+    const cached = await env.KV.get(cacheKey, "json").catch(() => null);
+    if (cached?.documentsReady === true && cached?.financeReady === true) {
+      if (gmail.connected === true) return null;
+      const gmailMissing = gmail.reconnectRequired ? "เชื่อม Gmail ใหม่" : "Gmail เจ้าของธุรกิจ";
+      return {
+        warn: `ตั้งค่าบริษัทให้ครบก่อนใช้งาน — ยังขาด ${gmailMissing} กดปุ่มด้านล่างเพื่อดำเนินการต่อ`,
+        missing: [gmailMissing],
+      };
+    }
 
     const s = await readSettings(env, sheet.sheetId, sheet.token);
-    const missing = [];
-    if (!s.company_name)  missing.push("ชื่อบริษัท");
-    if (!s.tax_id)        missing.push("เลขผู้เสียภาษี");
-    if (!s.approver_name) missing.push("ชื่อผู้อนุมัติ");
+    const documentMissing = [];
+    if (!settingValue(s, "company_name")) documentMissing.push("ชื่อบริษัท");
+    if (!settingValue(s, "tax_id")) documentMissing.push("เลขผู้เสียภาษี");
+    if (!settingValue(s, "approver_name")) documentMissing.push("ชื่อผู้อนุมัติ");
+    if (!settingValue(s, "logo_url", "company_logo_url", "logoUrl")) documentMissing.push("โลโก้บริษัท");
+    if (!settingValue(s, "approver_sign_url", "approverSignUrl", "approver_signature_url", "signature_url")) documentMissing.push("ลายเซ็นผู้อนุมัติ");
 
-    if (!missing.length) {
-      await env.KV.put(flag, "1");
-      return null;
-    }
-    return { warn: `ยังขาด ${missing.join(" · ")} — ระบบยังสร้างใบเบิกและใบแทนไม่ได้ กดปุ่มส้มด้านล่างเพื่อกรอก (ทำครั้งเดียว)` };
+    const documentsReady = documentMissing.length === 0;
+    const financeReady = activePaymentChannels(s).length > 0;
+    const missing = [...documentMissing];
+    if (!financeReady) missing.push("ช่องทางการโอนเงิน");
+    if (!gmail.connected) missing.push(gmail.reconnectRequired ? "เชื่อม Gmail ใหม่" : "Gmail เจ้าของธุรกิจ");
+
+    await env.KV.put(cacheKey, JSON.stringify({ documentsReady, financeReady, checkedAt: Date.now() }));
+
+    if (!missing.length) return null;
+    return {
+      warn: `ตั้งค่าบริษัทให้ครบก่อนใช้งาน — ยังขาด ${missing.join(" · ")} กดปุ่มด้านล่างเพื่อดำเนินการต่อ`,
+      missing,
+    };
   } catch (e) {
-    // อ่านตั้งค่าไม่ได้ = ถือว่ายังไม่ครบ ให้ปุ่มขึ้น ดีกว่าเงียบแล้วลูกค้าไม่รู้ตัว
     console.warn("checkSetup", e.message);
-    return { warn: "อ่านข้อมูลบริษัทไม่ได้ — กดปุ่มด้านล่างเพื่อตรวจการตั้งค่า" };
+    return { warn: "ตรวจสถานะการตั้งค่าบริษัทไม่ได้ — เปิด Dashboard เพื่อตรวจ Gmail ข้อมูลบริษัท และช่องทางการโอนเงิน" };
   }
 }
 
 function documentSettingsReady(s = {}) {
-  return !!(s.company_name && s.tax_id && s.approver_name);
+  return !!(
+    settingValue(s, "company_name") &&
+    settingValue(s, "tax_id") &&
+    settingValue(s, "approver_name") &&
+    settingValue(s, "logo_url", "company_logo_url", "logoUrl") &&
+    settingValue(s, "approver_sign_url", "approverSignUrl", "approver_signature_url", "signature_url") &&
+    activePaymentChannels(s).length > 0
+  );
+}
+
+
+
+/* ══════════════ Multi-business account / workspace ══════════════ */
+const BUSINESS_ACCOUNT_SCHEMA = "BUSINESS_ACCOUNT_V1_20260807";
+function accountRootMapKey(tenant) { return `accountroot:v1:${tenant}`; }
+function businessAccountKey(rootTenant) { return `businessaccount:v1:${rootTenant}`; }
+function businessMetaKey(tenant) { return `businessmeta:v1:${tenant}`; }
+function businessInviteKey(code) { return `businessinvite:v1:${String(code || "").toUpperCase()}`; }
+
+async function getAccountRoot(env, tenant) {
+  const key = String(tenant || "").trim();
+  if (!key) return "";
+  return (await env.KV.get(accountRootMapKey(key))) || key;
+}
+
+async function ensureBusinessAccount(env, tenant) {
+  const rootTenant = await getAccountRoot(env, tenant);
+  let account = await env.KV.get(businessAccountKey(rootTenant), "json").catch(() => null);
+  if (!account || typeof account !== "object") {
+    account = { schema: BUSINESS_ACCOUNT_SCHEMA, rootTenant, businesses: [rootTenant], createdAt: new Date().toISOString() };
+  }
+  const list = Array.from(new Set([rootTenant, ...(Array.isArray(account.businesses) ? account.businesses : [])].filter(Boolean)));
+  account = { ...account, schema: BUSINESS_ACCOUNT_SCHEMA, rootTenant, businesses: list, updatedAt: new Date().toISOString() };
+  await Promise.all([
+    env.KV.put(businessAccountKey(rootTenant), JSON.stringify(account)),
+    ...list.map((businessTenant) => env.KV.put(accountRootMapKey(businessTenant), rootTenant)),
+  ]);
+  return account;
+}
+
+async function readBusinessMeta(env, tenant) {
+  return (await env.KV.get(businessMetaKey(tenant), "json").catch(() => null)) || {};
+}
+
+async function saveBusinessMeta(env, tenant, patch = {}) {
+  const current = await readBusinessMeta(env, tenant);
+  const next = { ...current, ...patch, tenant, updatedAt: new Date().toISOString() };
+  await env.KV.put(businessMetaKey(tenant), JSON.stringify(next));
+  return next;
+}
+
+function randomBusinessInviteCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(7));
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}
+
+async function listBusinessWorkspaces(env, currentTenant) {
+  const account = await ensureBusinessAccount(env, currentTenant);
+  const rootTenant = account.rootTenant;
+  const rootSheetId = (await env.KV.get(`tenant:${rootTenant}`)) || env.DEFAULT_SHEET_ID;
+  const rootToken = rootSheetId ? await getUserToken(env, rootTenant) : null;
+  const subscription = rootSheetId
+    ? await getSubscriptionSnapshot(env, rootTenant, rootSheetId, rootToken, { refreshUsage: false })
+    : null;
+  const businessLimit = Number(subscription?.businessLimit || 1);
+  const betaActive = subscription?.betaActive === true;
+  const businesses = [];
+  for (let i = 0; i < account.businesses.length; i++) {
+    const tenant = account.businesses[i];
+    const sheetId = await env.KV.get(`tenant:${tenant}`);
+    if (!sheetId) continue;
+    const token = await getUserToken(env, tenant);
+    const settings = token ? await readSettings(env, sheetId, token).catch(() => ({})) : {};
+    const meta = await readBusinessMeta(env, tenant);
+    const name = settingValue(settings, "company_name") || String(meta.name || "").trim() || (i === 0 ? "ธุรกิจหลัก" : `ธุรกิจ ${i + 1}`);
+    businesses.push({
+      tenant,
+      name,
+      isRoot: tenant === rootTenant,
+      isCurrent: tenant === currentTenant,
+      locked: !betaActive && i >= businessLimit,
+      sheetId,
+      dashboardUrl: await dashUrl(env, tenant),
+      createdAt: meta.createdAt || "",
+    });
+  }
+  return {
+    ok: true,
+    rootTenant,
+    currentTenant,
+    businesses,
+    businessCount: businesses.length,
+    businessLimit,
+    canAddBusiness: businesses.length < businessLimit,
+    effectivePlan: subscription?.effectivePlan || "free",
+    planName: subscription?.planName || "ฟรี",
+    betaActive,
+  };
+}
+
+async function createBusinessInvite(env, currentTenant) {
+  const info = await listBusinessWorkspaces(env, currentTenant);
+  if (!info.canAddBusiness) {
+    return {
+      ok: false,
+      reason: "business_limit",
+      message: info.businessLimit <= 1 ? "เพิ่มธุรกิจได้ตั้งแต่แพ็กเกจ Pro" : `แพ็กเกจนี้รองรับสูงสุด ${info.businessLimit} ธุรกิจ`,
+      ...info,
+    };
+  }
+  const code = randomBusinessInviteCode();
+  const now = Date.now();
+  const expiresAt = new Date(now + 30 * 60 * 1000).toISOString();
+  await env.KV.put(businessInviteKey(code), JSON.stringify({
+    schema: BUSINESS_ACCOUNT_SCHEMA,
+    code,
+    rootTenant: info.rootTenant,
+    createdByTenant: currentTenant,
+    createdAt: new Date(now).toISOString(),
+    expiresAt,
+  }), { expirationTtl: 30 * 60 });
+  return {
+    ok: true,
+    code,
+    expiresAt,
+    businessCount: info.businessCount,
+    businessLimit: info.businessLimit,
+    instruction: `เพิ่ม LINE OA เข้ากลุ่มของธุรกิจใหม่ แล้วพิมพ์ “เชื่อมธุรกิจ ${code}” ในกลุ่มนั้น`,
+  };
+}
+
+async function linkBusinessFromInvite(env, event, currentTenant, codeRaw) {
+  const code = String(codeRaw || "").trim().toUpperCase();
+  if (!event.source?.groupId) return { ok: false, reason: "group_required", message: "การเพิ่มธุรกิจต้องทำในกลุ่ม LINE ของธุรกิจใหม่" };
+  const invite = await env.KV.get(businessInviteKey(code), "json").catch(() => null);
+  if (!invite?.rootTenant) return { ok: false, reason: "invalid_invite", message: "รหัสเพิ่มธุรกิจไม่ถูกต้องหรือหมดอายุแล้ว กรุณาสร้างรหัสใหม่จาก Dashboard" };
+  if (Date.parse(invite.expiresAt || "") <= Date.now()) {
+    await env.KV.delete(businessInviteKey(code));
+    return { ok: false, reason: "expired_invite", message: "รหัสเพิ่มธุรกิจหมดอายุแล้ว กรุณาสร้างรหัสใหม่จาก Dashboard" };
+  }
+
+  const rootTenant = await getAccountRoot(env, invite.rootTenant);
+  const existingRoot = await env.KV.get(accountRootMapKey(currentTenant));
+  const existingSheet = await env.KV.get(`tenant:${currentTenant}`);
+  if ((existingRoot && existingRoot !== rootTenant) || (existingSheet && currentTenant !== rootTenant)) {
+    return { ok: false, reason: "already_linked", message: "กลุ่ม LINE นี้มีธุรกิจ/ข้อมูลเดิมอยู่แล้ว จึงไม่สามารถนำไปผูกทับกับบัญชีอื่นได้" };
+  }
+
+  const rootSheetId = (await env.KV.get(`tenant:${rootTenant}`)) || env.DEFAULT_SHEET_ID;
+  const rootToken = rootSheetId ? await getUserToken(env, rootTenant) : null;
+  if (!rootToken) return { ok: false, reason: "google_required", message: "บัญชีหลักยังไม่มีสิทธิ์ Google Drive กรุณาเชื่อม Google ที่ธุรกิจหลักก่อน" };
+  const subscription = await getSubscriptionSnapshot(env, rootTenant, rootSheetId, rootToken, { refreshUsage: false });
+  const account = await ensureBusinessAccount(env, rootTenant);
+  const limit = Number(subscription.businessLimit || 1);
+  if (!account.businesses.includes(currentTenant) && account.businesses.length >= limit) {
+    return { ok: false, reason: "business_limit", message: limit <= 1 ? "เพิ่มธุรกิจได้ตั้งแต่แพ็กเกจ Pro" : `สิทธิ์ปัจจุบันเพิ่มได้สูงสุด ${limit} ธุรกิจ` };
+  }
+
+  const rootRefresh = await env.KV.get(`gtoken:${rootTenant}`);
+  if (!rootRefresh) return { ok: false, reason: "google_required", message: "ไม่พบสิทธิ์ Google ของบัญชีหลัก กรุณาเชื่อม Google ใหม่" };
+  await env.KV.put(`gtoken:${currentTenant}`, rootRefresh);
+
+  let sheetId = await env.KV.get(`tenant:${currentTenant}`);
+  if (!sheetId) {
+    const groupName = (await tenantTitle(env, event.source)) || `ธุรกิจ ${account.businesses.length + 1}`;
+    const token = await getUserToken(env, currentTenant);
+    sheetId = (await createUserSheet(env, token, `รับจ่ายแบบไม่จำกัด · ${groupName}`)).sheetId;
+    await env.KV.put(`tenant:${currentTenant}`, sheetId);
+    await saveBusinessMeta(env, currentTenant, { name: groupName, createdAt: new Date().toISOString(), linkedFrom: rootTenant });
+  }
+
+  const nextBusinesses = Array.from(new Set([...account.businesses, currentTenant]));
+  await Promise.all([
+    env.KV.put(accountRootMapKey(currentTenant), rootTenant),
+    env.KV.put(businessAccountKey(rootTenant), JSON.stringify({ ...account, businesses: nextBusinesses, updatedAt: new Date().toISOString() })),
+    env.KV.delete(businessInviteKey(code)),
+  ]);
+  await getDashToken(env, currentTenant);
+  return {
+    ok: true,
+    rootTenant,
+    tenant: currentTenant,
+    businessCount: nextBusinesses.length,
+    businessLimit: limit,
+    dashboardUrl: await dashUrl(env, currentTenant),
+  };
+}
+
+/* ══════════════ Subscription / Beta access ══════════════ */
+const SUBSCRIPTION_SCHEMA = "SUBSCRIPTION_V1_20260807";
+const SUBSCRIPTION_PLANS = Object.freeze({
+  free:     { id: "free",     name: "ฟรี",      monthly: 0,   annual: 0,    documentLimit: 10,   businessLimit: 1 },
+  starter:  { id: "starter",  name: "Starter",  monthly: 199, annual: 1990, documentLimit: 50,   businessLimit: 1 },
+  pro:      { id: "pro",      name: "Pro",      monthly: 399, annual: 3990, documentLimit: 300,  businessLimit: 3 },
+  business: { id: "business", name: "Business", monthly: 990, annual: 9900, documentLimit: 1500, businessLimit: 10 },
+});
+
+function subscriptionMonthKey(value = new Date()) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(d.getTime())) return "";
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Bangkok", year: "numeric", month: "2-digit",
+    }).formatToParts(d);
+    const year = parts.find((p) => p.type === "year")?.value || "";
+    const month = parts.find((p) => p.type === "month")?.value || "";
+    return year && month ? `${year}-${month}` : "";
+  } catch {
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  }
+}
+
+function subscriptionRecordKey(key) { return `subscription:v1:${key}`; }
+function subscriptionUsageKey(key, monthKey = subscriptionMonthKey()) { return `subusage:v1:${key}:${monthKey}`; }
+function subscriptionEnforcementEnabled(env) {
+  return !["0", "false", "off", "no"].includes(String(env.SUBSCRIPTION_ENFORCEMENT ?? "1").trim().toLowerCase());
+}
+
+function configuredBetaEnd(env, startedAt = Date.now()) {
+  const fixed = String(env.BETA_FREE_UNTIL || "").trim();
+  if (fixed) {
+    const parsed = Date.parse(fixed);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  const days = Math.max(1, Number(env.BETA_TRIAL_DAYS || 60));
+  return new Date(Number(startedAt) + days * 86400000).toISOString();
+}
+
+async function getSubscriptionRecord(env, key) {
+  key = await getAccountRoot(env, key);
+  await ensureBusinessAccount(env, key);
+  const storageKey = subscriptionRecordKey(key);
+  let rec = await env.KV.get(storageKey, "json").catch(() => null);
+  const now = Date.now();
+  if (!rec || typeof rec !== "object") {
+    const startedAt = new Date(now).toISOString();
+    rec = {
+      schema: SUBSCRIPTION_SCHEMA,
+      status: "beta",
+      plan: "pro",
+      cycle: "monthly",
+      createdAt: startedAt,
+      trialStartedAt: startedAt,
+      trialEndsAt: configuredBetaEnd(env, now),
+      requestedPlan: "",
+      requestedCycle: "",
+      upgradeRequestedAt: "",
+    };
+    // ถ้าเปิดระบบหลังวัน Beta กลางสิ้นสุดแล้ว ให้เริ่ม Free โดยไม่แจก Beta รอบใหม่
+    if (Date.parse(rec.trialEndsAt || "") <= now) {
+      rec.status = "free";
+      rec.plan = "free";
+    }
+    await env.KV.put(storageKey, JSON.stringify(rec));
+    return rec;
+  }
+
+  // Beta จบแล้วและยังไม่ได้เปิดแพ็กเสียเงิน → กลับ Free อัตโนมัติ
+  if (rec.status === "beta" && Number.isFinite(Date.parse(rec.trialEndsAt || "")) && Date.parse(rec.trialEndsAt) <= now) {
+    rec = { ...rec, status: "free", plan: "free", betaEndedAt: new Date(now).toISOString() };
+    await env.KV.put(storageKey, JSON.stringify(rec));
+  }
+  return rec;
+}
+
+async function saveSubscriptionRecord(env, key, patch = {}) {
+  key = await getAccountRoot(env, key);
+  const current = await getSubscriptionRecord(env, key);
+  const next = { ...current, ...patch, schema: SUBSCRIPTION_SCHEMA, updatedAt: new Date().toISOString() };
+  await env.KV.put(subscriptionRecordKey(key), JSON.stringify(next));
+  return next;
+}
+
+function countCurrentMonthExpenses(rows = [], monthKey = subscriptionMonthKey()) {
+  if (!monthKey) return 0;
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    const stamp = row?.createdAt || row?.recordedAt || row?.submittedAt || row?.dateISO || row?.date || "";
+    return subscriptionMonthKey(stamp) === monthKey;
+  }).length;
+}
+
+async function getSubscriptionUsage(env, key, sheetId, token, { refresh = false } = {}) {
+  const rootTenant = await getAccountRoot(env, key);
+  const monthKey = subscriptionMonthKey();
+  const cacheKey = subscriptionUsageKey(rootTenant, monthKey);
+  if (!refresh) {
+    const cached = await env.KV.get(cacheKey);
+    if (cached !== null && cached !== undefined && cached !== "") {
+      const value = Number(cached);
+      if (Number.isFinite(value) && value >= 0) return { monthKey, documents: value };
+    }
+  }
+  let documents = 0;
+  try {
+    const account = await ensureBusinessAccount(env, rootTenant);
+    for (const businessTenant of account.businesses) {
+      const businessSheetId = (await env.KV.get(`tenant:${businessTenant}`)) || (businessTenant === key ? sheetId : "");
+      if (!businessSheetId) continue;
+      const businessToken = businessTenant === key && token ? token : await getUserToken(env, businessTenant);
+      const rows = await readExpenses(env, businessSheetId, businessToken);
+      documents += countCurrentMonthExpenses(rows, monthKey);
+    }
+  } catch (e) {
+    console.warn("subscription usage refresh", e?.message || e);
+    const cached = Number(await env.KV.get(cacheKey));
+    documents = Number.isFinite(cached) && cached >= 0 ? cached : 0;
+  }
+  await env.KV.put(cacheKey, String(documents), { expirationTtl: 60 * 60 * 24 * 120 });
+  return { monthKey, documents };
+}
+async function syncSubscriptionUsageAfterSavedExpense(env, key, sheetId, token) {
+  const rootTenant = await getAccountRoot(env, key);
+  const monthKey = subscriptionMonthKey();
+  const cacheKey = subscriptionUsageKey(rootTenant, monthKey);
+  const cachedRaw = await env.KV.get(cacheKey);
+  if (cachedRaw !== null && cachedRaw !== undefined && cachedRaw !== "") {
+    const cached = Number(cachedRaw);
+    if (Number.isFinite(cached) && cached >= 0) {
+      const next = cached + 1;
+      await env.KV.put(cacheKey, String(next), { expirationTtl: 60 * 60 * 24 * 120 });
+      return next;
+    }
+  }
+  // ยังไม่มี counter: อ่าน Sheet หลังบันทึกแล้วเพื่อ seed จำนวนจริง (ไม่ + ซ้ำ)
+  return (await getSubscriptionUsage(env, key, sheetId, token, { refresh: true })).documents;
+}
+
+async function getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage = false } = {}) {
+  const rec = await getSubscriptionRecord(env, key);
+  const now = Date.now();
+  const trialEndMs = Date.parse(rec.trialEndsAt || "");
+  const betaActive = rec.status === "beta" && Number.isFinite(trialEndMs) && trialEndMs > now;
+  const requestedPlan = SUBSCRIPTION_PLANS[rec.requestedPlan] ? rec.requestedPlan : "";
+  const requestedCycle = rec.requestedCycle === "annual" ? "annual" : rec.requestedCycle === "monthly" ? "monthly" : "";
+  const effectivePlan = betaActive ? "pro" : (rec.status === "active" && SUBSCRIPTION_PLANS[rec.plan] ? rec.plan : "free");
+  const plan = SUBSCRIPTION_PLANS[effectivePlan] || SUBSCRIPTION_PLANS.free;
+  const usage = await getSubscriptionUsage(env, key, sheetId, token, { refresh: refreshUsage });
+  const limit = betaActive ? null : plan.documentLimit;
+  const percent = limit ? Math.min(999, Math.round((usage.documents / limit) * 100)) : 0;
+  let threshold = "ok";
+  if (limit && percent >= 100) threshold = "limit";
+  else if (limit && percent >= 90) threshold = "warning90";
+  else if (limit && percent >= 80) threshold = "warning80";
+  const enforcement = subscriptionEnforcementEnabled(env);
+  const account = await ensureBusinessAccount(env, key);
+  const businessLimit = Number(plan.businessLimit || 1);
+  const businessCount = account.businesses.length;
+  const businessIndex = Math.max(0, account.businesses.indexOf(key));
+  const businessAccessAllowed = betaActive || businessIndex < businessLimit;
+  const documentBlocked = Boolean(enforcement && !betaActive && limit && usage.documents >= limit);
+  const businessBlocked = Boolean(enforcement && !businessAccessAllowed);
+  return {
+    ok: true,
+    schema: SUBSCRIPTION_SCHEMA,
+    status: betaActive ? "beta" : (rec.status === "active" ? "active" : "free"),
+    betaActive,
+    trialStartedAt: rec.trialStartedAt || rec.createdAt || "",
+    trialEndsAt: rec.trialEndsAt || "",
+    daysRemaining: betaActive ? Math.max(1, Math.ceil((trialEndMs - now) / 86400000)) : 0,
+    plan: betaActive ? "beta" : effectivePlan,
+    effectivePlan,
+    planName: betaActive ? "Beta ฟรี · สิทธิ์ Pro" : plan.name,
+    cycle: rec.cycle === "annual" ? "annual" : "monthly",
+    priceMonthly: plan.monthly,
+    priceAnnual: plan.annual,
+    documentLimit: limit,
+    businessLimit,
+    businessCount,
+    canAddBusiness: businessCount < businessLimit,
+    accountRootTenant: account.rootTenant,
+    businessIndex,
+    businessAccessAllowed,
+    businessBlocked,
+    usage: { month: usage.monthKey, documents: usage.documents, percent, threshold },
+    blocked: Boolean(documentBlocked || businessBlocked),
+    blockedReason: businessBlocked ? "business_limit" : documentBlocked ? "document_limit" : "",
+    enforcement,
+    requestedPlan,
+    requestedPlanName: requestedPlan ? SUBSCRIPTION_PLANS[requestedPlan].name : "",
+    requestedCycle,
+    upgradeRequestedAt: rec.upgradeRequestedAt || "",
+    catalog: SUBSCRIPTION_PLANS,
+  };
+}
+
+async function requestSubscriptionUpgrade(env, key, sheetId, token, body = {}) {
+  const plan = String(body.plan || "").trim().toLowerCase();
+  const cycle = body.cycle === "annual" ? "annual" : "monthly";
+  if (!SUBSCRIPTION_PLANS[plan]) return { ok: false, reason: "invalid_plan" };
+  await saveSubscriptionRecord(env, key, {
+    requestedPlan: plan,
+    requestedCycle: cycle,
+    upgradeRequestedAt: new Date().toISOString(),
+  });
+  return await getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage: true });
+}
+
+async function subscriptionQuotaMessage(env, key, snapshot) {
+  const base = await dashUrl(env, key);
+  const upgradeUrl = `${base}${base.includes("?") ? "&" : "?"}page=billing`;
+  if (snapshot?.blockedReason === "business_limit") {
+    return textMsg(`ธุรกิจนี้อยู่นอกสิทธิ์แพ็กเกจปัจจุบัน
+แพ็กเกจ Pro รองรับสูงสุด 3 ธุรกิจ
+ข้อมูลเดิมยังเปิดดูและจัดการได้ แต่การรับเอกสารใหม่ของธุรกิจนี้ถูกพักไว้
+
+อัปเกรดแพ็กเกจ:
+${upgradeUrl}`);
+  }
+  const used = Number(snapshot?.usage?.documents || 0);
+  const limit = Number(snapshot?.documentLimit || 0);
+  return textMsg(`โควตาเอกสารเดือนนี้ครบแล้ว (${used}/${limit})
+รายการเดิมยังดู แก้ และดาวน์โหลดได้ตามปกติ
+อัปเกรดแพ็กเกจเพื่อรับเอกสารใหม่ต่อ:
+${upgradeUrl}`);
 }
 
 export default {
@@ -184,6 +646,32 @@ export default {
       }
     }
 
+    if (url.pathname === "/admin/subscription" && request.method === "POST") {
+      if (!adminOk(env, url)) return json({ error: "unauthorized" }, 401);
+      const key = url.searchParams.get("tenant");
+      if (!key) return json({ error: "missing tenant" }, 400);
+      const sheetId = (await env.KV.get(`tenant:${key}`)) || env.DEFAULT_SHEET_ID;
+      if (!sheetId) return json({ error: "no sheet for tenant" }, 404);
+      try {
+        const token = await getUserToken(env, key);
+        const b = await request.json().catch(() => ({}));
+        const plan = String(b.plan || "free").trim().toLowerCase();
+        if (!SUBSCRIPTION_PLANS[plan]) return json({ error: "invalid plan" }, 400);
+        const status = b.status === "active" ? "active" : b.status === "beta" ? "beta" : "free";
+        const patch = {
+          status,
+          plan: status === "active" ? plan : status === "free" ? "free" : (plan === "free" ? "pro" : plan),
+          cycle: b.cycle === "annual" ? "annual" : "monthly",
+          activatedAt: status === "active" ? new Date().toISOString() : "",
+        };
+        if (b.clearRequest === true) Object.assign(patch, { requestedPlan: "", requestedCycle: "", upgradeRequestedAt: "" });
+        await saveSubscriptionRecord(env, key, patch);
+        return json(await getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage: true }));
+      } catch (e) {
+        return json({ error: String(e) }, 500);
+      }
+    }
+
     if (url.pathname === "/admin/migrate") {
       if (!adminOk(env, url)) return json({ error: "unauthorized" }, 401);
       const key = url.searchParams.get("tenant");
@@ -198,7 +686,8 @@ export default {
         const emailInbox = await ensureEmailInboxTab(env, sheetId, token);
         const batchTab = await ensureBatchTab(env, sheetId, token);
         const reconciliationTab = await ensureReconciliationTab(env, sheetId, token);
-        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox, batchTab, reconciliationTab });
+        const incomeTabs = await ensureIncomeTabs(env, sheetId, token);
+        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox, batchTab, reconciliationTab, incomeTabs });
       } catch (e) {
         console.error("migrate", e);
         return json({ error: String(e) }, 500);
@@ -225,8 +714,106 @@ export default {
       try {
         const token = await getUserToken(env, key);
 
+        if (url.pathname === "/api/subscription") {
+          return cors(json(await getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage: true })));
+        }
+
+        if (url.pathname === "/api/subscription/request-upgrade" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await requestSubscriptionUpgrade(env, key, sheetId, token, b);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+
+        if (url.pathname === "/api/businesses") {
+          return cors(json(await listBusinessWorkspaces(env, key)));
+        }
+
+        if (url.pathname === "/api/businesses/invite" && request.method === "POST") {
+          const out = await createBusinessInvite(env, key);
+          return cors(json(out, out.ok ? 200 : 402));
+        }
+
         if (url.pathname === "/api/expenses") {
-          return cors(json(await readExpenses(env, sheetId, token)));
+          const rows = await readExpenses(env, sheetId, token);
+          // Dashboard projection: keep the accounting data intact in Sheets, but do not
+          // ship heavy/duplicated fields (attachments array + batch internals) to the
+          // browser when the dashboard only needs the expense/document view.
+          if (url.searchParams.get("view") === "dashboard") {
+            const dashboardFields = [
+              "_row","dateText","date","dateISO","amount","vendor","category","note",
+              "sender","imageUrl","img","status","createdAt","id","paid","needSlip",
+              "type","subCategory","docType","payerName","payerId","vat","whtRate",
+              "slipNo","transferor","claimPdfUrl","receiptPdfUrl","duplicateStatus","duplicateOf"
+            ];
+            return cors(json(rows.map((row) => {
+              const out = {};
+              for (const key of dashboardFields) out[key] = row[key] ?? "";
+              return out;
+            })));
+          }
+          return cors(json(rows));
+        }
+
+        /* รายรับ SME ไทย — ลูกหนี้, VAT, WHT และรับชำระบางส่วน */
+        if (url.pathname === "/api/income") {
+          const includeReconciliation = url.searchParams.get("reconciliation") !== "0";
+          return cors(json(await getIncomeDashboard(env, sheetId, token, { includeReconciliation })));
+        }
+
+        if (url.pathname === "/api/income-create" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await createIncome(env, sheetId, b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-update" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await updateIncome(env, sheetId, b.id || b.incomeId, b.patch || b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-payment" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await addIncomePayment(env, sheetId, b.id || b.incomeId, b.payment || b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-payment-update" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await updateIncomePayment(env, sheetId, b.paymentId || b.id, b.patch || b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-reconciliation-import" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await importIncomeReconciliationRows(env, sheetId, b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-reconciliation-confirm" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await confirmIncomeReconciliationMatches(env, sheetId, b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-reconciliation-ignore" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await ignoreIncomeReconciliationRow(env, sheetId, b.reconciliationId || b.id, b.note || "", token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-reconciliation-unlink" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await unlinkIncomeReconciliation(env, sheetId, b.reconciliationId || b.id, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-upload" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          if (!b.base64) return cors(json({ ok:false, error:"no_file" }, 400));
+          const link = await uploadTenantImage(env, key, b.base64, b.mediaType || "image/jpeg", b.name || `income-${Date.now()}`, token, { category:"originals" });
+          return cors(json({ ok:true, url:link }));
         }
 
         // ลิงก์ทางลัดจาก Dashboard ไปยังพื้นที่เอกสารของบริษัทจริง
@@ -298,6 +885,7 @@ export default {
             });
             await env.KV.delete(`setup:${key}`);              // ของเก่า
             await env.KV.delete(`setup:${key}:${sheetId}`);   // ให้เช็คใหม่รอบหน้า
+            await env.KV.delete(`companysetup:v3:${key}:${sheetId}`);
             return cors(json(saved));
           }
           return cors(json(await readSettings(env, sheetId, token)));
@@ -355,8 +943,11 @@ export default {
         }
 
         if (url.pathname === "/api/email-approve" && request.method === "POST") {
+          const quota = await getSubscriptionSnapshot(env, key, sheetId, token);
+          if (quota.blocked) return cors(json({ ok: false, reason: "subscription_limit", subscription: quota }, 402));
           const b = await request.json();
           const out = await approveEmailDocument(env, sheetId, b.id, token, { force: b.force === true });
+          if (out.ok) await syncSubscriptionUsageAfterSavedExpense(env, key, sheetId, token).catch((e) => console.warn("subscription usage email", e?.message || e));
           return cors(json(out, out.ok ? 200 : (out.reason === "duplicate" ? 409 : 400)));
         }
 
@@ -393,6 +984,14 @@ export default {
         if (url.pathname === "/api/batch-workflow" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
           const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token, { tenant: key });
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        // รายการย่อยที่ยังไม่ได้รวมใบเบิก: ตรวจผ่าน/ตีกลับได้ทันที
+        // ถ้ากดผ่าน ระบบจะสร้างใบเบิก 1 รายการเบื้องหลัง แล้วเข้าสู่รอโอน
+        if (url.pathname === "/api/expense-workflow" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await updateExpenseReviewWorkflow(env, key, sheetId, b.expenseId, b.action, b.payload || {}, token);
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -444,11 +1043,19 @@ export default {
           if (!b.force && rec.claimPdfUrl && rec.receiptPdfUrl) {
             return cors(json({ ok: true, skipped: true, record: rec }));
           }
+          const setup = await checkSetup(env, key, { sheetId, token });
+          if (setup) {
+            return cors(json({
+              error: "settings_incomplete",
+              hint: setup.warn,
+              missing: setup.missing || [],
+            }, 400));
+          }
           const settings = await readSettings(env, sheetId, token);
           if (!documentSettingsReady(settings)) {
             return cors(json({
               error: "settings_incomplete",
-              hint: "กรอกชื่อบริษัท เลขผู้เสียภาษี และชื่อผู้อนุมัติก่อนสร้างเอกสาร",
+              hint: "ตั้งค่าข้อมูลบริษัท โลโก้ ลายเซ็น และช่องทางการโอนเงินให้ครบก่อนสร้างเอกสาร",
             }, 400));
           }
           const member = findMemberProfile(settings, {
@@ -516,12 +1123,17 @@ export default {
           const settings = Object.keys(settingPatch).length
             ? await writeSettings(env, sheetId, settingPatch, token)
             : await readSettings(env, sheetId, token);
+          const savedField = kind === "logo" ? "logo_url" : "approver_sign_url";
+          if (Object.keys(settingPatch).length && !String(settings[savedField] || "").trim()) {
+            return cors(json({ error: "asset_setting_not_persisted", field: savedField }, 500));
+          }
 
           return cors(json({
             ok: true,
             kind,
-            url: publicUrl,
+            url: settings[savedField] || publicUrl,
             saved: Object.keys(settingPatch).length > 0,
+            persisted: true,
             settings,
           }));
         }
@@ -775,9 +1387,9 @@ async function renderSaved(env, key, sheet, rec, justAppended = null) {
     dashUrl(env, key),
     dashUrl(env, key, "/receipt"),
   ]);
-  const setupUrl = setup && documentsPage && rec.id
-    ? `${documentsPage}&id=${encodeURIComponent(rec.id)}`
-    : (setup ? documentsPage : null);
+  const setupUrl = setup && dash
+    ? `${dash}${dash.includes("?") ? "&" : "?"}setup=1`
+    : null;
 
   return savedCard(rec, rec.imageUrl || null, dash, {
     id: rec.id,
@@ -800,7 +1412,7 @@ function connectMsg(env, key) {
     contents: { type: "bubble",
       body: { type: "box", layout: "vertical", spacing: "sm", contents: [
         { type: "text", text: "เชื่อม Google ก่อนใช้งาน 🔗", weight: "bold", size: "md", color: "#1F6E56" },
-        { type: "text", text: "กดปุ่มด้านล่างเพื่อเชื่อม Google Drive ของคุณ — บิลและชีทจะเก็บในบัญชีของคุณเอง", size: "sm", color: "#8c8c8c", wrap: true },
+        { type: "text", text: "ใช้บัญชี Google เดิมได้เลย — ระบบจะค้นหาธุรกิจเดิมและเชื่อม Sheet/Drive ให้กลุ่มนี้อัตโนมัติ", size: "sm", color: "#8c8c8c", wrap: true },
       ] },
       footer: { type: "box", layout: "vertical", contents: [
         { type: "button", style: "primary", color: "#1F6E56", height: "sm",
@@ -813,17 +1425,65 @@ function connectMsg(env, key) {
 async function dashboardMsg(env, key) {
   const url = await dashUrl(env, key);
   return {
-    type: "flex", altText: "เปิดแดชบอร์ดสรุปบัญชี",
-    contents: { type: "bubble",
-      body: { type: "box", layout: "vertical", spacing: "sm", contents: [
-        { type: "text", text: "\u{1F4CA} สรุปบัญชีของคุณ", weight: "bold", size: "md", color: "#1F6E56" },
-        { type: "text", text: "ดูยอดใช้จ่าย ออกใบแทน จับคู่หลักฐาน ตั้งค่าบริษัท — ครบในที่เดียว", size: "sm", color: "#8c8c8c", wrap: true },
-        { type: "text", text: "ลิงก์นี้เป็นความลับ — ใครมีลิงก์ก็เปิดดูได้ ถ้าหลุดให้พิมพ์ \"รีเซ็ตลิงก์\"", size: "xxs", color: "#B0847A", wrap: true, margin: "md" },
-      ] },
-      footer: { type: "box", layout: "vertical", contents: [
-        { type: "button", style: "primary", color: "#1F6E56", height: "sm",
-          action: { type: "uri", label: "เปิดแดชบอร์ด", uri: url } },
-      ] },
+    type: "flex",
+    altText: "เปิดแดชบอร์ดบัญชี",
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        paddingAll: "20px",
+        spacing: "md",
+        contents: [
+          {
+            type: "box",
+            layout: "baseline",
+            spacing: "8px",
+            contents: [
+              { type: "text", text: "📊", size: "lg", flex: 0 },
+              { type: "text", text: "สรุปบัญชีของคุณ", size: "xl", weight: "bold", color: "#111111", wrap: true, flex: 1 },
+            ],
+          },
+          {
+            type: "text",
+            text: "ดูยอด ใช้จ่าย ออกใบแทน จับคู่หลักฐาน ตั้งค่าบริษัท — ครบในที่เดียว",
+            size: "md",
+            color: "#7A7A7A",
+            wrap: true,
+            margin: "xs",
+          },
+          {
+            type: "text",
+            text: 'ลิงก์นี้เป็นความลับ — ใครมีลิงก์ก็เปิดดูได้ ถ้าหลุดให้พิมพ์ “รีเซ็ตลิงก์”',
+            size: "sm",
+            color: "#B07A63",
+            wrap: true,
+            margin: "sm",
+          },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        paddingTop: "0px",
+        paddingBottom: "18px",
+        paddingStart: "20px",
+        paddingEnd: "20px",
+        contents: [
+          {
+            type: "button",
+            style: "primary",
+            color: "#111111",
+            height: "md",
+            action: { type: "uri", label: "เปิดแดชบอร์ด", uri: url },
+          },
+        ],
+      },
+      styles: {
+        body: { backgroundColor: "#FFFFFF" },
+        footer: { backgroundColor: "#FFFFFF", separator: false },
+      },
     },
   };
 }
@@ -882,8 +1542,16 @@ async function handleEvent(event, env) {
   console.log(`[event] type=${event.type} tenant=${key} user=${event.source?.userId || "-"}`);
 
   if (event.type === "join" || event.type === "follow") {
+    const existingSheetId = await env.KV.get(`tenant:${key}`);
+    const existingToken = await env.KV.get(`gtoken:${key}`);
+    if (existingSheetId && existingToken) {
+      return reply(env, event.replyToken, [
+        textMsg("พบธุรกิจที่เคยเชื่อมไว้แล้วครับ ✅\nกลุ่มนี้ใช้ข้อมูลบริษัท Sheet และ Drive เดิมได้เลย ไม่ต้องตั้งค่าใหม่"),
+        await dashboardMsg(env, key),
+      ]);
+    }
     return reply(env, event.replyToken, [
-      textMsg("สวัสดีครับ ผมน้องช่วยบัญชีของ DEAL 📒\nเริ่มใช้งานง่าย ๆ แค่เชื่อม Google ครั้งเดียว แล้วส่งรูปบิลได้เลย"),
+      textMsg("สวัสดีครับ ผมน้องช่วยบัญชีของ DEAL 📒\nกดเชื่อม Google ด้วยบัญชีเดิม ระบบจะค้นหาธุรกิจที่เคยสร้างไว้และผูกกลุ่มนี้ให้อัตโนมัติ"),
       connectMsg(env, key),
     ]);
   }
@@ -900,15 +1568,20 @@ async function handleImage(event, env, key, mode = "reply") {
   const uid = event.source.userId;
 
   // ทำงานที่ไม่ขึ้นต่อกันพร้อมกัน เพื่อลดเวลาจากเดิมที่รอทีละขั้น
-  const [sheet, content, sender, attachRaw] = await Promise.all([
+  const [sheet, content, sender, attachRaw, documentMode] = await Promise.all([
     resolveSheet(env, event.source),
     getMessageContent(env, event.message.id),
     getDisplayName(env, event.source),
     uid ? env.KV.get(`attach:${uid}`) : Promise.resolve(null),
+    uid ? env.KV.get(`docmode:${key}:${uid}`) : Promise.resolve(null),
   ]);
 
   if (!sheet) return respond(connectMsg(env, key));
   console.log(`[image] tenant=${key} sheetId=${sheet.sheetId} oauth=${!!sheet.token}`);
+  const settingsPromise = readSettings(env, sheet.sheetId, sheet.token).catch((e) => {
+    console.warn(`[image] settings unavailable tenant=${key}:`, e?.message || e);
+    return {};
+  });
 
   const { base64, mediaType } = content;
   const drivePromise = uploadTenantImage(
@@ -929,6 +1602,10 @@ async function handleImage(event, env, key, mode = "reply") {
     if (!out.ok) return respond(textMsg(MSG_STALE));
     return respond(await renderSaved(env, key, sheet, out.record));
   }
+
+  // ช่วง Beta รับเอกสารไม่จำกัด; หลัง Beta บังคับโควตาตามแพ็กเกจก่อนเรียก AI
+  const subscription = await getSubscriptionSnapshot(env, key, sheet.sheetId, sheet.token);
+  if (subscription.blocked) return respond(await subscriptionQuotaMessage(env, key, subscription));
 
   // อัป Drive และสร้างลายนิ้วมือทำพร้อมกัน ส่วน OCR แยกจับ error
   // เพื่อให้รูปไม่หายจากชุดแม้ AI อ่านไม่สำเร็จ — ผู้ใช้ยังจัดรูปเองได้
@@ -951,6 +1628,10 @@ async function handleImage(event, env, key, mode = "reply") {
       amount: 0,
       vendor: "",
       transferor: "",
+      fromAccountNumber: "",
+      toAccountNumber: "",
+      fromBank: "",
+      toBank: "",
       date: "",
       category: "อื่น ๆ",
       note: "AI อ่านรูปไม่สำเร็จ — กรุณาจัดรูปและกรอกข้อมูลเอง",
@@ -974,6 +1655,53 @@ async function handleImage(event, env, key, mode = "reply") {
         note: 0,
       },
     };
+  }
+
+  // Source of truth หลักสำหรับสลิป: เทียบผู้โอน/ผู้รับกับ Master บัญชีบริษัท
+  // ถ้าปลายทางตรงบัญชีบริษัท => รายรับ, ต้นทางตรงบัญชีบริษัท => รายจ่าย
+  // AI ใช้อ่านข้อมูล แต่ไม่ได้เป็นคนตัดสินทิศทางเพียงลำพัง
+  try {
+    const settings = await settingsPromise;
+    const direction = classifyTransferByCompanyAccounts(record, settings);
+    record.accountDirection = direction.direction || "unknown";
+    record.accountDirectionType = direction.type || "";
+    record.accountDirectionReason = direction.reason || "";
+    record.accountDirectionConfidence = Number(direction.confidence || 0);
+    record.matchedPaymentChannelId = direction.matchedPaymentChannelId || "";
+    record.matchedPaymentChannelLabel = direction.matchedPaymentChannelLabel || "";
+    record.sourceChannelId = direction.sourceChannelId || "";
+    record.destinationChannelId = direction.destinationChannelId || "";
+    if (direction.type === "รายรับ") {
+      record.type = "รายรับ";
+      if (!INCOME_CATEGORIES.includes(record.category)) record.category = "รายได้อื่น";
+    } else if (direction.type === "รายจ่าย") {
+      record.type = "รายจ่าย";
+      if (!EXPENSE_CATEGORIES.includes(record.category)) record.category = "อื่น ๆ";
+    } else if (direction.direction === "internal_transfer") {
+      const prefix = "พบต้นทางและปลายทางเป็นบัญชีบริษัท — อาจเป็นโอนระหว่างบัญชี กรุณาตรวจประเภท";
+      record.flag = record.flag ? `${prefix} · ${record.flag}`.slice(0, 180) : prefix;
+    }
+    console.log(`[direction] tenant=${key} dir=${direction.direction} type=${direction.type || "manual"} confidence=${direction.confidence || 0} channel=${direction.matchedPaymentChannelId || "-"}`);
+  } catch (e) {
+    console.warn(`[direction] classify failed tenant=${key}:`, e?.message || e);
+  }
+
+  // ผู้ใช้สามารถพิมพ์ “รายรับ” หรือ “รายจ่าย” ก่อนส่งรูป เพื่อบังคับทิศทางรายการ
+  // มีประโยชน์กับสลิปธนาคารที่ภาพอย่างเดียวบอกไม่ได้ว่าบัญชีไหนเป็นของบริษัทนี้
+  if (documentMode === "รายรับ") {
+    if (record.accountDirection && record.accountDirection !== "incoming") {
+      record.matchedPaymentChannelId = "";
+      record.matchedPaymentChannelLabel = "";
+    }
+    record.type = "รายรับ";
+    record.accountDirectionType = "รายรับ";
+    record.accountDirectionReason = "ผู้ใช้เปิดโหมดรายรับใน LINE";
+    if (!INCOME_CATEGORIES.includes(record.category)) record.category = "รายได้อื่น";
+  } else if (documentMode === "รายจ่าย") {
+    record.type = "รายจ่าย";
+    record.accountDirectionType = "รายจ่าย";
+    record.accountDirectionReason = "ผู้ใช้เปิดโหมดรายจ่ายใน LINE";
+    if (!EXPENSE_CATEGORIES.includes(record.category)) record.category = "อื่น ๆ";
   }
 
   const item = {
@@ -1058,6 +1786,22 @@ async function handlePostback(event, env, key, mode = "reply") {
       }
     }
 
+    // รายรับไม่เข้ารอบเบิก — บันทึกเข้า master รายรับ + รับชำระโดยตรง
+    if (isIncome) {
+      const out = await createIncomeFromOcr(env, pending.sheetId, {
+        ...pending.record,
+        imageUrl: pending.driveLink || pending.record?.imageUrl || "",
+      }, { driveLink: pending.driveLink || "" }, token);
+      if (!out.ok) return respond(textMsg(out.message || "บันทึกรายรับไม่สำเร็จ กรุณาลองใหม่"));
+      await env.KV.delete(`pending:${id}`);
+      const r = out.record || {};
+      return respond(textMsg(`บันทึกรายรับแล้ว ✅
+${r.customer || pending.record?.transferor || "ลูกค้าทั่วไป"}
+ยอด ฿${Number(r.grossAmount || pending.record?.amount || 0).toLocaleString("th-TH", { minimumFractionDigits:2, maximumFractionDigits:2 })}
+สถานะ: ${r.status || "รับครบแล้ว"}
+ดูรายละเอียดได้ที่เมนู “รายรับ” ใน Dashboard`));
+    }
+
     // ตรวจซ้ำอีกรอบตอนกดบันทึก ป้องกันมีคนบันทึกรายการเดียวกันแทรกระหว่างรอตรวจ
     const duplicateCheck = await findDuplicateExpenses(
       env,
@@ -1099,6 +1843,10 @@ async function handlePostback(event, env, key, mode = "reply") {
       { sender: pending.sender, driveLink: pending.driveLink, payerName: resolvedPayerName, payerId: uid || "" },
       token
     );
+    // อัปเดต usage หลังบันทึกรายการสำเร็จ (1 รายการที่บันทึก = 1 เอกสารในโควตา)
+    await syncSubscriptionUsageAfterSavedExpense(env, key, pending.sheetId, token)
+      .catch((e) => console.warn("subscription usage line", e?.message || e));
+
     // กันกดซ้ำทันทีหลังบันทึกแถวสำเร็จ แม้ขั้นสร้าง PDF จะมีปัญหา
     await env.KV.delete(`pending:${id}`);
 
@@ -1129,9 +1877,10 @@ async function handlePostback(event, env, key, mode = "reply") {
 
     // กดบันทึกครั้งเดียว → สร้างใบเบิก + ใบแทนเป็น PDF → อัป Drive → เขียนลิงก์ลงชีท
     try {
+      const setup = await checkSetup(env, key, { sheetId: pending.sheetId, token });
       const settings = await readSettings(env, pending.sheetId, token);
-      if (!documentSettingsReady(settings)) {
-        rec.documentError = "บันทึกรายการแล้ว — กรอกข้อมูลบริษัทครั้งเดียว จากนั้นระบบจะสร้างใบเบิกและใบแทนให้อัตโนมัติ";
+      if (setup || !documentSettingsReady(settings)) {
+        rec.documentError = setup?.warn || "บันทึกรายการแล้ว — ตั้งค่าข้อมูลบริษัท โลโก้ ลายเซ็น และช่องทางการโอนเงินให้ครบ จากนั้นระบบจะสร้างใบเบิกและใบแทนให้อัตโนมัติ";
       } else {
         const docs = await createExpenseDocuments(env, rec, settings, token, {
           tenant: key, companyName: settings.company_name || "พื้นที่บริษัท", sheetId: pending.sheetId,
@@ -1169,6 +1918,19 @@ ${out.profileUrl}`));
 ${out.reviewUrl}` : "";
     return respond(textMsg(`ยังยืนยันรายการไม่ได้ครับ
 ${out.error || "กรุณาตรวจข้อมูลอีกครั้ง"}${reviewText}`));
+  }
+
+  if (act === "multi_set_type") {
+    const groupId = p.get("g") || "";
+    const targetType = p.get("t") || "";
+    try {
+      const out = await setMultiGroupType(env, key, uid || key, groupId, targetType);
+      if (!out.ok) return respond(textMsg(out.error || "เปลี่ยนประเภทรายการไม่สำเร็จ"));
+      return respond(textMsg(`เปลี่ยนเป็น${out.type}แล้วครับ ✅
+การ์ดล่าสุดถูกอัปเดตให้แล้ว`));
+    } catch (e) {
+      return respond(textMsg("เปลี่ยนประเภทรายการไม่สำเร็จ: " + String(e.message || e).slice(0, 120)));
+    }
   }
 
   if (act === "multi_cancel") {
@@ -1290,6 +2052,51 @@ async function handleText(event, env, key) {
   const text = (event.message.text || "").trim();
   const uid = event.source.userId;
 
+  const businessInviteMatch = text.match(/^เชื่อมธุรกิจ\s+([A-Z0-9]{6,10})$/i);
+  if (businessInviteMatch) {
+    try {
+      const out = await linkBusinessFromInvite(env, event, key, businessInviteMatch[1]);
+      if (!out.ok) return reply(env, event.replyToken, textMsg(out.message || "เพิ่มธุรกิจไม่สำเร็จ"));
+      return reply(env, event.replyToken, textMsg(
+        `เพิ่มธุรกิจสำเร็จ ✅\nธุรกิจในบัญชีนี้ ${out.businessCount}/${out.businessLimit}\n\n` +
+        `ขั้นต่อไป: เปิด Dashboard แล้วตั้งค่าข้อมูลบริษัท Gmail และช่องทางการเงินของธุรกิจนี้\n${out.dashboardUrl || ""}`
+      ));
+    } catch (e) {
+      console.error("link business invite", e);
+      return reply(env, event.replyToken, textMsg("เพิ่มธุรกิจไม่สำเร็จ กรุณาสร้างรหัสใหม่จาก Dashboard แล้วลองอีกครั้ง"));
+    }
+  }
+
+  if (/^(รายรับ|รับเงิน|เงินเข้า)$/i.test(text)) {
+    if (uid) await env.KV.put(`docmode:${key}:${uid}`, "รายรับ", { expirationTtl: 1800 });
+    const base = await dashUrl(env, key);
+    return reply(env, event.replyToken, textMsg(
+      `โหมดรายรับเปิดแล้ว ✅
+ส่งสลิปเงินเข้า ใบแจ้งหนี้ หรือเอกสารขายต่อได้เลย
+ระบบจะจัดรายการชุดนี้เป็น “รายรับ” และไม่ถามข้อมูลบัญชีผู้เบิก` +
+      (base ? `
+
+เปิดหน้ารายรับ:
+${base}&page=income` : "") +
+      `
+
+ถ้าจะกลับให้ AI แยกเอง พิมพ์ “อัตโนมัติ”`
+    ));
+  }
+
+  if (/^(รายจ่าย|จ่ายเงิน|เงินออก)$/i.test(text)) {
+    if (uid) await env.KV.put(`docmode:${key}:${uid}`, "รายจ่าย", { expirationTtl: 1800 });
+    return reply(env, event.replyToken, textMsg(`โหมดรายจ่ายเปิดแล้ว ✅
+ส่งบิล ใบเสร็จ หรือสลิปจ่ายต่อได้เลย
+ถ้าจะกลับให้ AI แยกเอง พิมพ์ “อัตโนมัติ”`));
+  }
+
+  if (/^(อัตโนมัติ|auto|แยกอัตโนมัติ)$/i.test(text)) {
+    if (uid) await env.KV.delete(`docmode:${key}:${uid}`);
+    return reply(env, event.replyToken, textMsg(`กลับเป็นโหมดอัตโนมัติแล้ว ✅
+ระบบจะพยายามแยกรายรับ/รายจ่ายจากเอกสาร และยังแก้ได้ในหน้าตรวจเอกสาร`));
+  }
+
   const editRaw = uid ? await env.KV.get(`edit:${uid}`) : null;
   if (editRaw) {
     let state;
@@ -1369,6 +2176,7 @@ async function handleText(event, env, key) {
       const b = await ensureBatchTab(env, sheet.sheetId, sheet.token);
       await env.KV.delete(`setup:${key}`);
       await env.KV.delete(`setup:${key}:${sheet.sheetId}`);
+      await env.KV.delete(`companysetup:v3:${key}:${sheet.sheetId}`);
       return reply(env, event.replyToken, textMsg(
         `อัปเกรดชีทเรียบร้อย ✅\n` +
         `หัวคอลัมน์: ${h.changed ? `เพิ่ม ${h.added} ช่อง` : "ครบอยู่แล้ว"}\n` +
