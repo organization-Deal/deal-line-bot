@@ -9,6 +9,7 @@ import {
   findDuplicateExpensesInRecords, normalizeDate,
 } from "./sheets.js";
 import { createExpenseDocuments } from "./documents.js";
+import { createIncomeFromOcr } from "./income.js";
 import {
   createMemberOnboardingUrl, getMemberProfile,
   memberProfileComplete, missingMemberFields,
@@ -28,7 +29,7 @@ const ROLE_LABEL = {
   OTHER: "อื่น ๆ",
 };
 
-const CATEGORIES = [
+const EXPENSE_CATEGORIES = [
   "อาหาร & รับรอง",
   "เดินทาง & ขนส่ง",
   "ค่าน้ำ ค่าไฟ ค่าเน็ต",
@@ -37,6 +38,18 @@ const CATEGORIES = [
   "ค่าบริการ & จ้างงาน",
   "อื่น ๆ",
 ];
+const INCOME_CATEGORIES = [
+  "ขายสินค้า",
+  "ค่าบริการ",
+  "ค่าสมาชิก / Subscription",
+  "ค่าเช่า",
+  "ค่าคอมมิชชั่น / ค่านายหน้า",
+  "ค่าธรรมเนียม",
+  "รายได้จากโครงการ",
+  "ดอกเบี้ย / รายได้ทางการเงิน",
+  "รายได้อื่น",
+];
+const CATEGORIES = [...new Set([...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES])];
 
 function nowIso() { return new Date().toISOString(); }
 function uid() { return crypto.randomUUID().replaceAll("-", "").slice(0, 10); }
@@ -251,6 +264,7 @@ function groupTemplate() {
     vatRate: 0,
     vatAmount: 0,
     manualVat: false,
+    manualType: false,
     whtRate: 0,
     warning: "",
     matchConfidence: 0,
@@ -278,7 +292,7 @@ function recomputeGroup(s, g) {
   if (!g.manualDate) g.date = String(primary.date || slip.date || g.date || "");
   if (!g.manualCategory) g.category = String(primary.category || g.category || "อื่น ๆ");
   if (!g.manualNote) g.note = String(primary.note || primary.matchHint || g.note || "");
-  g.type = primary.type || "รายจ่าย";
+  if (!g.manualType) g.type = primary.type || g.type || "รายจ่าย";
   g.docType = primary.docType || (slip.docType || "");
   if (!g.manualVat) {
     const vatItem = items.find(explicitVatItem);
@@ -291,11 +305,13 @@ function recomputeGroup(s, g) {
   const hasPrimary = items.some((x) => primaryRole(x.role));
   const hasSlip = items.some((x) => x.role === "PAYSLIP");
   const mismatch = g.amount > 0 && g.payAmount > 0 && Math.abs(g.amount - g.payAmount) > AMOUNT_TOLERANCE;
+  const isIncome = ["รายรับ", "income"].includes(String(g.type || ""));
   if (!items.length) g.warning = "ไม่มีรูปในรายการ";
   else if (!g.amount) g.warning = "ยังอ่านยอดไม่ได้";
-  else if (mismatch) g.warning = `ยอดเอกสาร ฿${money(g.amount)} ไม่ตรงกับยอดจ่าย ฿${money(g.payAmount)}`;
-  else if (!hasPrimary && hasSlip) g.warning = "ยังไม่พบใบเสร็จหรือใบกำกับภาษี";
-  else if (hasPrimary && !hasSlip) g.warning = "ยังไม่พบสลิปหรือหลักฐานชำระเงิน";
+  else if (isIncome && g.payAmount > g.amount + AMOUNT_TOLERANCE) g.warning = `เงินเข้าจริง ฿${money(g.payAmount)} มากกว่ายอดตามเอกสาร ฿${money(g.amount)}`;
+  else if (!isIncome && mismatch) g.warning = `ยอดเอกสาร ฿${money(g.amount)} ไม่ตรงกับยอดจ่าย ฿${money(g.payAmount)}`;
+  else if (!isIncome && !hasPrimary && hasSlip) g.warning = "ยังไม่พบใบเสร็จหรือใบกำกับภาษี";
+  else if (!isIncome && hasPrimary && !hasSlip) g.warning = "ยังไม่พบสลิปหรือหลักฐานชำระเงิน";
   else g.warning = "";
   return g;
 }
@@ -493,6 +509,8 @@ function publicState(s) {
     saveProgress: s.saveProgress,
     saved: s.saved || [],
     categories: CATEGORIES,
+    expenseCategories: EXPENSE_CATEGORIES,
+    incomeCategories: INCOME_CATEGORIES,
     roles: ROLES.map((r) => ({ value: r, label: ROLE_LABEL[r] })),
   };
 }
@@ -700,6 +718,8 @@ function buildRecordFromGroup(s, g, profile) {
     vat: g.vat === true,
     vatRate: Number(g.vatRate) || 0,
     whtRate: Number(g.whtRate) || 0,
+    paymentAmount: Number(g.payAmount) || 0,
+    hasPaymentEvidence: slip.length > 0,
     needSlip: true,
     imageUrl: mainImage,
     attReceipt: receipt,
@@ -896,6 +916,15 @@ export class MultiExpenseSession {
       if (!g) return json({ error: "ไม่พบรายการ" }, 404);
       const patch = b.patch || {};
       if (patch.amount !== undefined) { g.amount = Number(patch.amount) || 0; g.manualAmount = true; }
+      if (patch.type !== undefined && ["รายจ่าย", "รายรับ"].includes(String(patch.type))) {
+        g.type = String(patch.type);
+        g.manualType = true;
+        const allowed = g.type === "รายรับ" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+        if (!allowed.includes(g.category)) {
+          g.category = g.type === "รายรับ" ? "รายได้อื่น" : "อื่น ๆ";
+          g.manualCategory = false;
+        }
+      }
       if (patch.vendor !== undefined) { g.vendor = String(patch.vendor || "").trim(); g.manualVendor = true; }
       if (patch.transferor !== undefined) { g.transferor = String(patch.transferor || "").trim(); g.manualTransferor = true; }
       if (patch.date !== undefined) { g.date = String(patch.date || "").trim(); g.manualDate = true; }
@@ -994,20 +1023,24 @@ export class MultiExpenseSession {
     const sheetId = s.sheetId || (await this.env.KV.get(`tenant:${s.tenant}`)) || this.env.DEFAULT_SHEET_ID;
     if (!sheetId) return json({ error: "ไม่พบ Google Sheet ของบริษัท" }, 404);
 
-    const member = await getMemberProfile(this.env, s.tenant, sheetId, token, s.userId, s.displayName || "");
-    if (!memberProfileComplete(member.profile)) {
-      const profileUrl = await createMemberOnboardingUrl(this.env, {
-        tenant: s.tenant, lineUserId: s.userId, displayName: s.displayName || "", pendingId: "",
-      });
-      return json({
-        error: `กรอกข้อมูลผู้เบิกให้ครบก่อน: ${missingMemberFields(member.profile).join(" · ")}`,
-        code: "profile_required", profileUrl,
-      }, 409);
+    const hasExpense = s.groups.some((g) => !["รายรับ", "income"].includes(String(g.type || "")));
+    let member = { profile: { name: s.displayName || "", bank: "", accountNo: "", accountName: "" } };
+    if (hasExpense) {
+      member = await getMemberProfile(this.env, s.tenant, sheetId, token, s.userId, s.displayName || "");
+      if (!memberProfileComplete(member.profile)) {
+        const profileUrl = await createMemberOnboardingUrl(this.env, {
+          tenant: s.tenant, lineUserId: s.userId, displayName: s.displayName || "", pendingId: "",
+        });
+        return json({
+          error: `กรอกข้อมูลผู้เบิกให้ครบก่อน: ${missingMemberFields(member.profile).join(" · ")}`,
+          code: "profile_required", profileUrl,
+        }, 409);
+      }
     }
 
-    const existing = await readExpenses(this.env, sheetId, token);
-    const candidates = s.groups.map((g) => buildRecordFromGroup(s, g, member.profile));
-    const dup = candidates.map((r, i) => ({ index: i, result: findDuplicateExpensesInRecords(existing, r) }))
+    const existing = hasExpense ? await readExpenses(this.env, sheetId, token) : [];
+    const candidates = s.groups.map((g) => buildRecordFromGroup(s, g, member.profile || {}));
+    const dup = candidates.map((r, i) => ({ index: i, result: ["รายรับ", "income"].includes(String(r.type || "")) ? { hasDuplicate:false } : findDuplicateExpensesInRecords(existing, r) }))
       .filter((x) => x.result.hasDuplicate);
     if (dup.length && !force) {
       return json({ error: `พบ ${dup.length} รายการที่อาจเบิกซ้ำ`, code: "duplicates", duplicates: dup }, 409);
@@ -1017,6 +1050,7 @@ export class MultiExpenseSession {
     s.saveProgress = { total: candidates.length, rows: 0, documents: 0, errors: [] };
     s.saved = [];
     await this.save(s);
+    if (s.tenant && s.userId) await this.env.KV.delete(`docmode:${s.tenant}:${s.userId}`).catch(() => {});
 
     for (let i = 0; i < candidates.length; i++) {
       const rec = candidates[i];
@@ -1026,24 +1060,43 @@ export class MultiExpenseSession {
         rec.duplicateOf = d.matches.map((m) => m.id).filter(Boolean).join(", ");
       }
       const anchorUrl = rec.imageUrl || splitList(rec.attReceipt)[0] || splitList(rec.attSlip)[0] || "";
-      const out = await appendExpense(this.env, sheetId, rec, {
-        sender: s.displayName || member.profile.name,
-        payerName: member.profile.name,
-        payerId: s.userId,
-        driveLink: anchorUrl,
-      }, token);
-      const dte = normalizeDate(rec.date);
-      const savedRec = {
-        ...rec,
-        id: out.id,
-        _row: out.row,
-        dateText: dte.text,
-        dateISO: dte.iso,
-        status: "รอตรวจเอกสาร",
-        paid: false,
-        claimPdfUrl: "",
-        receiptPdfUrl: "",
-      };
+      let savedRec;
+      if (["รายรับ", "income"].includes(String(rec.type || ""))) {
+        const incomeOut = await createIncomeFromOcr(this.env, sheetId, rec, { driveLink: anchorUrl }, token);
+        if (!incomeOut.ok) throw new Error(incomeOut.message || "บันทึกรายรับไม่สำเร็จ");
+        const ir = incomeOut.record || {};
+        savedRec = {
+          ...rec,
+          id: ir.id,
+          amount: Number(ir.grossAmount || rec.amount || 0),
+          dateText: normalizeDate(ir.issueDate || rec.date).text,
+          dateISO: ir.issueDate || normalizeDate(rec.date).iso,
+          status: ir.status || "รับครบแล้ว",
+          type: "รายรับ",
+          incomeRecord: ir,
+          claimPdfUrl: "",
+          receiptPdfUrl: "",
+        };
+      } else {
+        const out = await appendExpense(this.env, sheetId, rec, {
+          sender: s.displayName || member.profile.name,
+          payerName: member.profile.name,
+          payerId: s.userId,
+          driveLink: anchorUrl,
+        }, token);
+        const dte = normalizeDate(rec.date);
+        savedRec = {
+          ...rec,
+          id: out.id,
+          _row: out.row,
+          dateText: dte.text,
+          dateISO: dte.iso,
+          status: "รอตรวจเอกสาร",
+          paid: false,
+          claimPdfUrl: "",
+          receiptPdfUrl: "",
+        };
+      }
       s.saved.push(savedRec);
       s.saveProgress.rows = i + 1;
       await this.save(s);
@@ -1057,8 +1110,15 @@ export class MultiExpenseSession {
     if (s.targetId) {
       const total = s.saved.reduce((sum, r) => sum + Number(r.amount || 0), 0);
       try {
+        const incomeCount = s.saved.filter((r) => ["รายรับ", "income"].includes(String(r.type || ""))).length;
+        const expenseCount = s.saved.length - incomeCount;
+        const nextText = expenseCount > 0 ? "กำลังสร้างเอกสารเบิกจ่ายอัตโนมัติ" : "บันทึกรายรับเข้าระบบแล้ว";
         const acknowledged = await push(this.env, s.targetId, textMsg(
-          `บันทึกชุดเอกสารแล้ว ✅\n${s.saved.length} รายการ · รวม ฿${money(total)}\nกำลังสร้างใบขอเบิกและใบแทนอัตโนมัติ`
+          `บันทึกชุดเอกสารแล้ว ✅
+${s.saved.length} รายการ · รวม ฿${money(total)}${incomeCount ? `
+รายรับ ${incomeCount} รายการ` : ""}${expenseCount ? `
+รายจ่าย ${expenseCount} รายการ` : ""}
+${nextText}`
         ));
         if (!acknowledged) console.error(`[multi-save] immediate LINE acknowledgement rejected sid=${s.sid}`);
       } catch (e) {
@@ -1067,7 +1127,10 @@ export class MultiExpenseSession {
     }
 
     this.ctx.waitUntil(this.finishDocuments(s.sid));
-    return json({ ok: true, status: s.status, saved: s.saved, message: `บันทึก ${s.saved.length} รายการแล้ว และแจ้งใน LINE แล้ว กำลังสร้างเอกสารอัตโนมัติ` });
+    const savedExpenseCount = s.saved.filter((r) => !["รายรับ", "income"].includes(String(r.type || ""))).length;
+    return json({ ok: true, status: s.status, saved: s.saved, message: savedExpenseCount > 0
+      ? `บันทึก ${s.saved.length} รายการแล้ว และแจ้งใน LINE แล้ว กำลังสร้างเอกสารเบิกจ่ายอัตโนมัติ`
+      : `บันทึกรายรับ ${s.saved.length} รายการแล้ว และแจ้งใน LINE เรียบร้อย` });
   }
 
   async finishDocuments(expectedSid) {
@@ -1080,6 +1143,10 @@ export class MultiExpenseSession {
       const docsReady = !!(settings.company_name && settings.tax_id && settings.approver_name);
       for (let i = 0; i < s.saved.length; i++) {
         const rec = s.saved[i];
+        if (["รายรับ", "income"].includes(String(rec.type || ""))) {
+          await this.save(s);
+          continue;
+        }
         if (!docsReady) {
           s.saveProgress.errors.push({ id: rec.id, error: "ข้อมูลบริษัทไม่ครบ จึงยังไม่สร้าง PDF" });
           continue;
@@ -1104,7 +1171,11 @@ export class MultiExpenseSession {
         const total = s.saved.reduce((sum, r) => sum + Number(r.amount || 0), 0);
         const documentCount = Number(s.saveProgress?.documents || 0);
         const errorCount = Array.isArray(s.saveProgress?.errors) ? s.saveProgress.errors.length : 0;
-        let message = `จัดชุดเอกสารเสร็จแล้ว ✅\n${s.saved.length} รายการ · รวม ฿${money(total)}\nส่งเข้ารอบเบิกเรียบร้อย`;
+        const incomeCount = s.saved.filter((r) => ["รายรับ", "income"].includes(String(r.type || ""))).length;
+        const expenseCount = s.saved.length - incomeCount;
+        let message = `จัดชุดเอกสารเสร็จแล้ว ✅\n${s.saved.length} รายการ · รวม ฿${money(total)}`;
+        if (incomeCount) message += `\nรายรับ ${incomeCount} รายการ → Dashboard > รายรับ`;
+        if (expenseCount) message += `\nรายจ่าย ${expenseCount} รายการ → ส่งเข้าขั้นตอนเบิกจ่ายแล้ว`;
         if (documentCount > 0) message += `\nสร้าง PDF สำเร็จ ${documentCount} รายการ`;
         if (errorCount > 0) message += `\nมี ${errorCount} รายการที่ยังสร้าง PDF ไม่สำเร็จ กรุณาตรวจใน Dashboard`;
         try {
@@ -1142,7 +1213,7 @@ function reviewPage(sid, token, env) {
 @media(max-width:760px){.wrap{padding:18px 12px 116px}.topbar{align-items:flex-start}.pageTitle{font-size:24px}.topStatus{font-size:10px;padding:7px 9px}.hero{padding:24px 14px}.total{font-size:46px}.fields{grid-template-columns:1fr}.pool{grid-template-columns:repeat(2,minmax(0,1fr))}.bottom{padding:10px 12px}.bottomInner{grid-template-columns:1fr 1.7fr}.group{padding:17px 14px}.thumb{min-width:154px;width:154px}.thumb img,.thumb select{width:136px}.thumb img{height:100px}}@media(max-width:480px){.pool{grid-template-columns:1fr 1fr}.ghead{gap:8px}.gtitle{font-size:16px}.gamount{font-size:16px}.bottomInner{grid-template-columns:1fr 1.45fr}.btn{font-size:13px}.topStatus{display:none}}</style></head><body><div class="wrap">
 <header class="topbar"><div><div class="brand">รับจ่ายได้หมด · DOCUMENT REVIEW</div><div class="pageTitle">ตรวจและยืนยัน</div></div><div class="topStatus" id="topStatus">กำลังโหลดข้อมูล</div></header>
 <section class="hero"><div class="eyebrow">ยอดรวมชุดเอกสาร</div><div class="total"><span class="currency">฿</span><span id="sumTotal">—</span></div><div class="sub" id="sumVat">กำลังโหลด</div><div class="sub" id="sumCount"></div><div class="summaryPills"><span class="pill ok" id="readyPill">พร้อม 0</span><span class="pill warn" id="warnPill">ต้องตรวจ 0</span><span class="pill" id="imagePill">0 เอกสาร</span></div></section>
-<div class="sectionHead"><div class="sectionTitle">รายการค่าใช้จ่าย</div><div class="sectionHint">ตรวจยอด หมวด และเอกสารก่อนบันทึก</div></div><div class="list" id="groups"></div>
+<div class="sectionHead"><div class="sectionTitle">รายการรับ / จ่าย</div><div class="sectionHint">เลือกประเภทรายการ ตรวจยอด และเอกสารก่อนบันทึก</div></div><div class="list" id="groups"></div>
 <div class="poolWrap"><div class="sectionHead"><div class="sectionTitle">รูปที่ยังไม่ได้จัด</div><div class="sectionHint">เลือกรายการปลายทางหรือสร้างรายการใหม่</div></div><div class="pool" id="pool"></div></div>
 <div class="minor"><button class="linkBtn" onclick="reload()">โหลดข้อมูลใหม่</button><button class="linkBtn danger" onclick="cancelSession()">ยกเลิกชุดนี้</button></div></div>
 <div class="bottom"><div class="bottomInner"><button class="btn" onclick="addBlank()">+ เพิ่มรายการ</button><button class="btn primary" id="saveBtn" onclick="commit(false)">บันทึกรายการ</button></div></div>
@@ -1156,6 +1227,8 @@ function roleOptions(cur){return (D.roles||[]).map(r=>'<option value="'+r.value+
 function groupOptions(cur,label){let h='<option value="" selected disabled>'+esc(label||'ย้ายรูปไป...')+'</option><option value="unassigned">พักไว้ในรูปค้างจัด</option><option value="new">แยกเป็นรายการใหม่</option>';for(const g of D.groups){if(g.id!==cur)h+='<option value="'+g.id+'">ย้ายไป รายการ '+g.number+' · ฿'+Number(g.amount||0).toLocaleString('th-TH')+'</option>'}h+='<option value="ignore">ไม่ใช้รูปนี้</option>';return h}
 function titleOf(g){return g.category&&g.category!=='อื่น ๆ'?g.category:(g.vendor||'ยังไม่ระบุหมวด')}
 function vatOf(g){if(g.vat!==true)return 0;const explicit=Number(g.vatAmount||0);if(explicit>0)return explicit;const r=Number(g.vatRate||0),a=Number(g.amount||0);return r>0?a*r/(100+r):0}
+function categoriesOf(g){const list=g.type==='รายรับ'?(D.incomeCategories||[]):(D.expenseCategories||[]);return list.length?list:(D.categories||[])}
+function partyLabel(g){return g.type==='รายรับ'?'ลูกค้า / ผู้จ่าย':'ผู้รับเงิน / ร้านค้า / บริษัท'}
 async function reload(){try{D=await api('/state');render()}catch(e){toast(e.message)}}
 function render(){
   const total=D.groups.reduce((s,g)=>s+Number(g.amount||0),0);
@@ -1172,13 +1245,13 @@ function render(){
   q('#saveBtn').textContent='บันทึก '+Number(D.counts.groups||0)+' รายการ';
   q('#saveBtn').disabled=D.status==='saving'||D.status==='saving_docs'||!D.counts.groups;
   renderGroups();renderPool();
-  if(D.status==='done')showDone('บันทึกสำเร็จ',D.saved.length+' รายการถูกส่งให้ฝ่ายบัญชีตรวจแล้ว');
+  if(D.status==='done')showDone('บันทึกสำเร็จ',D.saved.length+' รายการถูกบันทึกเข้าระบบแล้ว');
   else if(D.status==='saving_docs')showDone('บันทึกรายการแล้ว','ระบบกำลังสร้าง PDF อัตโนมัติ สามารถกลับไป LINE ได้เลย');
 }
 function renderGroups(){
   const root=q('#groups');
   if(!D.groups.length){root.innerHTML='<div class="empty">ยังไม่มีรายการ กด “+ เพิ่มรายการ” หรือจัดรูปด้านล่างเข้ารายการ</div>';return}
-  root.innerHTML=D.groups.map(g=>'<section class="group"><div class="ghead"><div><div class="gindex">รายการ '+g.number+'</div><div class="gtitle">'+esc(titleOf(g))+'</div><div class="gdesc">'+esc(g.note||g.vendor||'ยังไม่มีรายละเอียด')+' · '+g.images.length+' รูป</div></div><div><div class="gamount">฿'+Number(g.amount||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})+'</div><div class="statusBadge '+(!g.warning?'ready':'')+'">'+esc(g.warning?'ตรวจข้อมูล':'พร้อมบันทึก')+'</div></div></div><div class="fields"><div class="field full"><label>ชื่อรายการ</label><input value="'+esc(g.note||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{note:this.value})"></div><div class="field"><label>ยอด (บาท)</label><input type="number" step="0.01" value="'+esc(g.amount||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{amount:this.value})"></div><div class="field"><label>หมวด</label><select onchange="patchGroup(\\\''+g.id+'\\\',{category:this.value})">'+D.categories.map(c=>'<option'+(c===g.category?' selected':'')+'>'+esc(c)+'</option>').join('')+'</select></div><div class="field"><label>ผู้รับ / ร้านค้า</label><input value="'+esc(g.vendor||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{vendor:this.value})"></div><div class="field"><label>วันที่รายการ</label><input type="date" value="'+esc(g.date||'')+'" onchange="patchGroup(\\\''+g.id+'\\\',{date:this.value})"></div><div class="field"><label>VAT</label><select onchange="patchGroup(\\\''+g.id+'\\\',{vatMode:this.value})"><option value="0"'+(!(g.vat===true&&Number(g.vatRate)>0)?' selected':'')+'>ไม่มี VAT</option><option value="7"'+(g.vat===true&&Number(g.vatRate)===7?' selected':'')+'>VAT 7%</option></select></div></div><div class="docsHead"><div class="docsLabel">เอกสารในรายการ · '+g.images.length+' รูป</div></div><div class="thumbs">'+g.images.map(im=>'<div class="thumb"><a href="'+esc(im.imgUrl)+'" target="_blank" rel="noopener"><img src="'+esc(im.imgUrl)+'"></a><label>ประเภทเอกสาร</label><select onchange="changeRole(\\\''+im.id+'\\\',this.value)">'+roleOptions(im.role)+'</select><label>ย้ายรูปไป</label><select class="moveSelect" onchange="assign(\\\''+im.id+'\\\',this.value)">'+groupOptions(g.id,'เลือกปลายทาง')+'</select></div>').join('')+'</div><div class="groupActions"><button class="delete" onclick="deleteGroup(\\\''+g.id+'\\\')">ลบรายการ</button></div></section>').join('')
+  root.innerHTML=D.groups.map(g=>'<section class="group"><div class="ghead"><div><div class="gindex">รายการ '+g.number+'</div><div class="gtitle">'+esc(titleOf(g))+'</div><div class="gdesc">'+esc(g.note||g.vendor||'ยังไม่มีรายละเอียด')+' · '+g.images.length+' รูป</div></div><div><div class="gamount">฿'+Number(g.amount||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2})+'</div><div class="statusBadge '+(!g.warning?'ready':'')+'">'+esc(g.warning?'ตรวจข้อมูล':'พร้อมบันทึก')+'</div></div></div><div class="fields"><div class="field"><label>ประเภทรายการ</label><select onchange="patchGroup(\''+g.id+'\',{type:this.value})"><option value="รายจ่าย"'+(g.type!=='รายรับ'?' selected':'')+'>รายจ่าย</option><option value="รายรับ"'+(g.type==='รายรับ'?' selected':'')+'>รายรับ</option></select></div><div class="field"><label>ชื่อรายการ</label><input value="'+esc(g.note||'')+'" onchange="patchGroup(\''+g.id+'\',{note:this.value})"></div><div class="field"><label>ยอดตามเอกสาร (บาท)</label><input type="number" step="0.01" value="'+esc(g.amount||'')+'" onchange="patchGroup(\''+g.id+'\',{amount:this.value})"></div><div class="field"><label>หมวด</label><select onchange="patchGroup(\''+g.id+'\',{category:this.value})">'+categoriesOf(g).map(c=>'<option'+(c===g.category?' selected':'')+'>'+esc(c)+'</option>').join('')+'</select></div><div class="field"><label>'+partyLabel(g)+'</label><input value="'+esc(g.vendor||'')+'" onchange="patchGroup(\''+g.id+'\',{vendor:this.value})"></div><div class="field"><label>วันที่รายการ</label><input type="date" value="'+esc(g.date||'')+'" onchange="patchGroup(\''+g.id+'\',{date:this.value})"></div><div class="field"><label>VAT</label><select onchange="patchGroup(\''+g.id+'\',{vatMode:this.value})"><option value="0"'+(!(g.vat===true&&Number(g.vatRate)>0)?' selected':'')+'>ไม่มี VAT</option><option value="7"'+(g.vat===true&&Number(g.vatRate)===7?' selected':'')+'>VAT 7%</option></select></div></div><div class="docsHead"><div class="docsLabel">เอกสารในรายการ · '+g.images.length+' รูป</div></div><div class="thumbs">'+g.images.map(im=>'<div class="thumb"><a href="'+esc(im.imgUrl)+'" target="_blank" rel="noopener"><img src="'+esc(im.imgUrl)+'"></a><label>ประเภทเอกสาร</label><select onchange="changeRole(\''+im.id+'\',this.value)">'+roleOptions(im.role)+'</select><label>ย้ายรูปไป</label><select class="moveSelect" onchange="assign(\''+im.id+'\',this.value)">'+groupOptions(g.id,'เลือกปลายทาง')+'</select></div>').join('')+'</div><div class="groupActions"><button class="delete" onclick="deleteGroup(\''+g.id+'\')">ลบรายการ</button></div></section>').join('')
 }
 function renderPool(){
   const root=q('#pool');const list=D.items.filter(x=>!x.groupId&&!x.ignored);

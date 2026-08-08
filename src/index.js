@@ -7,7 +7,7 @@
 //   • ล้าง flag ทั้งแบบเก่าและแบบผูก sheetId ตอนบันทึกตั้งค่า / migrate
 
 import { verifySignature, getMessageContent, reply, push, textMsg, confirmCard, savedCard, moreCard } from "./line.js";
-import { ocrReceipt } from "./ocr.js";
+import { ocrReceipt, EXPENSE_CATEGORIES, INCOME_CATEGORIES } from "./ocr.js";
 import {
   appendExpense, readExpenses, getExpenseById, updateExpenseById,
   togglePaid, toggleNeedSlip, softDeleteById, listForSlip, normalizeDate,
@@ -41,6 +41,10 @@ import {
   unlinkReconciliationMatch, ignoreReconciliationRow,
 } from "./reconciliation.js";
 import {
+  ensureIncomeTabs, getIncomeDashboard, createIncome, updateIncome, addIncomePayment, updateIncomePayment, createIncomeFromOcr,
+  importIncomeReconciliationRows, confirmIncomeReconciliationMatches, ignoreIncomeReconciliationRow, unlinkIncomeReconciliation,
+} from "./income.js";
+import {
   createMemberOnboardingUrl, handleMemberOnboarding,
   getMemberProfile, memberProfileComplete, missingMemberFields,
   findMemberProfile,
@@ -52,7 +56,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v4.7_SUBSCRIPTION_BETA_20260807";
+const VERSION = "DEAL_LINE_BOT_v5.0_INCOME_SME_TH_BASE_20260808";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -681,7 +685,8 @@ export default {
         const emailInbox = await ensureEmailInboxTab(env, sheetId, token);
         const batchTab = await ensureBatchTab(env, sheetId, token);
         const reconciliationTab = await ensureReconciliationTab(env, sheetId, token);
-        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox, batchTab, reconciliationTab });
+        const incomeTabs = await ensureIncomeTabs(env, sheetId, token);
+        return json({ ok: true, sheetId, usedOAuthToken: !!token, headers, ids, settings, emailInbox, batchTab, reconciliationTab, incomeTabs });
       } catch (e) {
         console.error("migrate", e);
         return json({ error: String(e) }, 500);
@@ -730,6 +735,66 @@ export default {
 
         if (url.pathname === "/api/expenses") {
           return cors(json(await readExpenses(env, sheetId, token)));
+        }
+
+        /* รายรับ SME ไทย — ลูกหนี้, VAT, WHT และรับชำระบางส่วน */
+        if (url.pathname === "/api/income") {
+          return cors(json(await getIncomeDashboard(env, sheetId, token)));
+        }
+
+        if (url.pathname === "/api/income-create" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await createIncome(env, sheetId, b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-update" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await updateIncome(env, sheetId, b.id || b.incomeId, b.patch || b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-payment" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await addIncomePayment(env, sheetId, b.id || b.incomeId, b.payment || b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-payment-update" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await updateIncomePayment(env, sheetId, b.paymentId || b.id, b.patch || b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-reconciliation-import" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await importIncomeReconciliationRows(env, sheetId, b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-reconciliation-confirm" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await confirmIncomeReconciliationMatches(env, sheetId, b, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-reconciliation-ignore" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await ignoreIncomeReconciliationRow(env, sheetId, b.reconciliationId || b.id, b.note || "", token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-reconciliation-unlink" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          const out = await unlinkIncomeReconciliation(env, sheetId, b.reconciliationId || b.id, token);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
+        if (url.pathname === "/api/income-upload" && request.method === "POST") {
+          const b = await request.json().catch(() => ({}));
+          if (!b.base64) return cors(json({ ok:false, error:"no_file" }, 400));
+          const link = await uploadTenantImage(env, key, b.base64, b.mediaType || "image/jpeg", b.name || `income-${Date.now()}`, token, { category:"originals" });
+          return cors(json({ ok:true, url:link }));
         }
 
         // ลิงก์ทางลัดจาก Dashboard ไปยังพื้นที่เอกสารของบริษัทจริง
@@ -1484,11 +1549,12 @@ async function handleImage(event, env, key, mode = "reply") {
   const uid = event.source.userId;
 
   // ทำงานที่ไม่ขึ้นต่อกันพร้อมกัน เพื่อลดเวลาจากเดิมที่รอทีละขั้น
-  const [sheet, content, sender, attachRaw] = await Promise.all([
+  const [sheet, content, sender, attachRaw, documentMode] = await Promise.all([
     resolveSheet(env, event.source),
     getMessageContent(env, event.message.id),
     getDisplayName(env, event.source),
     uid ? env.KV.get(`attach:${uid}`) : Promise.resolve(null),
+    uid ? env.KV.get(`docmode:${key}:${uid}`) : Promise.resolve(null),
   ]);
 
   if (!sheet) return respond(connectMsg(env, key));
@@ -1562,6 +1628,16 @@ async function handleImage(event, env, key, mode = "reply") {
         note: 0,
       },
     };
+  }
+
+  // ผู้ใช้สามารถพิมพ์ “รายรับ” หรือ “รายจ่าย” ก่อนส่งรูป เพื่อบังคับทิศทางรายการ
+  // มีประโยชน์กับสลิปธนาคารที่ภาพอย่างเดียวบอกไม่ได้ว่าบัญชีไหนเป็นของบริษัทนี้
+  if (documentMode === "รายรับ") {
+    record.type = "รายรับ";
+    if (!INCOME_CATEGORIES.includes(record.category)) record.category = "รายได้อื่น";
+  } else if (documentMode === "รายจ่าย") {
+    record.type = "รายจ่าย";
+    if (!EXPENSE_CATEGORIES.includes(record.category)) record.category = "อื่น ๆ";
   }
 
   const item = {
@@ -1644,6 +1720,22 @@ async function handlePostback(event, env, key, mode = "reply") {
         }
         return respond(card);
       }
+    }
+
+    // รายรับไม่เข้ารอบเบิก — บันทึกเข้า master รายรับ + รับชำระโดยตรง
+    if (isIncome) {
+      const out = await createIncomeFromOcr(env, pending.sheetId, {
+        ...pending.record,
+        imageUrl: pending.driveLink || pending.record?.imageUrl || "",
+      }, { driveLink: pending.driveLink || "" }, token);
+      if (!out.ok) return respond(textMsg(out.message || "บันทึกรายรับไม่สำเร็จ กรุณาลองใหม่"));
+      await env.KV.delete(`pending:${id}`);
+      const r = out.record || {};
+      return respond(textMsg(`บันทึกรายรับแล้ว ✅
+${r.customer || pending.record?.transferor || "ลูกค้าทั่วไป"}
+ยอด ฿${Number(r.grossAmount || pending.record?.amount || 0).toLocaleString("th-TH", { minimumFractionDigits:2, maximumFractionDigits:2 })}
+สถานะ: ${r.status || "รับครบแล้ว"}
+ดูรายละเอียดได้ที่เมนู “รายรับ” ใน Dashboard`));
     }
 
     // ตรวจซ้ำอีกรอบตอนกดบันทึก ป้องกันมีคนบันทึกรายการเดียวกันแทรกระหว่างรอตรวจ
@@ -1896,6 +1988,36 @@ async function handleText(event, env, key) {
       console.error("link business invite", e);
       return reply(env, event.replyToken, textMsg("เพิ่มธุรกิจไม่สำเร็จ กรุณาสร้างรหัสใหม่จาก Dashboard แล้วลองอีกครั้ง"));
     }
+  }
+
+  if (/^(รายรับ|รับเงิน|เงินเข้า)$/i.test(text)) {
+    if (uid) await env.KV.put(`docmode:${key}:${uid}`, "รายรับ", { expirationTtl: 1800 });
+    const base = await dashUrl(env, key);
+    return reply(env, event.replyToken, textMsg(
+      `โหมดรายรับเปิดแล้ว ✅
+ส่งสลิปเงินเข้า ใบแจ้งหนี้ หรือเอกสารขายต่อได้เลย
+ระบบจะจัดรายการชุดนี้เป็น “รายรับ” และไม่ถามข้อมูลบัญชีผู้เบิก` +
+      (base ? `
+
+เปิดหน้ารายรับ:
+${base}&page=income` : "") +
+      `
+
+ถ้าจะกลับให้ AI แยกเอง พิมพ์ “อัตโนมัติ”`
+    ));
+  }
+
+  if (/^(รายจ่าย|จ่ายเงิน|เงินออก)$/i.test(text)) {
+    if (uid) await env.KV.put(`docmode:${key}:${uid}`, "รายจ่าย", { expirationTtl: 1800 });
+    return reply(env, event.replyToken, textMsg(`โหมดรายจ่ายเปิดแล้ว ✅
+ส่งบิล ใบเสร็จ หรือสลิปจ่ายต่อได้เลย
+ถ้าจะกลับให้ AI แยกเอง พิมพ์ “อัตโนมัติ”`));
+  }
+
+  if (/^(อัตโนมัติ|auto|แยกอัตโนมัติ)$/i.test(text)) {
+    if (uid) await env.KV.delete(`docmode:${key}:${uid}`);
+    return reply(env, event.replyToken, textMsg(`กลับเป็นโหมดอัตโนมัติแล้ว ✅
+ระบบจะพยายามแยกรายรับ/รายจ่ายจากเอกสาร และยังแก้ได้ในหน้าตรวจเอกสาร`));
   }
 
   const editRaw = uid ? await env.KV.get(`edit:${uid}`) : null;

@@ -8,7 +8,7 @@
 //   • GUARD สลิปโอนเงิน: กด confidence.vendor เพดาน 0.5 ไฮไลต์ส้มบังคับคนเช็ค
 //   • prompt เข้มเรื่องชื่อ: เบลอ/ถูกปิด → ห้ามเดาเติม ปล่อยว่างดีกว่า
 
-const CATEGORIES = [
+const EXPENSE_CATEGORIES = [
   "อาหาร & รับรอง",
   "เดินทาง & ขนส่ง",
   "ค่าน้ำ ค่าไฟ ค่าเน็ต",
@@ -17,6 +17,18 @@ const CATEGORIES = [
   "ค่าบริการ & จ้างงาน",
   "อื่น ๆ",
 ];
+const INCOME_CATEGORIES = [
+  "ขายสินค้า",
+  "ค่าบริการ",
+  "ค่าสมาชิก / Subscription",
+  "ค่าเช่า",
+  "ค่าคอมมิชชั่น / ค่านายหน้า",
+  "ค่าธรรมเนียม",
+  "รายได้จากโครงการ",
+  "ดอกเบี้ย / รายได้ทางการเงิน",
+  "รายได้อื่น",
+];
+const CATEGORIES = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
 
 const DOC_TYPES = [
   "ใบกำกับภาษี",
@@ -57,8 +69,16 @@ Extract data from this image as JSON only.
 - Thai date order is DAY/MONTH/YEAR, never MONTH/DAY/YEAR.
 - If genuinely absent, return "".
 
-## CATEGORY — read the whole photo, not only the document
-If the photo shows surroundings beyond the paper, use them:
+## TYPE + CATEGORY
+First determine type:
+- "รายจ่าย" = this business paid money / purchased something.
+- "รายรับ" = this business received money, or this is a sales document issued by this business to a customer.
+Then choose category from the matching list only:
+- expense categories: ${JSON.stringify(EXPENSE_CATEGORIES)}
+- income categories: ${JSON.stringify(INCOME_CATEGORIES)}
+For an incoming transfer slip where direction cannot be proven from the image alone, keep confidence conservative; the user can correct type on the review page.
+
+For expense category context, read the whole photo, not only the document. If the photo shows surroundings beyond the paper, use them:
   cinema seats / dark room with a bright screen → likely personal, not a business expense
   restaurant table, food, menu                 → อาหาร & รับรอง
   fuel pump, car dashboard, taxi meter         → เดินทาง & ขนส่ง
@@ -82,7 +102,7 @@ A clean screenshot with no surroundings gives no signal — judge from the text 
 - vendor   : string — ผู้รับ/ปลายทาง (keep Thai text as printed)
 - transferor : string — ผู้โอน/ต้นทาง; only for transfer slips, else ""
 - date     : "YYYY-MM-DD" Gregorian
-- category : pick exactly one from ${JSON.stringify(CATEGORIES)}
+- category : pick exactly one category from the correct expense/income list above
 - docType  : pick exactly one from ${JSON.stringify(DOC_TYPES)}
 - role     : "RECEIPT" | "TAX_INVOICE" | "PAYSLIP" | "PROOF" | "OTHER"
 - taxId    : string
@@ -229,7 +249,7 @@ async function askVision(env, imageBase64, mediaType) {
   // ใช้ Gemini ก่อนเพื่อลดต้นทุน ถ้าพังให้ fallback ไป Claude ที่ระบบเดิมใช้อยู่
   if (env.GEMINI_KEY) {
     try {
-      const text = await askVision(env, imageBase64, mediaType);
+      const text = await askGemini(env, imageBase64, mediaType);
       console.log("[ocr] engine=gemini");
       return text;
     } catch (e) {
@@ -350,4 +370,4 @@ export async function ocrReceipt(env, imageBase64, mediaType = "image/jpeg") {
   };
 }
 
-export { CATEGORIES, DOC_TYPES };
+export { CATEGORIES, EXPENSE_CATEGORIES, INCOME_CATEGORIES, DOC_TYPES };
