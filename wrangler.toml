@@ -24,8 +24,8 @@ GMAIL_INITIAL_LOOKBACK_DAYS = "45"
 GMAIL_SYNC_BATCH = "5"
 GMAIL_CRON_MAX_MESSAGES = "3"
 
-# Subscription Beta — เปิดใช้ฟรีทั้งระบบถึง 7 ต.ค. 2026
-BETA_FREE_UNTIL = "2026-10-07T23:59:59+07:00"
+# Commercial Pilot — แต่ละบัญชีทดลองใช้ฟรี 60 วันนับจากวันเริ่มใช้งานครั้งแรก
+# BETA_FREE_UNTIL ไม่ใช้แล้ว (Trial ไม่ผูกวันสิ้นสุดกลาง)
 BETA_TRIAL_DAYS = "60"
 SUBSCRIPTION_ENFORCEMENT = "1"
 
