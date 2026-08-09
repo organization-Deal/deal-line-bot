@@ -1,20 +1,12 @@
-LINE Bot v7.9 — Backend Guard ห้ามรวมใบเบิกซ้ำ
-==============================================
+HOTFIX v7.10
+อัปเข้า organization-Deal/deal-line-bot:
+- apply-line-card-review-fix.mjs (ทับตัวเดิมที่ root)
 
-อัปเข้า:
-organization-Deal/deal-line-bot
-
-ทับไฟล์เดิมที่ root:
-apply-line-card-review-fix.mjs
-
-Cloudflare Deploy command เดิมของคุณใช้ต่อได้เลย:
+Deploy command เดิม:
 node apply-line-card-review-fix.mjs && npx wrangler deploy
 
-ไม่ต้องเปลี่ยน Deploy command
+Log ที่ถูกต้อง:
+✅ LINE card + review + safe reimbursement duplicate guard applied
+Changed: src/index.js, src/oauth.js, src/multi-expense.js (src/batches.js untouched)
 
-รอบ build ใหม่ log ต้องขึ้น:
-✅ LINE card + review + reimbursement duplicate lock applied
-Changed: src/index.js, src/oauth.js, src/multi-expense.js, src/batches.js
-
-Backend จะ reject ถ้ามีการส่ง batchIds ของใบเบิกหลักมาให้รวมซ้ำ
-ต่อให้มีคนข้าม UI แล้วยิง API เองก็รวมซ้ำไม่ได้
+สำคัญ: v7.10 ไม่แก้ src/batches.js

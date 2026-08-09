@@ -9,7 +9,6 @@ const files = {
   index: path.join(root, 'src/index.js'),
   oauth: path.join(root, 'src/oauth.js'),
   multi: path.join(root, 'src/multi-expense.js'),
-  batches: path.join(root, 'src/batches.js'),
 };
 
 for (const [name, file] of Object.entries(files)) {
@@ -35,6 +34,35 @@ function patchIndex() {
     '{ type: "button", style: "primary", color: "#1D1D1F", height: "sm",\n          action: { type: "uri", label: "เชื่อม Google", uri: url } },',
     'connect card button'
   );
+  // v7.10: กันรวม "ใบเบิกหลักเดิม" ซ้ำ เฉพาะ /api/batch-close
+  // ไม่แตะ src/batches.js core และไม่กระทบ GET /api/batches
+  const batchCloseOld = `          const out = await createReimbursementBatches(env, key, sheetId, token, {
+            type: b.type === "ด่วน" ? "ด่วน" : "ปกติ",
+            payerKey: b.payerKey || "",
+            expenseIds: Array.isArray(b.expenseIds) ? b.expenseIds : [],
+            batchIds: Array.isArray(b.batchIds) ? b.batchIds : [],
+            note: b.note || "สร้างหรือรวมใบเบิกด้วยตนเองจาก Dashboard",
+          });`;
+  const batchCloseNew = `          const requestedExistingBatchIds = Array.isArray(b.batchIds)
+            ? [...new Set(b.batchIds.map((id) => String(id || "").trim()).filter(Boolean))]
+            : [];
+          if (requestedExistingBatchIds.length) {
+            return cors(json({
+              ok: false,
+              reason: "already_batched_items_not_mergeable",
+              message: "ใบเบิกที่รวมแล้ว ไม่สามารถนำไปรวมเป็นใบเบิกใหม่ซ้ำได้",
+              blockedBatchIds: requestedExistingBatchIds,
+            }, 409));
+          }
+          const out = await createReimbursementBatches(env, key, sheetId, token, {
+            type: b.type === "ด่วน" ? "ด่วน" : "ปกติ",
+            payerKey: b.payerKey || "",
+            expenseIds: Array.isArray(b.expenseIds) ? b.expenseIds : [],
+            batchIds: [],
+            note: b.note || "สร้างใบเบิกด้วยตนเองจาก Dashboard",
+          });`;
+  s = mustReplace(s, batchCloseOld, batchCloseNew, 'batch-close duplicate guard');
+
   fs.writeFileSync(files.index, s);
 }
 
@@ -79,27 +107,6 @@ function patchMulti() {
   fs.writeFileSync(files.multi, s);
 }
 
-
-function patchBatches() {
-  let s = fs.readFileSync(files.batches, 'utf8');
-
-  // v7.9: ใบเบิกหลักที่สร้างแล้วห้ามเอากลับมารวมเป็นใบเบิกใหม่อีก
-  // Frontend จะซ่อน checkbox และ backend ต้องกันซ้ำอีกชั้น
-  const anchor = `  const requestedBatchIds = [...new Set((options.batchIds || []).map((id) => String(id || "").trim()).filter(Boolean))];`;
-  const guarded = `${anchor}
-  if (requestedBatchIds.length) {
-    return {
-      ok: false,
-      reason: "already_batched_items_not_mergeable",
-      message: "รายการที่รวมเป็นใบเบิกแล้ว ไม่สามารถนำไปรวมเป็นใบเบิกใหม่ซ้ำได้",
-      blockedBatchIds: requestedBatchIds,
-    };
-  }`;
-  s = mustReplace(s, anchor, guarded, 'prevent merging existing reimbursement batches');
-
-  fs.writeFileSync(files.batches, s);
-}
-
 function syntaxCheck() {
   for (const file of Object.values(files)) execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
 
@@ -128,7 +135,6 @@ function syntaxCheck() {
 patchIndex();
 patchOauth();
 patchMulti();
-patchBatches();
 await syntaxCheck();
-console.log('\n✅ LINE card + review + reimbursement duplicate lock applied');
-console.log('Changed: src/index.js, src/oauth.js, src/multi-expense.js, src/batches.js');
+console.log('\n✅ LINE card + review + safe reimbursement duplicate guard applied');
+console.log('Changed: src/index.js, src/oauth.js, src/multi-expense.js (src/batches.js untouched)');
