@@ -10,6 +10,7 @@ const files = {
   oauth: path.join(root, 'src/oauth.js'),
   multi: path.join(root, 'src/multi-expense.js'),
   batches: path.join(root, 'src/batches.js'),
+  adminOps: path.join(root, 'src/admin-ops.js'),
 };
 
 for (const [name, file] of Object.entries(files)) {
@@ -23,6 +24,12 @@ function mustReplace(text, from, to, label) {
 
 function patchIndex() {
   let s = fs.readFileSync(files.index, 'utf8');
+  s = mustReplace(
+    s,
+    '} from "./accounting-suite.js";\n\nexport { MultiExpenseSession } from "./multi-expense.js";',
+    '} from "./accounting-suite.js";\nimport { handleAdminOps, recordOpsError, recordOpsHeartbeat } from "./admin-ops.js";\n\nexport { MultiExpenseSession } from "./multi-expense.js";',
+    'admin ops import'
+  );
   s = mustReplace(
     s,
     '{ type: "text", text: "เชื่อม Google ก่อนใช้งาน 🔗", weight: "bold", size: "md", color: "#1F6E56" },',
@@ -106,9 +113,48 @@ function patchIndex() {
   s = mustReplace(
     s,
     '    if (request.method === "OPTIONS") return cors(new Response(null, { status: 204 }));',
-    `    if (request.method === "OPTIONS") return cors(new Response(null, { status: 204 }));\n\n    if (url.pathname === "/pilot" && request.method === "GET") return pilotPage(env);\n    if (url.pathname === "/pilot/request" && request.method === "POST") return savePilotRequest(env, request);\n    if (url.pathname === "/admin/pilot-requests" && request.method === "GET") {\n      if (!adminOk(env, url)) return new Response("unauthorized", { status: 401 });\n      return pilotAdminPage(env);\n    }`,
+    `    if (request.method === "OPTIONS") return cors(new Response(null, { status: 204 }));\n\n    if (url.pathname.startsWith("/admin/ops/")) return handleAdminOps(request, env, url);\n    if (url.pathname === "/pilot" && request.method === "GET") return pilotPage(env);\n    if (url.pathname === "/pilot/request" && request.method === "POST") return savePilotRequest(env, request);\n    if (url.pathname === "/admin/pilot-requests" && request.method === "GET") {\n      if (!adminOk(env, url)) return new Response("unauthorized", { status: 401 });\n      return pilotAdminPage(env);\n    }`,
     'pilot endpoints'
   );
+
+  s = mustReplace(
+    s,
+    '        console.error(url.pathname, e);',
+    '        console.error(url.pathname, e);\n        await recordOpsError(env, { area: `api:${url.pathname}`, tenant: key || "", error: e });',
+    'api ops error hook'
+  );
+  s = mustReplace(
+    s,
+    '  console.error(`[${label}]`, error);',
+    '  console.error(`[${label}]`, error);\n  await recordOpsError(env, { area: `line:${label}`, tenant: tenantKey(event?.source || {}), error });',
+    'line ops error hook'
+  );
+  const oldScheduled = `  async scheduled(event, env, ctx) {
+    ctx.waitUntil(Promise.allSettled([
+      syncConnectedGmailAccounts(env, {
+        limit: Number(env.GMAIL_SYNC_BATCH || 5),
+      }).catch(e => console.error("gmail scheduled sync", e)),
+      runScheduledReimbursementBatches(env)
+        .catch(e => console.error("reimbursement scheduled batch", e)),
+    ]));
+  },`;
+  const newScheduled = `  async scheduled(event, env, ctx) {
+    ctx.waitUntil((async () => {
+      const startedAt = Date.now();
+      const [gmail, reimbursement] = await Promise.allSettled([
+        syncConnectedGmailAccounts(env, { limit: Number(env.GMAIL_SYNC_BATCH || 5) }),
+        runScheduledReimbursementBatches(env),
+      ]);
+      if (gmail.status === "rejected") await recordOpsError(env, { area: "cron:gmail", error: gmail.reason });
+      if (reimbursement.status === "rejected") await recordOpsError(env, { area: "cron:reimbursement", error: reimbursement.reason });
+      await recordOpsHeartbeat(env, "cron", {
+        durationMs: Date.now() - startedAt,
+        gmail: gmail.status === "fulfilled" ? { ok: true, result: gmail.value } : { ok: false, error: String(gmail.reason?.message || gmail.reason || "") },
+        reimbursement: reimbursement.status === "fulfilled" ? { ok: true, result: reimbursement.value } : { ok: false, error: String(reimbursement.reason?.message || reimbursement.reason || "") },
+      });
+    })());
+  },`;
+  s = mustReplace(s, oldScheduled, newScheduled, 'ops cron heartbeat');
 
   fs.writeFileSync(files.index, s);
 }
@@ -210,5 +256,5 @@ patchOauth();
 patchMulti();
 patchBatches();
 await syntaxCheck();
-console.log('\n✅ LINE + reimbursement + paid sync + Business 60-day Pilot applied');
-console.log('Changed: src/index.js, src/oauth.js, src/multi-expense.js, src/batches.js · Pilot Business trial enabled');
+console.log('\n✅ v7.13 Commercial Pilot + Internal Admin Ops applied');
+console.log('Changed: src/index.js, src/oauth.js, src/multi-expense.js, src/batches.js + src/admin-ops.js · Admin monitoring enabled');
