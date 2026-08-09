@@ -9,6 +9,7 @@ const files = {
   index: path.join(root, 'src/index.js'),
   oauth: path.join(root, 'src/oauth.js'),
   multi: path.join(root, 'src/multi-expense.js'),
+  batches: path.join(root, 'src/batches.js'),
 };
 
 for (const [name, file] of Object.entries(files)) {
@@ -107,6 +108,32 @@ function patchMulti() {
   fs.writeFileSync(files.multi, s);
 }
 
+
+function patchBatches() {
+  let s = fs.readFileSync(files.batches, 'utf8');
+
+  // v7.11: ตอนแนบสลิปจ่ายคืน ให้ legacy status ของรายการย่อยเปลี่ยนเป็น "จ่ายแล้ว" ด้วย
+  // เดิมเขียน paid=true + batchStatus=จ่ายแล้ว แต่ status ยังค้าง "รอเบิก"
+  const oldPaidPatch = `    patches.set(id, {
+      paid: true,
+      batchStatus: "จ่ายแล้ว",
+      attOther: existingOther.join(", "),
+      reimbursementSlipUrl: slipUrl,
+      reimbursedAt: paidAt,
+    });`;
+  const newPaidPatch = `    patches.set(id, {
+      status: "จ่ายแล้ว",
+      paid: true,
+      batchStatus: "จ่ายแล้ว",
+      attOther: existingOther.join(", "),
+      reimbursementSlipUrl: slipUrl,
+      reimbursedAt: paidAt,
+    });`;
+
+  s = mustReplace(s, oldPaidPatch, newPaidPatch, 'sync paid expense status');
+  fs.writeFileSync(files.batches, s);
+}
+
 function syntaxCheck() {
   for (const file of Object.values(files)) execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
 
@@ -135,6 +162,7 @@ function syntaxCheck() {
 patchIndex();
 patchOauth();
 patchMulti();
+patchBatches();
 await syntaxCheck();
-console.log('\n✅ LINE card + review + safe reimbursement duplicate guard applied');
-console.log('Changed: src/index.js, src/oauth.js, src/multi-expense.js (src/batches.js untouched)');
+console.log('\n✅ LINE card + review + reimbursement + paid expense sync applied');
+console.log('Changed: src/index.js, src/oauth.js, src/multi-expense.js, src/batches.js');
