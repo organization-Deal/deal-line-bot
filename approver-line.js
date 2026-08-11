@@ -46,6 +46,25 @@ async function lineFetch(env, path) {
   return { response, data, text };
 }
 
+async function workspaceName(env, tenant) {
+  tenant = clean(tenant, 100);
+  if (!tenant) return "";
+
+  try {
+    if (/^C/i.test(tenant)) {
+      const { response, data } = await lineFetch(env, `/group/${encodeURIComponent(tenant)}/summary`);
+      if (response.ok) return clean(data.groupName || "", 120);
+    }
+    if (/^R/i.test(tenant)) return "ห้อง LINE";
+    if (/^U/i.test(tenant)) {
+      const { response, data } = await lineFetch(env, `/profile/${encodeURIComponent(tenant)}`);
+      if (response.ok) return clean(data.displayName || "แชทส่วนตัว", 120);
+      return "แชทส่วนตัว";
+    }
+  } catch {}
+  return "";
+}
+
 async function profileFor(env, tenant, userId) {
   if (!validUserId(userId)) return null;
 
@@ -307,9 +326,13 @@ export async function listLineWorkspaceMembers(env, tenant, {
       lastSeenAt: row.lastSeenAt || "",
     }));
 
+  const resolvedWorkspaceName = await workspaceName(env, tenant).catch(() => "");
+
   return {
     ok: true,
     version: VERSION,
+    workspaceName: resolvedWorkspaceName,
+    workspaceType: /^C/i.test(tenant) ? "group" : /^R/i.test(tenant) ? "room" : "user",
     members,
     count: members.length,
     activeCount: members.filter((m) => m.active).length,
@@ -399,12 +422,14 @@ function money(value) {
   });
 }
 
-function approverCard(name, summary, dashboardUrl) {
+function approverCard(name, summary, dashboardUrl, context = {}) {
   const subtitle = summary.runNo
     ? `รอบ ${summary.runNo}`
     : summary.docId
       ? `เลขที่ ${summary.docId}`
       : "มีเอกสารใหม่รอตรวจ";
+  const companyName = clean(context.companyName || context.businessName || "", 100);
+  const groupName = clean(context.lineGroupName || "", 100);
 
   return {
     type: "flex",
@@ -421,6 +446,8 @@ function approverCard(name, summary, dashboardUrl) {
           { type: "text", text: "รออนุมัติ", size: "xs", weight: "bold", color: "#D92D20" },
           { type: "text", text: `มีใบเบิกรอให้ ${clean(name || "ผู้อนุมัติ", 40)} ตรวจ`, size: "xl", weight: "bold", color: "#111111", wrap: true },
           { type: "text", text: subtitle, size: "sm", color: "#6E6E73", wrap: true },
+          ...(companyName ? [{ type: "text", text: `บริษัท · ${companyName}`, size: "xs", color: "#6E6E73", wrap: true }] : []),
+          ...(groupName ? [{ type: "text", text: `LINE กลุ่ม · ${groupName}`, size: "xs", color: "#6E6E73", wrap: true }] : []),
           {
             type: "box",
             layout: "vertical",
@@ -473,23 +500,58 @@ export async function notifyApproverAssignment(env, tenant, record) {
   if (record?.role !== "approver" || !validUserId(record?.lineUserId) || !record?.token) {
     return { ok: false, skipped: true, reason: "approver_line_not_linked" };
   }
+
   const url = personalDashboardUrl(env, tenant, record.token);
   if (!url) return { ok: false, skipped: true, reason: "dashboard_url_missing" };
 
+  const companyName = clean(record.companyName || record.businessName || "บริษัทนี้", 120);
+  const groupName = clean(record.lineGroupName || record.workspaceName || "", 120);
+  const approverName = clean(record.name || record.lineDisplayName || "ผู้อนุมัติ", 80);
+
   const message = {
     type: "flex",
-    altText: "คุณได้รับสิทธิ์ผู้อนุมัติ",
+    altText: `คุณได้รับสิทธิ์ผู้อนุมัติ${groupName ? ` · ${groupName}` : ""}`,
     contents: {
       type: "bubble",
+      size: "mega",
       body: {
         type: "box",
         layout: "vertical",
         paddingAll: "20px",
         spacing: "sm",
         contents: [
-          { type: "text", text: "ตั้งค่าสำเร็จ", size: "xs", weight: "bold", color: "#147A36" },
-          { type: "text", text: "คุณได้รับสิทธิ์ผู้อนุมัติ", size: "xl", weight: "bold", color: "#111111", wrap: true },
-          { type: "text", text: "เมื่อมีใบเบิกรอตรวจ ระบบจะส่ง LINE มาหาคุณพร้อมลิงก์ Approver โดยตรง", size: "sm", color: "#6E6E73", wrap: true },
+          { type: "text", text: "สิทธิ์ใหม่", size: "xs", weight: "bold", color: "#147A36" },
+          { type: "text", text: "คุณได้รับสิทธิ์ผู้อนุมัติแล้ว", size: "xl", weight: "bold", color: "#111111", wrap: true },
+          { type: "text", text: approverName, size: "sm", color: "#6E6E73", wrap: true },
+          {
+            type: "box",
+            layout: "vertical",
+            backgroundColor: "#F5F5F7",
+            cornerRadius: "14px",
+            paddingAll: "14px",
+            margin: "md",
+            spacing: "xs",
+            contents: [
+              { type: "text", text: `บริษัท · ${companyName}`, size: "sm", weight: "bold", color: "#111111", wrap: true },
+              ...(groupName ? [{ type: "text", text: `LINE กลุ่ม · ${groupName}`, size: "sm", color: "#3A3A3C", wrap: true }] : []),
+              { type: "text", text: "สิทธิ์ · ผู้อนุมัติ", size: "sm", color: "#3A3A3C", wrap: true },
+            ],
+          },
+          {
+            type: "text",
+            text: "เมื่อมีใบเบิกรอตรวจ ระบบจะส่งแจ้งเตือนมาที่ LINE ส่วนตัวนี้ พร้อมปุ่มเปิดหน้าอนุมัติ",
+            size: "sm",
+            color: "#6E6E73",
+            wrap: true,
+            margin: "md",
+          },
+          {
+            type: "text",
+            text: "สิทธิ์นี้อนุมัติหรือตีกลับเอกสารได้ แต่ไม่สามารถตั้งโอนหรือจัดการสิทธิ์ทีม",
+            size: "xs",
+            color: "#86868B",
+            wrap: true,
+          },
         ],
       },
       footer: {
@@ -504,11 +566,23 @@ export async function notifyApproverAssignment(env, tenant, record) {
           action: { type: "uri", label: "เปิดหน้าอนุมัติ", uri: url },
         }],
       },
+      styles: {
+        body: { backgroundColor: "#FFFFFF" },
+        footer: { backgroundColor: "#FFFFFF" },
+      },
     },
   };
 
   const accepted = await push(env, record.lineUserId, message).catch(() => false);
-  return { ok: accepted, accepted, lineUserId: record.lineUserId };
+  return {
+    ok: accepted,
+    accepted,
+    sent: accepted,
+    lineUserId: record.lineUserId,
+    companyName,
+    lineGroupName: groupName,
+    reason: accepted ? "" : "line_push_not_delivered",
+  };
 }
 
 export async function notifyApproversForBatchOutput(env, tenant, output, { kind = "batch" } = {}) {
@@ -541,7 +615,12 @@ export async function notifyApproversForBatchOutput(env, tenant, output, { kind 
     const accepted = await push(
       env,
       approver.lineUserId,
-      approverCard(approver.name || approver.lineDisplayName || "ผู้อนุมัติ", summary, url)
+      approverCard(
+        approver.name || approver.lineDisplayName || "ผู้อนุมัติ",
+        summary,
+        url,
+        approver
+      )
     ).catch(() => false);
 
     if (accepted) {
