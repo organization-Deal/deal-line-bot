@@ -276,10 +276,24 @@ function syntaxCheck() {
   }
 }
 
-patchIndex();
-patchOauth();
-patchMulti();
-patchBatches();
-await syntaxCheck();
-console.log('\n✅ v7.15 Commercial Pilot + Admin Ops + LINE Group Traceability applied');
-console.log('Changed: src/index.js, src/oauth.js, src/multi-expense.js, src/batches.js + src/admin-ops.js · LINE group monitoring enabled');
+const currentIndexSource = fs.readFileSync(files.index, 'utf8');
+const legacyPatchAlreadyApplied = currentIndexSource.includes('async function getLineGroupsOverview(env, currentTenant');
+
+if (legacyPatchAlreadyApplied) {
+  // Cloudflare executes this file on every deployment, while modern source snapshots
+  // already contain this old one-time migration. Re-applying it duplicates
+  // getLineGroupsOverview and causes `Identifier ... has already been declared`.
+  console.log('ℹ️ apply-line-card-review-fix: v7.15 migration already present; skipping re-apply');
+  for (const file of Object.values(files)) {
+    execFileSync(process.execPath, ['--check', file], { stdio: 'inherit' });
+  }
+  console.log('✅ Existing source passed syntax checks');
+} else {
+  patchIndex();
+  patchOauth();
+  patchMulti();
+  patchBatches();
+  await syntaxCheck();
+  console.log('\n✅ v7.15 Commercial Pilot + Admin Ops + LINE Group Traceability applied');
+  console.log('Changed: src/index.js, src/oauth.js, src/multi-expense.js, src/batches.js + src/admin-ops.js · LINE group monitoring enabled');
+}
