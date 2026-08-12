@@ -7,7 +7,7 @@
 import { push } from "./line.js";
 import { readSettings } from "./sheets.js";
 
-const VERSION = "LINE_APPROVER_NOTIFY_V7_26_20260811";
+const VERSION = "LINE_APPROVER_NOTIFY_V7_27_20260812";
 const LINE_API = "https://api.line.me/v2/bot";
 const MEMBER_PREFIX = "linemember:v1:";
 const NOTIFY_PREFIX = "approvernotify:v1:";
@@ -496,6 +496,77 @@ function personalDashboardUrl(env, tenant, accessToken) {
   return u.toString();
 }
 
+async function lineApiRequest(env, path, { method = "GET", body } = {}) {
+  const response = await fetch(`https://api.line.me${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${env.LINE_ACCESS_TOKEN}`,
+      ...(body !== undefined ? { "content-type": "application/json" } : {}),
+    },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: String(text || "").slice(0, 500),
+    data,
+    requestId: response.headers.get("x-line-request-id") || "",
+  };
+}
+
+async function directLineProfileCheck(env, userId) {
+  const out = await lineApiRequest(env, `/v2/bot/profile/${encodeURIComponent(userId)}`).catch((error) => ({
+    ok: false,
+    status: 0,
+    text: String(error?.message || error || "network_error").slice(0, 300),
+    data: {},
+    requestId: "",
+  }));
+  if (out.ok) return { ...out, reason: "", displayName: clean(out.data?.displayName || "", 120) };
+  let reason = "line_profile_check_failed";
+  if (out.status === 400) reason = "line_user_invalid";
+  else if (out.status === 401 || out.status === 403) reason = "line_auth_error";
+  else if (out.status === 404) reason = "line_profile_unreachable";
+  return { ...out, reason, displayName: "" };
+}
+
+async function pushLineDetailed(env, to, messages) {
+  return lineApiRequest(env, "/v2/bot/message/push", {
+    method: "POST",
+    body: { to, messages: Array.isArray(messages) ? messages : [messages] },
+  }).catch((error) => ({
+    ok: false,
+    status: 0,
+    text: String(error?.message || error || "network_error").slice(0, 300),
+    data: {},
+    requestId: "",
+  }));
+}
+
+async function validatePushMessages(env, messages) {
+  return lineApiRequest(env, "/v2/bot/message/validate/push", {
+    method: "POST",
+    body: { messages: Array.isArray(messages) ? messages : [messages] },
+  }).catch((error) => ({
+    ok: false,
+    status: 0,
+    text: String(error?.message || error || "network_error").slice(0, 300),
+    data: {},
+    requestId: "",
+  }));
+}
+
+function lineFailureReason(result = {}) {
+  if (result.reason) return result.reason;
+  if (result.status === 400) return "line_push_bad_request";
+  if (result.status === 401 || result.status === 403) return "line_auth_error";
+  if (result.status >= 500) return "line_platform_error";
+  return "line_push_not_delivered";
+}
+
 export async function notifyApproverAssignment(env, tenant, record) {
   if (record?.role !== "approver" || !validUserId(record?.lineUserId) || !record?.token) {
     return { ok: false, skipped: true, reason: "approver_line_not_linked" };
@@ -507,6 +578,38 @@ export async function notifyApproverAssignment(env, tenant, record) {
   const companyName = clean(record.companyName || record.businessName || "บริษัทนี้", 120);
   const groupName = clean(record.lineGroupName || record.workspaceName || "", 120);
   const approverName = clean(record.name || record.lineDisplayName || "ผู้อนุมัติ", 80);
+  const fallbackTarget = clean(record.lineGroupTenant || "", 120);
+
+  // สำคัญ: userId ที่ดึงจากสมาชิกในกลุ่ม ไม่ได้แปลว่า OA ส่งข้อความส่วนตัวหาได้เสมอ
+  // GET /profile จะผ่านเมื่อผู้ใช้เป็นเพื่อน OA หรือเคยทัก OA แบบ 1:1 และไม่ได้บล็อก
+  const profile = await directLineProfileCheck(env, record.lineUserId);
+  if (!profile.ok) {
+    let fallbackGroupSent = false;
+    if (/^(C|R)/i.test(fallbackTarget)) {
+      const fallbackText = [
+        `แจ้ง ${approverName}`,
+        `ระบบสร้างสิทธิ์ผู้อนุมัติของ ${companyName} แล้ว`,
+        "แต่ LINE ส่วนตัวยังไม่พร้อมรับข้อความจาก OA นี้",
+        "ให้ผู้อนุมัติเปิดแชทกับ LINE OA แล้วส่งคำว่า “เชื่อม” 1 ข้อความ จากนั้น Owner กด “ส่ง LINE ใหม่”",
+      ].join("\n");
+      fallbackGroupSent = (await pushLineDetailed(env, fallbackTarget, { type: "text", text: fallbackText })).ok;
+    }
+    return {
+      ok: false,
+      attempted: true,
+      accepted: false,
+      sent: false,
+      fallbackGroupSent,
+      lineUserId: record.lineUserId,
+      companyName,
+      lineGroupName: groupName,
+      reason: profile.reason || "line_profile_unreachable",
+      httpStatus: profile.status || 0,
+      lineError: profile.data?.message || profile.text || "",
+      lineRequestId: profile.requestId || "",
+      profileReachable: false,
+    };
+  }
 
   const message = {
     type: "flex",
@@ -573,15 +676,57 @@ export async function notifyApproverAssignment(env, tenant, record) {
     },
   };
 
-  const accepted = await push(env, record.lineUserId, message).catch(() => false);
+  let delivery = await pushLineDetailed(env, record.lineUserId, message);
+  let usedTextFallback = false;
+  let validation = null;
+
+  // ถ้า Flex ถูก LINE ปฏิเสธ ให้ตรวจ payload และลองข้อความธรรมดาแทนทันที
+  // อย่างน้อยผู้อนุมัติจะยังได้รับลิงก์ ไม่ต้องรอแก้หน้าการ์ดก่อน
+  if (!delivery.ok && delivery.status === 400) {
+    validation = await validatePushMessages(env, message);
+    const plainText = [
+      `คุณได้รับสิทธิ์ผู้อนุมัติ · ${companyName}`,
+      groupName ? `กลุ่ม LINE: ${groupName}` : "",
+      `ผู้อนุมัติ: ${approverName}`,
+      "เปิดหน้าอนุมัติ:",
+      url,
+    ].filter(Boolean).join("\n");
+    const textDelivery = await pushLineDetailed(env, record.lineUserId, { type: "text", text: plainText });
+    if (textDelivery.ok) {
+      delivery = textDelivery;
+      usedTextFallback = true;
+    }
+  }
+
+  const accepted = delivery.ok;
+  let fallbackGroupSent = false;
+  if (!accepted && /^(C|R)/i.test(fallbackTarget)) {
+    const fallbackText = [
+      `แจ้ง ${approverName}`,
+      `ระบบสร้างสิทธิ์ผู้อนุมัติของ ${companyName} แล้ว`,
+      "แต่ส่งข้อความเข้า LINE ส่วนตัวไม่สำเร็จ",
+      "ให้ผู้อนุมัติเปิดแชทกับ LINE OA แล้วส่งคำว่า “เชื่อม” 1 ข้อความ จากนั้น Owner กด “ส่ง LINE ใหม่”",
+    ].join("\n");
+    fallbackGroupSent = (await pushLineDetailed(env, fallbackTarget, { type: "text", text: fallbackText })).ok;
+  }
+
   return {
     ok: accepted,
+    attempted: true,
     accepted,
     sent: accepted,
+    fallbackGroupSent,
     lineUserId: record.lineUserId,
     companyName,
     lineGroupName: groupName,
-    reason: accepted ? "" : "line_push_not_delivered",
+    reason: accepted ? "" : lineFailureReason(delivery),
+    httpStatus: delivery.status || 0,
+    lineError: delivery.data?.message || delivery.text || "",
+    lineRequestId: delivery.requestId || "",
+    profileReachable: true,
+    usedTextFallback,
+    messageValidationOk: validation ? validation.ok : true,
+    messageValidationError: validation && !validation.ok ? (validation.data?.message || validation.text || "") : "",
   };
 }
 
