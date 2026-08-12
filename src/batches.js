@@ -13,6 +13,7 @@ import {
 import { createBatchClaimPdf } from "./batch-documents.js";
 import { uploadTenantFile } from "./drive.js";
 import { push, textMsg } from "./line.js";
+import { notifyApproversForBatchOutput } from "./approver-line.js"; // LINE_APPROVER_NOTIFY_V7_26_20260811
 import { buildReimbursementCorrectionCard } from "./card.js";
 import {
   listPaymentChannels,
@@ -1536,6 +1537,8 @@ export async function runScheduledReimbursementBatches(env) {
           url ? `\nตรวจและอนุมัติใบเบิก:\n${url}` : "",
         ].filter(Boolean).join("\n");
         await push(env, tenant, textMsg(line)).catch((e) => console.warn("batch notify", tenant, e.message));
+        await notifyApproversForBatchOutput(env,tenant,out,{kind:"scheduled"})
+          .catch((e)=>console.warn("approver scheduled notify",tenant,e?.message||e));
       }
     } catch (e) {
       await releaseScheduledRun(env, tenant, scheduleSlot);

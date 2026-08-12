@@ -7,7 +7,7 @@
 import { push } from "./line.js";
 import { readSettings } from "./sheets.js";
 
-const VERSION = "LINE_APPROVER_NOTIFY_V7_26_20260811";
+const VERSION = "LINE_APPROVER_NOTIFY_V7_27_20260812";
 const LINE_API = "https://api.line.me/v2/bot";
 const MEMBER_PREFIX = "linemember:v1:";
 const NOTIFY_PREFIX = "approvernotify:v1:";
@@ -574,10 +574,27 @@ export async function notifyApproverAssignment(env, tenant, record) {
   };
 
   const accepted = await push(env, record.lineUserId, message).catch(() => false);
+
+  // ถ้า LINE ส่วนตัวส่งไม่ได้ ห้ามเอาลิงก์สิทธิ์ส่วนตัวไปโพสต์ในกลุ่ม
+  // ส่งเพียงข้อความแจ้งเตือนแบบปลอดภัย ให้ผู้อนุมัติเพิ่ม OA เป็นเพื่อนแล้ว Owner กด "ส่ง LINE ใหม่"
+  let fallbackGroupSent = false;
+  const fallbackTarget = clean(record.lineGroupTenant || "", 120);
+  if (!accepted && /^(C|R)/i.test(fallbackTarget)) {
+    const fallbackText = [
+      `แจ้ง ${approverName}`,
+      `ระบบสร้างสิทธิ์ผู้อนุมัติของ ${companyName} แล้ว`,
+      "แต่ยังส่งข้อความเข้า LINE ส่วนตัวไม่ได้",
+      "กรุณาเพิ่ม LINE OA นี้เป็นเพื่อน แล้วให้ Owner กด “ส่ง LINE ใหม่” จากหน้า ทีมของฉัน",
+    ].join("\n");
+    fallbackGroupSent = await push(env, fallbackTarget, { type: "text", text: fallbackText }).catch(() => false);
+  }
+
   return {
     ok: accepted,
+    attempted: true,
     accepted,
     sent: accepted,
+    fallbackGroupSent,
     lineUserId: record.lineUserId,
     companyName,
     lineGroupName: groupName,

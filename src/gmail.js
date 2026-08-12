@@ -93,7 +93,10 @@ export async function handleGmailCallback(env, url, origin) {
   const refresh = tok.refresh_token || existingRefresh;
   if (!refresh) return resultPage("เชื่อม Gmail ไม่สำเร็จ", "ไม่ได้รับ Refresh token กรุณายกเลิกสิทธิ์แอปในบัญชี Google แล้วกดเชื่อมใหม่", st.returnUrl || "");
 
-  await env.KV.put(`gmail:refresh:${st.tenant}`, refresh);
+  await Promise.all([
+    env.KV.put(`gmail:refresh:${st.tenant}`, refresh),
+    env.KV.put(`gmail:ever:${st.tenant}`, "1"),
+  ]);
   const profileRes = await fetch(`${API}/profile`, { headers: { Authorization: `Bearer ${tok.access_token}` } });
   const profile = profileRes.ok ? await profileRes.json() : {};
   const now = new Date().toISOString();
@@ -103,6 +106,7 @@ export async function handleGmailCallback(env, url, origin) {
     connectedAt: now,
     lastError: "",
     reconnectRequired: false,
+    everConnected: true,
     betaTesting: true,
   });
   await env.KV.put(`gmailtenant:${st.tenant}`, "1");
@@ -137,21 +141,48 @@ async function gmailAccessToken(env, tenant) {
   }
   const j = await res.json();
   _accessCache.set(tenant, { token: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000 });
+  const meta = await readMeta(env, tenant);
+  if (meta.lastError || meta.reconnectRequired === true || meta.connected !== true) {
+    await writeMeta(env, tenant, {
+      connected: true,
+      reconnectRequired: false,
+      lastError: "",
+      everConnected: true,
+    });
+  }
   return j.access_token;
 }
 
-export async function getGmailStatus(env, tenant) {
-  const refresh = await env.KV.get(`gmail:refresh:${tenant}`);
-  const meta = await readMeta(env, tenant);
+export async function getGmailStatus(env, tenant, { validate = false } = {}) {
+  let refresh = await env.KV.get(`gmail:refresh:${tenant}`);
+  let meta = await readMeta(env, tenant);
+  const everMarker = (await env.KV.get(`gmail:ever:${tenant}`)) === "1";
+  const everConnected = everMarker || meta.everConnected === true || !!meta.connectedAt;
+
+  // Dashboard status should tell "ต้องเชื่อมใหม่" instead of pretending this is a first-time setup.
+  // Validation refreshes the token only when the Dashboard explicitly asks for current status.
+  if (validate && refresh && meta.reconnectRequired !== true) {
+    await gmailAccessToken(env, tenant).catch(() => null);
+    refresh = await env.KV.get(`gmail:refresh:${tenant}`);
+    meta = await readMeta(env, tenant);
+  }
+
+  const reconnectRequired =
+    meta.reconnectRequired === true ||
+    (!refresh && everConnected);
+  const connected = !!refresh && !reconnectRequired;
+
   return {
-    connected: !!refresh && meta.reconnectRequired !== true,
+    connected,
     email: meta.email || "",
     connectedAt: meta.connectedAt || "",
     lastSyncAt: meta.lastSyncAt || "",
     lastSyncCount: Number(meta.lastSyncCount || 0),
     lastCheckedCount: Number(meta.lastCheckedCount || 0),
     lastError: meta.lastError || "",
-    reconnectRequired: meta.reconnectRequired === true,
+    reconnectRequired,
+    everConnected,
+    statusReason: connected ? "connected" : reconnectRequired ? "reconnect_required" : "never_connected",
     betaTesting: true,
     autoSync: true,
   };
@@ -168,6 +199,7 @@ export async function disconnectGmail(env, tenant) {
   await Promise.all([
     env.KV.delete(`gmail:refresh:${tenant}`),
     env.KV.delete(`gmail:meta:${tenant}`),
+    env.KV.delete(`gmail:ever:${tenant}`),
     env.KV.delete(`gmailtenant:${tenant}`),
   ]);
   _accessCache.delete(tenant);

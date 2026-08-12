@@ -55,6 +55,13 @@ import {
 } from "./multi-expense.js";
 import { classifyTransferByCompanyAccounts } from "./account-direction.js";
 import {
+  rememberLineEventMembers,
+  listLineWorkspaceMembers,
+  bindApproverLine,
+  notifyApproverAssignment,
+  notifyApproversForBatchOutput,
+} from "./approver-line.js"; // LINE_APPROVER_NOTIFY_V7_26_20260811
+import {
   ACCOUNTING_SUITE_VERSION, ensureAccountingSuiteTabs, getContacts, upsertContact, getContactStatement,
   getPayables, createPayable, updatePayable, addPayablePayment,
   getOpeningBalances, addOpeningBalance, getMigrationDashboard, importMigration,
@@ -65,7 +72,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v7.1_ACCOUNTING_SUITE_20260809";
+const VERSION = "DEAL_LINE_BOT_v7.27_ACCESS_GMAIL_LINE_FIX_20260812";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -126,12 +133,51 @@ async function listDashAccess(env,key){
   for(const k of listed.keys||[]){const rec=await env.KV.get(k.name,"json").catch(()=>null);if(rec)rows.push({...rec,token:k.name.split(":").at(-1)});}
   return rows.sort((a,b)=>String(a.name||"").localeCompare(String(b.name||""),"th"));
 }
-async function createDashAccess(env,key,{name="",role="viewer",lineUserId=""}={}){
+async function createDashAccess(env,key,{
+    name="",
+    role="viewer",
+    lineUserId="",
+    lineGroupTenant="",
+    lineGroupName="",
+    companyName="",
+  }={}){
+  // APPROVER_ASSIGNMENT_CONFIRM_V7_26_3_20260812
   const r=["accountant","approver","viewer"].includes(role)?role:"viewer",token=crypto.randomUUID().replace(/-/g,"").slice(0,24);
-  const rec={name:String(name||DASH_ROLES[r]).trim().slice(0,120),role:r,lineUserId:String(lineUserId||"").trim().slice(0,120),active:true,createdAt:new Date().toISOString()};
+  const rec={
+    name:String(name||DASH_ROLES[r]).trim().slice(0,120),
+    role:r,
+    lineUserId:String(lineUserId||"").trim().slice(0,120),
+    lineGroupTenant:r==="approver"?String(lineGroupTenant||"").trim().slice(0,120):"",
+    lineGroupName:r==="approver"?String(lineGroupName||"").trim().slice(0,160):"",
+    companyName:String(companyName||"").trim().slice(0,160),
+    active:true,
+    createdAt:new Date().toISOString()
+  };
   await env.KV.put(`daccess:${key}:${token}`,JSON.stringify(rec));return {...rec,token};
 }
 async function revokeDashAccess(env,key,token){await env.KV.delete(`daccess:${key}:${token}`);return {ok:true};}
+
+async function readDashAccessRecord(env,key,token){
+  const cleanToken=String(token||"").trim();
+  if(!cleanToken)return null;
+  return await env.KV.get(`daccess:${key}:${cleanToken}`,"json").catch(()=>null);
+}
+async function patchDashAccessRecord(env,key,token,patch={}){
+  const cleanToken=String(token||"").trim();
+  const current=await readDashAccessRecord(env,key,cleanToken);
+  if(!current)return null;
+  const next={...current,...patch,updatedAt:new Date().toISOString()};
+  await env.KV.put(`daccess:${key}:${cleanToken}`,JSON.stringify(next));
+  return {...next,token:cleanToken};
+}
+function lineNotificationPatch(result={}){
+  const sent=result?.sent===true||result?.accepted===true;
+  return {
+    lineNotificationStatus: sent ? "sent" : "failed",
+    lineNotificationAt: new Date().toISOString(),
+    lineNotificationReason: sent ? "" : String(result?.reason||"line_push_not_delivered").slice(0,180),
+  };
+}
 
 /* ═══════════ เช็คว่าตั้งค่าข้อมูลบริษัทครบหรือยัง ═══════════ */
 
@@ -250,6 +296,102 @@ async function ensureBusinessAccount(env, tenant) {
 
 async function readBusinessMeta(env, tenant) {
   return (await env.KV.get(businessMetaKey(tenant), "json").catch(() => null)) || {};
+}
+
+/* v7.27 — lightweight LINE group directory used by Dashboard approver picker.
+   Keep this scoped to businesses that already belong to the same account. */
+function lineWorkspaceSourceTypeV727(tenant = "") {
+  const id = String(tenant || "").trim();
+  if (/^C/i.test(id)) return "group";
+  if (/^R/i.test(id)) return "room";
+  if (/^U/i.test(id)) return "direct";
+  return "workspace";
+}
+
+async function getLineGroupsOverview(env, currentTenant, { refresh = false } = {}) {
+  const account = await ensureBusinessAccount(env, currentTenant);
+  const rows = [];
+
+  for (let i = 0; i < account.businesses.length; i++) {
+    const tenant = String(account.businesses[i] || "").trim();
+    if (!tenant) continue;
+
+    const sourceType = lineWorkspaceSourceTypeV727(tenant);
+    const sheetId = await env.KV.get(`tenant:${tenant}`);
+    const token = sheetId ? await getUserToken(env, tenant).catch(() => null) : null;
+    const settings = sheetId && token ? await readSettings(env, sheetId, token).catch(() => ({})) : {};
+    const meta = await readBusinessMeta(env, tenant).catch(() => ({}));
+    const businessName =
+      settingValue(settings, "company_name") ||
+      String(meta.name || "").trim() ||
+      (i === 0 ? "ธุรกิจหลัก" : `ธุรกิจ ${i + 1}`);
+
+    let groupName = String(meta.lineGroupName || meta.groupName || "").trim();
+    let connected = sourceType === "direct";
+    let error = "";
+
+    if (sourceType === "group" && env.LINE_ACCESS_TOKEN) {
+      const cacheKey = `linegroupmeta:v727:${tenant}`;
+      const cached = !refresh ? await env.KV.get(cacheKey, "json").catch(() => null) : null;
+      if (cached?.groupName) {
+        groupName = String(cached.groupName || groupName).trim();
+        connected = cached.connected === true;
+      } else {
+        try {
+          const response = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(tenant)}/summary`, {
+            headers: { Authorization: `Bearer ${env.LINE_ACCESS_TOKEN}` },
+          });
+          if (response.ok) {
+            const body = await response.json().catch(() => ({}));
+            groupName = String(body.groupName || groupName).trim();
+            connected = true;
+          } else {
+            connected = false;
+            error = `LINE ${response.status}`;
+          }
+        } catch (e) {
+          connected = false;
+          error = String(e?.message || e).slice(0, 160);
+        }
+        await env.KV.put(cacheKey, JSON.stringify({
+          groupName,
+          connected,
+          error,
+          checkedAt: new Date().toISOString(),
+        }), { expirationTtl: 60 * 60 * 6 }).catch(() => {});
+      }
+    }
+
+    if (!groupName) {
+      groupName =
+        sourceType === "group" ? `LINE Group ···${tenant.slice(-6)}` :
+        sourceType === "room" ? `LINE Room ···${tenant.slice(-6)}` :
+        sourceType === "direct" ? "แชทส่วนตัว" :
+        businessName;
+    }
+
+    rows.push({
+      tenant,
+      businessName,
+      isRoot: tenant === account.rootTenant,
+      isCurrent: tenant === currentTenant,
+      sheetId: sheetId || "",
+      sourceType,
+      groupId: sourceType === "group" ? tenant : "",
+      groupName,
+      connected,
+      error,
+    });
+  }
+
+  return {
+    ok: true,
+    rootTenant: account.rootTenant,
+    currentTenant,
+    rows,
+    groupCount: rows.filter((row) => row.sourceType === "group").length,
+    refreshedAt: new Date().toISOString(),
+  };
 }
 
 async function saveBusinessMeta(env, tenant, patch = {}) {
@@ -770,6 +912,13 @@ export default {
         }
 
 
+        if (url.pathname === "/api/line-groups") {
+          if (access.role !== "owner") return cors(json({ ok:false, error:"owner_only" }, 403));
+          return cors(json(await getLineGroupsOverview(env, key, {
+            refresh: url.searchParams.get("refresh") === "1",
+          })));
+        }
+
         if (url.pathname === "/api/businesses") {
           const info=await listBusinessWorkspaces(env,key);
           if(access.role!=="owner"){
@@ -887,12 +1036,102 @@ export default {
         }
         if (url.pathname === "/api/accounting/access") {
           if(access.role!=="owner")return cors(json({ok:false,error:"owner_only"},403));
-          if(request.method==="POST"){const b=await request.json().catch(()=>({}));const rec=await createDashAccess(env,key,b);const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");return cors(json({ok:true,record:{...rec,url:`${base}?tenant=${encodeURIComponent(key)}&k=${rec.token}`}}));}
+          if(request.method==="POST"){
+            const b=await request.json().catch(()=>({}));
+            const rec=await createDashAccess(env,key,b);
+            const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
+            let record={...rec,url:`${base}?tenant=${encodeURIComponent(key)}&k=${rec.token}`};
+            let lineNotification={attempted:false,sent:false,accepted:false};
+            if(rec.role==="approver"&&rec.lineUserId){
+              lineNotification=await notifyApproverAssignment(env,key,record)
+                .catch(e=>({ok:false,attempted:true,sent:false,accepted:false,reason:String(e?.message||e).slice(0,180)}));
+              const saved=await patchDashAccessRecord(env,key,rec.token,lineNotificationPatch(lineNotification));
+              if(saved)record={...saved,url:`${base}?tenant=${encodeURIComponent(key)}&k=${rec.token}`};
+            }
+            return cors(json({ok:true,record,lineNotification}));
+          }
           const rows=await listDashAccess(env,key);const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");return cors(json({ok:true,role:access.role,rows:rows.map(r=>({...r,url:`${base}?tenant=${encodeURIComponent(key)}&k=${r.token}`}))}));
         }
         if (url.pathname === "/api/accounting/access-revoke" && request.method === "POST") {
           if(access.role!=="owner")return cors(json({ok:false,error:"owner_only"},403));const b=await request.json().catch(()=>({}));return cors(json(await revokeDashAccess(env,key,b.token||"")));
         }
+
+        if (url.pathname === "/api/accounting/access-notify" && request.method === "POST") {
+          if(access.role!=="owner")return cors(json({ok:false,error:"owner_only"},403));
+          const b=await request.json().catch(()=>({}));
+          const accessToken=String(b.token||"").trim();
+          const current=await readDashAccessRecord(env,key,accessToken);
+          if(!current||current.active===false)return cors(json({ok:false,error:"access_not_found",message:"ไม่พบสิทธิ์ผู้ใช้งานนี้"},404));
+          if(current.role!=="approver"||!current.lineUserId)return cors(json({ok:false,error:"approver_line_not_linked",message:"สิทธิ์นี้ยังไม่ได้ผูก LINE ผู้อนุมัติ"},400));
+          const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
+          const record={...current,token:accessToken,url:`${base}?tenant=${encodeURIComponent(key)}&k=${accessToken}`};
+          const lineNotification=await notifyApproverAssignment(env,key,record)
+            .catch(e=>({ok:false,attempted:true,sent:false,accepted:false,reason:String(e?.message||e).slice(0,180)}));
+          const saved=await patchDashAccessRecord(env,key,accessToken,lineNotificationPatch(lineNotification));
+          return cors(json({
+            ok:true,
+            lineNotification,
+            record:saved?{...saved,url:record.url}:record,
+          }));
+        }
+
+        if (url.pathname === "/api/line-members") {
+          if(access.role!=="owner")return cors(json({ok:false,error:"owner_only"},403));
+
+          // APPROVER_GROUP_DIRECTORY_V7_26_2_20260812
+          // Owner may use a LINE group inside the SAME account only as the member directory.
+          // This never grants access to arbitrary groupIds from another customer/account.
+          const requestedSourceTenant = String(url.searchParams.get("sourceTenant") || "").trim();
+          let sourceTenant = key;
+
+          if (requestedSourceTenant && requestedSourceTenant !== key) {
+            const groups = await getLineGroupsOverview(env,key,{refresh:false});
+            const allowed = (groups.rows || []).find((row) =>
+              String(row.tenant || "") === requestedSourceTenant &&
+              (String(row.sourceType || "") === "group" || String(row.groupId || "").startsWith("C"))
+            );
+            if (!allowed) {
+              return cors(json({
+                ok:false,
+                error:"line_group_not_in_account",
+                message:"กลุ่ม LINE นี้ไม่ได้อยู่ในบัญชี/Workspace ชุดนี้",
+              },403));
+            }
+            sourceTenant = requestedSourceTenant;
+          }
+
+          const sourceSheetId = (await env.KV.get(`tenant:${sourceTenant}`)) || sheetId;
+          const sourceToken = (await getUserToken(env,sourceTenant).catch(()=>null)) || token;
+
+          const out = await listLineWorkspaceMembers(env,sourceTenant,{
+            sheetId:sourceSheetId,
+            token:sourceToken,
+            refresh:url.searchParams.get("refresh")!=="0",
+          });
+
+          return cors(json({
+            ...out,
+            selectedSourceTenant:sourceTenant,
+            approvalTenant:key,
+          }));
+        }
+
+        if (url.pathname === "/api/accounting/access-line" && request.method === "POST") {
+          if(access.role!=="owner")return cors(json({ok:false,error:"owner_only"},403));
+          const b=await request.json().catch(()=>({}));
+          const out=await bindApproverLine(env,key,b.token||"",b.lineUserId||"");
+          if(out.ok){
+            const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
+            let record={...out.record,url:`${base}?tenant=${encodeURIComponent(key)}&k=${out.record.token}`};
+            const lineNotification=await notifyApproverAssignment(env,key,record)
+              .catch(e=>({ok:false,attempted:true,sent:false,accepted:false,reason:String(e?.message||e).slice(0,180)}));
+            const saved=await patchDashAccessRecord(env,key,out.record.token,lineNotificationPatch(lineNotification));
+            if(saved)record={...saved,url:`${base}?tenant=${encodeURIComponent(key)}&k=${out.record.token}`};
+            return cors(json({ok:true,record,lineNotification}));
+          }
+          return cors(json(out,400));
+        }
+
         if (url.pathname === "/api/accounting/whoami") return cors(json({ok:true,role:access.role,roleLabel:DASH_ROLES[access.role]||access.role,name:access.name||"",lineUserId:access.lineUserId||""}));
         if (url.pathname === "/api/accounting/search") return cors(json(await searchAccounting(env, sheetId, token, { q: url.searchParams.get("q") || "", limit: url.searchParams.get("limit") || 80 })));
         if (url.pathname === "/api/accounting/today") return cors(json(await getTodayWork(env, sheetId, token)));
@@ -1053,7 +1292,7 @@ export default {
 
         /* Gmail OAuth — เชื่อมโดยตรงสำหรับ Beta */
         if (url.pathname === "/api/gmail-status") {
-          return cors(json(await getGmailStatus(env, key)));
+          return cors(json(await getGmailStatus(env, key, { validate: true })));
         }
 
         if (url.pathname === "/api/gmail-sync" && request.method === "POST") {
@@ -1127,7 +1366,10 @@ export default {
             batchIds: Array.isArray(b.batchIds) ? b.batchIds : [],
             note: b.note || "สร้างหรือรวมใบเบิกด้วยตนเองจาก Dashboard",
           });
-          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"CREATE_BATCH",entityType:"reimbursement_batch",entityId:out.batchId||out.id||"",summary:`สร้าง/รวมรอบเบิก ${b.type||"ปกติ"}`,after:out});
+          if(out.ok){
+            await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"CREATE_BATCH",entityType:"reimbursement_batch",entityId:out.batchId||out.id||"",summary:`สร้าง/รวมรอบเบิก ${b.type||"ปกติ"}`,after:out});
+            ctx.waitUntil(notifyApproversForBatchOutput(env,key,out,{kind:b.type==="ด่วน"?"urgent-dashboard":"manual-dashboard"}).catch(e=>console.warn("approver batch notify",e?.message||e)));
+          }
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -1135,7 +1377,10 @@ export default {
           const b = await request.json().catch(() => ({}));
           const ids = Array.isArray(b.expenseIds) ? b.expenseIds : [b.id].filter(Boolean);
           const out = await requestUrgentBatch(env, key, sheetId, token, ids);
-          if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"REQUEST_URGENT",entityType:"expense",entityId:ids.join(","),summary:`ขอเบิกด่วน ${ids.length} รายการ`,after:out});
+          if(out.ok){
+            await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"REQUEST_URGENT",entityType:"expense",entityId:ids.join(","),summary:`ขอเบิกด่วน ${ids.length} รายการ`,after:out});
+            ctx.waitUntil(notifyApproversForBatchOutput(env,key,out,{kind:"urgent-dashboard"}).catch(e=>console.warn("approver urgent notify",e?.message||e)));
+          }
           return cors(json(out, out.ok ? 200 : 400));
         }
 
@@ -1355,6 +1600,10 @@ export default {
 
     for (const event of body.events || []) {
       const key = tenantKey(event.source);
+      ctx.waitUntil(
+        rememberLineEventMembers(env,event)
+          .catch(e=>console.warn("remember LINE member",key,e?.message||e))
+      );
       const isImage = event.type === "message" && event.message?.type === "image";
       const postbackAct = event.type === "postback" ? new URLSearchParams(event.postback?.data || "").get("act") : "";
       const isConfirm = postbackAct === "confirm" || postbackAct === "confirm_force" || postbackAct === "multi_confirm";
@@ -2163,6 +2412,8 @@ ${out.error || "กรุณาตรวจข้อมูลอีกครั�
         return push(env, lineTarget(event.source), textMsg("สร้างใบเบิกด่วนไม่สำเร็จ กรุณาเปิด Dashboard เพื่อตรวจรายการ"));
       }
       const batch = out.batches[0];
+      await notifyApproversForBatchOutput(env,key,out,{kind:"urgent-line"})
+        .catch(e=>console.warn("approver urgent LINE notify",e?.message||e));
       const updated = await getExpenseById(env, sheet.sheetId, id, sheet.token);
       const messages = [
         textMsg(`สร้างใบเบิกด่วนแล้ว ✅
