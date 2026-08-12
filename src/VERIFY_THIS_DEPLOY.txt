@@ -1,0 +1,17 @@
+After deploy, open:
+https://accoutingsuppor02.organization-23c.workers.dev/
+
+Expected exact version:
+DEAL_LINE_BOT_v2.6_DEPLOY_PROOF_3_BUTTONS_PDF_SPLIT_20260805
+
+New LINE summary cards must show exactly 3 buttons:
+1) ยืนยันรายการถูกต้อง
+2) ตรวจและแก้ไข
+3) ยกเลิกชุด
+
+New PDFs created after this deploy:
+- claim summary PDF is created separately
+- replacement receipt PDF is created separately
+- evidence pages are created separately
+- all PDFs are merged only after generation
+- claim summary has no evidence/replacement columns and no claimant/approver signatures

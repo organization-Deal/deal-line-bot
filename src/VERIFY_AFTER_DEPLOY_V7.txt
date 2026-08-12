@@ -1,0 +1,45 @@
+VERIFY ACCOUNTING SUITE v7.1
+============================
+
+A. WORKER
+1. Open Worker root URL.
+2. Must contain:
+   "version": "DEAL_LINE_BOT_v7.1_ACCOUNTING_SUITE_20260809"
+   "ok": true
+   "mobileWebUx": true
+
+B. DASHBOARD
+1. Close old Dashboard tab, open a fresh tab.
+2. Confirm existing pages still work: Overview, Expenses, Income, Batches, Reconciliation.
+3. Confirm new menu “บัญชี SME” has:
+   - ค้นหาทั้งระบบ
+   - ลูกค้าและผู้ขาย
+   - ปิดงวดบัญชี
+   - ศูนย์ภาษี
+   - สมุดบัญชี
+   - ย้ายข้อมูล
+   - Audit & สิทธิ์
+4. Confirm top-level “เจ้าหนี้”.
+
+C. SAFE DATA CHECK
+1. Existing รายจ่าย and รายรับ counts must remain unchanged.
+2. Opening new accounting page should add NEW tabs only:
+   คู่ค้า, เจ้าหนี้, จ่ายเจ้าหนี้, ยอดยกมา, ปิดงวด, _audit_log,
+   ประวัติเดิม, _migration_log, ผังบัญชี, สมุดรายวัน
+3. Do not run a real migration before taking a backup.
+
+D. BASIC FLOW
+1. Add one Contact.
+2. Add one AP invoice and partial payment.
+3. Add one Income record; Contact Master should auto-merge/create customer.
+4. Open Tax Center for current month.
+5. Open Ledger; debit and credit totals should balance for v7-posted journals + opening balances.
+6. Open Period Close; inspect checklist, do NOT close production period just for testing.
+7. Create a Viewer/Accountant test link from Audit & สิทธิ์, verify owner link is not shared.
+8. Search by vendor/customer/amount in Global Search.
+
+E. MIGRATION TEST (USE A SMALL SAMPLE FIRST)
+1. Download template.
+2. Import 3-5 test rows.
+3. Verify mapping, counts, and error rows.
+4. Opening Balance summary should show whether Debit = Credit.

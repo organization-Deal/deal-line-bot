@@ -1,0 +1,16 @@
+{
+  "name": "deal-line-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1"
+  }
+}

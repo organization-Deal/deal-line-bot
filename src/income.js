@@ -492,13 +492,16 @@ export async function updateIncomePayment(env,sheetId,paymentId,patch={},token=n
   return {ok:true,payment:{...row,...out}};
 }
 
-export async function getIncomeDashboard(env,sheetId,token=null){
+export async function getIncomeDashboard(env,sheetId,token=null,opts={}){
   const t=await auth(env,token);
   await ensureIncomeTabs(env,sheetId,t);
+  const includeReconciliation = opts.includeReconciliation !== false;
   const [records,payments,reconRows]=await Promise.all([
     listTab(env,sheetId,t,TAB_INCOME,INCOME_SCHEMA,INC_LAST,{ensure:false}),
     listTab(env,sheetId,t,TAB_RECEIPTS,PAYMENT_SCHEMA,PAY_LAST,{ensure:false}),
-    listTab(env,sheetId,t,TAB_INCOME_RECON,INCOME_RECON_SCHEMA,RECON_LAST,{ensure:false}),
+    includeReconciliation
+      ? listTab(env,sheetId,t,TAB_INCOME_RECON,INCOME_RECON_SCHEMA,RECON_LAST,{ensure:false})
+      : Promise.resolve([]),
   ]);
   const active=records.filter(r=>r.status!=="ยกเลิก");
   const total=(rows,key)=>round2(rows.reduce((s,r)=>s+num(r[key]),0));
