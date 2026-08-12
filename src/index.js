@@ -72,7 +72,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v7.27_ACCESS_GMAIL_LINE_FIX_20260812";
+const VERSION = "DEAL_LINE_BOT_v7.32_EXISTING_BUSINESS_MERGE_20260813";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -483,6 +483,9 @@ async function createBusinessInvite(env, currentTenant) {
 }
 
 async function linkBusinessFromInvite(env, event, currentTenant, codeRaw) {
+  // v7.32: อนุญาตให้นำ "ธุรกิจเดิมที่เชื่อมอยู่แล้ว" เข้าบัญชีหลักได้โดยไม่ทับ Sheet/Drive เดิม
+  // เดิมโค้ด reject ทันทีเมื่อ tenant:<groupId> มีค่า ทำให้กลุ่มที่เคยกด Dashboard/เชื่อม Google แล้ว
+  // ไม่สามารถถูกเพิ่มเข้าบัญชีเดียวกัน และหน้าเลือก LINE ผู้อนุมัติจึงเห็นแค่กลุ่มเก่า
   const code = String(codeRaw || "").trim().toUpperCase();
   if (!event.source?.groupId) return { ok: false, reason: "group_required", message: "การเพิ่มธุรกิจต้องทำในกลุ่ม LINE ของธุรกิจใหม่" };
   const invite = await env.KV.get(businessInviteKey(code), "json").catch(() => null);
@@ -493,15 +496,56 @@ async function linkBusinessFromInvite(env, event, currentTenant, codeRaw) {
   }
 
   const rootTenant = await getAccountRoot(env, invite.rootTenant);
-  const existingRoot = await env.KV.get(accountRootMapKey(currentTenant));
-  const existingSheet = await env.KV.get(`tenant:${currentTenant}`);
-  if ((existingRoot && existingRoot !== rootTenant) || (existingSheet && currentTenant !== rootTenant)) {
-    return { ok: false, reason: "already_linked", message: "กลุ่ม LINE นี้มีธุรกิจ/ข้อมูลเดิมอยู่แล้ว จึงไม่สามารถนำไปผูกทับกับบัญชีอื่นได้" };
+  const existingRootRaw = String((await env.KV.get(accountRootMapKey(currentTenant))) || "").trim();
+  const existingRoot = existingRootRaw || currentTenant;
+  let sheetId = String((await env.KV.get(`tenant:${currentTenant}`)) || "").trim();
+  const hadExistingSheet = Boolean(sheetId);
+
+  // ถ้าอยู่บัญชีปลายทางนี้แล้ว ให้ทำงานแบบ idempotent และซ่อม business list ให้ครบ
+  if (existingRootRaw === rootTenant) {
+    const account = await ensureBusinessAccount(env, rootTenant);
+    const nextBusinesses = Array.from(new Set([...account.businesses, currentTenant]));
+    await Promise.all([
+      env.KV.put(businessAccountKey(rootTenant), JSON.stringify({ ...account, businesses: nextBusinesses, updatedAt: new Date().toISOString() })),
+      env.KV.delete(businessInviteKey(code)),
+    ]);
+    await getDashToken(env, currentTenant);
+    return {
+      ok: true,
+      alreadyLinked: true,
+      rootTenant,
+      tenant: currentTenant,
+      businessCount: nextBusinesses.length,
+      businessLimit: Number((await getSubscriptionSnapshot(env, rootTenant, (await env.KV.get(`tenant:${rootTenant}`)) || env.DEFAULT_SHEET_ID, await getUserToken(env, rootTenant), { refreshUsage: false })).businessLimit || 1),
+      dashboardUrl: await dashUrl(env, currentTenant),
+    };
+  }
+
+  // ป้องกันการดึงธุรกิจที่เป็นสมาชิกของ "บัญชีอื่น" มารวมข้ามเจ้าของ
+  // แต่ถ้ากลุ่มนี้เป็นบัญชี standalone ของตัวเอง (root = ตัวเอง) ให้อนุญาต merge ได้
+  if (existingRootRaw && existingRoot !== currentTenant && existingRoot !== rootTenant) {
+    return { ok: false, reason: "already_linked_other_account", message: "ธุรกิจนี้อยู่ในบัญชีอื่นแล้ว จึงไม่สามารถย้ายเข้าบัญชีนี้อัตโนมัติได้" };
+  }
+
+  if (existingRoot === currentTenant) {
+    const standaloneAccount = await env.KV.get(businessAccountKey(currentTenant), "json").catch(() => null);
+    const standaloneBusinesses = Array.isArray(standaloneAccount?.businesses)
+      ? standaloneAccount.businesses.filter(Boolean)
+      : [currentTenant];
+    const otherChildren = standaloneBusinesses.filter((tenant) => String(tenant) !== String(currentTenant));
+    if (otherChildren.length) {
+      return {
+        ok: false,
+        reason: "nested_account_merge_not_supported",
+        message: "บัญชีของกลุ่มนี้มีหลายธุรกิจอยู่แล้ว จึงไม่รวมอัตโนมัติเพื่อป้องกันข้อมูลธุรกิจลูกหาย กรุณาแยกย้ายทีละธุรกิจ",
+      };
+    }
   }
 
   const rootSheetId = (await env.KV.get(`tenant:${rootTenant}`)) || env.DEFAULT_SHEET_ID;
   const rootToken = rootSheetId ? await getUserToken(env, rootTenant) : null;
   if (!rootToken) return { ok: false, reason: "google_required", message: "บัญชีหลักยังไม่มีสิทธิ์ Google Drive กรุณาเชื่อม Google ที่ธุรกิจหลักก่อน" };
+
   const subscription = await getSubscriptionSnapshot(env, rootTenant, rootSheetId, rootToken, { refreshUsage: false });
   const account = await ensureBusinessAccount(env, rootTenant);
   const limit = Number(subscription.businessLimit || 1);
@@ -509,17 +553,31 @@ async function linkBusinessFromInvite(env, event, currentTenant, codeRaw) {
     return { ok: false, reason: "business_limit", message: limit <= 1 ? "เพิ่มธุรกิจได้ตั้งแต่แพ็กเกจ Pro" : `สิทธิ์ปัจจุบันเพิ่มได้สูงสุด ${limit} ธุรกิจ` };
   }
 
-  const rootRefresh = await env.KV.get(`gtoken:${rootTenant}`);
-  if (!rootRefresh) return { ok: false, reason: "google_required", message: "ไม่พบสิทธิ์ Google ของบัญชีหลัก กรุณาเชื่อม Google ใหม่" };
-  await env.KV.put(`gtoken:${currentTenant}`, rootRefresh);
+  const groupName = (await tenantTitle(env, event.source)) || `ธุรกิจ ${account.businesses.length + 1}`;
 
-  let sheetId = await env.KV.get(`tenant:${currentTenant}`);
   if (!sheetId) {
-    const groupName = (await tenantTitle(env, event.source)) || `ธุรกิจ ${account.businesses.length + 1}`;
+    // กลุ่มใหม่จริง ๆ: ใช้ Google credential ของบัญชีหลักเพื่อสร้างพื้นที่ธุรกิจใหม่
+    const rootRefresh = await env.KV.get(`gtoken:${rootTenant}`);
+    if (!rootRefresh) return { ok: false, reason: "google_required", message: "ไม่พบสิทธิ์ Google ของบัญชีหลัก กรุณาเชื่อม Google ใหม่" };
+    if (!(await env.KV.get(`gtoken:${currentTenant}`))) {
+      await env.KV.put(`gtoken:${currentTenant}`, rootRefresh);
+    }
     const token = await getUserToken(env, currentTenant);
     sheetId = (await createUserSheet(env, token, `รับจ่ายแบบไม่จำกัด · ${groupName}`)).sheetId;
     await env.KV.put(`tenant:${currentTenant}`, sheetId);
     await saveBusinessMeta(env, currentTenant, { name: groupName, createdAt: new Date().toISOString(), linkedFrom: rootTenant });
+  } else {
+    // ธุรกิจเดิม: เก็บ Sheet และ Google token เดิมทั้งหมด ห้ามเอาของบัญชีหลักมาทับ
+    // แค่ย้าย ownership เชิง Workspace ให้มาอยู่ใต้ rootTenant เท่านั้น
+    const existingMeta = await readBusinessMeta(env, currentTenant).catch(() => ({}));
+    await saveBusinessMeta(env, currentTenant, {
+      ...existingMeta,
+      name: String(existingMeta.name || groupName).trim(),
+      lineGroupName: groupName,
+      linkedFrom: rootTenant,
+      mergedIntoAccountAt: new Date().toISOString(),
+      preservedExistingSheet: true,
+    });
   }
 
   const nextBusinesses = Array.from(new Set([...account.businesses, currentTenant]));
@@ -528,9 +586,11 @@ async function linkBusinessFromInvite(env, event, currentTenant, codeRaw) {
     env.KV.put(businessAccountKey(rootTenant), JSON.stringify({ ...account, businesses: nextBusinesses, updatedAt: new Date().toISOString() })),
     env.KV.delete(businessInviteKey(code)),
   ]);
+
   await getDashToken(env, currentTenant);
   return {
     ok: true,
+    mergedExistingBusiness: hadExistingSheet,
     rootTenant,
     tenant: currentTenant,
     businessCount: nextBusinesses.length,
@@ -2495,8 +2555,9 @@ async function handleText(event, env, key) {
       const out = await linkBusinessFromInvite(env, event, key, businessInviteMatch[1]);
       if (!out.ok) return reply(env, event.replyToken, textMsg(out.message || "เพิ่มธุรกิจไม่สำเร็จ"));
       return reply(env, event.replyToken, textMsg(
-        `เพิ่มธุรกิจสำเร็จ ✅\nธุรกิจในบัญชีนี้ ${out.businessCount}/${out.businessLimit}\n\n` +
-        `ขั้นต่อไป: เปิด Dashboard แล้วตั้งค่าข้อมูลบริษัท Gmail และช่องทางการเงินของธุรกิจนี้\n${out.dashboardUrl || ""}`
+        out.mergedExistingBusiness
+          ? `รวมธุรกิจเดิมเข้าบัญชีสำเร็จ ✅\nข้อมูล Sheet / Drive / การตั้งค่าเดิมยังอยู่ครบ ไม่ได้ถูกทับ\nธุรกิจในบัญชีนี้ ${out.businessCount}/${out.businessLimit}\n\nเปิด Dashboard แล้วรีเฟรชหน้า “สิทธิ์เข้า Dashboard” จะเห็นกลุ่ม LINE นี้เพิ่มขึ้น\n${out.dashboardUrl || ""}`
+          : `เพิ่มธุรกิจสำเร็จ ✅\nธุรกิจในบัญชีนี้ ${out.businessCount}/${out.businessLimit}\n\nขั้นต่อไป: เปิด Dashboard แล้วตั้งค่าข้อมูลบริษัท Gmail และช่องทางการเงินของธุรกิจนี้\n${out.dashboardUrl || ""}`
       ));
     } catch (e) {
       console.error("link business invite", e);
