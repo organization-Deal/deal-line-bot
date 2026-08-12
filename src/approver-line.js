@@ -6,8 +6,9 @@
 
 import { push } from "./line.js";
 import { readSettings } from "./sheets.js";
+import { getUserToken } from "./oauth.js";
 
-const VERSION = "LINE_APPROVER_NOTIFY_V7_27_20260812";
+const VERSION = "LINE_APPROVER_NOTIFY_V7_31_COMPANY_CONTEXT_20260812";
 const LINE_API = "https://api.line.me/v2/bot";
 const MEMBER_PREFIX = "linemember:v1:";
 const NOTIFY_PREFIX = "approvernotify:v1:";
@@ -44,6 +45,44 @@ async function lineFetch(env, path) {
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
   return { response, data, text };
+}
+
+async function resolvedCompanyName(env, tenant, preferred = "") {
+  const preferredName = clean(preferred || "", 120);
+  const meaningfulPreferred = preferredName && !["บริษัทนี้", "บริษัทของคุณ", "บริษัท"].includes(preferredName);
+  if (meaningfulPreferred) return preferredName;
+
+  try {
+    const sheetId = (await env.KV.get(`tenant:${tenant}`)) || env.DEFAULT_SHEET_ID || "";
+    if (sheetId) {
+      const token = await getUserToken(env, tenant).catch(() => null);
+      const settings = await readSettings(env, sheetId, token).catch(() => ({}));
+      const fromSettings = clean(
+        settings.company_name ||
+        settings.companyName ||
+        settings.business_name ||
+        settings.businessName ||
+        "",
+        120
+      );
+      if (fromSettings) return fromSettings;
+    }
+  } catch {}
+
+  return preferredName || "บริษัทของคุณ";
+}
+
+async function rememberCompanyOnAccess(env, tenant, record, companyName) {
+  const token = clean(record?.token || "", 120);
+  if (!token || !companyName) return;
+  const key = `daccess:${tenant}:${token}`;
+  const current = await env.KV.get(key, "json").catch(() => null);
+  if (!current || current.active === false || current.companyName === companyName) return;
+  await env.KV.put(key, JSON.stringify({
+    ...current,
+    companyName,
+    companyNameResolvedAt: new Date().toISOString(),
+  }));
 }
 
 async function workspaceName(env, tenant) {
@@ -575,7 +614,8 @@ export async function notifyApproverAssignment(env, tenant, record) {
   const url = personalDashboardUrl(env, tenant, record.token);
   if (!url) return { ok: false, skipped: true, reason: "dashboard_url_missing" };
 
-  const companyName = clean(record.companyName || record.businessName || "บริษัทนี้", 120);
+  const companyName = await resolvedCompanyName(env, tenant, record.companyName || record.businessName || "");
+  await rememberCompanyOnAccess(env, tenant, record, companyName).catch(() => {});
   const groupName = clean(record.lineGroupName || record.workspaceName || "", 120);
   const approverName = clean(record.name || record.lineDisplayName || "ผู้อนุมัติ", 80);
   const fallbackTarget = clean(record.lineGroupTenant || "", 120);
@@ -613,7 +653,7 @@ export async function notifyApproverAssignment(env, tenant, record) {
 
   const message = {
     type: "flex",
-    altText: `คุณได้รับสิทธิ์ผู้อนุมัติ${groupName ? ` · ${groupName}` : ""}`,
+    altText: `สิทธิ์ผู้อนุมัติ · ${companyName}${groupName ? ` · ${groupName}` : ""}`,
     contents: {
       type: "bubble",
       size: "mega",
@@ -635,8 +675,9 @@ export async function notifyApproverAssignment(env, tenant, record) {
             margin: "md",
             spacing: "xs",
             contents: [
-              { type: "text", text: `บริษัท · ${companyName}`, size: "sm", weight: "bold", color: "#111111", wrap: true },
-              ...(groupName ? [{ type: "text", text: `LINE กลุ่ม · ${groupName}`, size: "sm", color: "#3A3A3C", wrap: true }] : []),
+              { type: "text", text: "บริษัทที่คุณมีสิทธิ์อนุมัติ", size: "xs", color: "#86868B", wrap: true },
+              { type: "text", text: companyName, size: "md", weight: "bold", color: "#111111", wrap: true },
+              ...(groupName ? [{ type: "text", text: `LINE กลุ่ม · ${groupName}`, size: "sm", color: "#3A3A3C", wrap: true, margin: "sm" }] : []),
               { type: "text", text: "สิทธิ์ · ผู้อนุมัติ", size: "sm", color: "#3A3A3C", wrap: true },
             ],
           },
@@ -757,6 +798,10 @@ export async function notifyApproversForBatchOutput(env, tenant, output, { kind 
       continue;
     }
 
+    const companyName = await resolvedCompanyName(env, tenant, approver.companyName || approver.businessName || "");
+    await rememberCompanyOnAccess(env, tenant, approver, companyName).catch(() => {});
+    const notificationContext = { ...approver, companyName };
+
     const accepted = await push(
       env,
       approver.lineUserId,
@@ -764,7 +809,7 @@ export async function notifyApproversForBatchOutput(env, tenant, output, { kind 
         approver.name || approver.lineDisplayName || "ผู้อนุมัติ",
         summary,
         url,
-        approver
+        notificationContext
       )
     ).catch(() => false);
 
