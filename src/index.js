@@ -73,7 +73,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v7.35_MULTI_LINE_GROUPS_20260813";
+const VERSION = "DEAL_LINE_BOT_v7.36_TEAM_WORKFLOW_LINE_GROUP_ENDPOINT_20260813";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -148,8 +148,8 @@ async function createDashAccess(env,key,{
     name:String(name||DASH_ROLES[r]).trim().slice(0,120),
     role:r,
     lineUserId:String(lineUserId||"").trim().slice(0,120),
-    lineGroupTenant:r==="approver"?String(lineGroupTenant||"").trim().slice(0,120):"",
-    lineGroupName:r==="approver"?String(lineGroupName||"").trim().slice(0,160):"",
+    lineGroupTenant:["approver","accountant"].includes(r)?String(lineGroupTenant||"").trim().slice(0,120):"",
+    lineGroupName:["approver","accountant"].includes(r)?String(lineGroupName||"").trim().slice(0,160):"",
     companyName:String(companyName||"").trim().slice(0,160),
     active:true,
     createdAt:new Date().toISOString()
@@ -1028,12 +1028,18 @@ export default {
 
         if (url.pathname === "/api/line-groups") {
           if (access.role !== "owner") return cors(json({ ok:false, error:"owner_only" }, 403));
+          // v7.36: ใช้ endpoint เดียวทั้งอ่านรายชื่อกลุ่ม (GET) และสร้างรหัสเชื่อมกลุ่ม (POST)
+          // ทำให้ Dashboard ไม่พึ่ง endpoint ใหม่ที่ Worker เก่าบาง deployment ยังไม่รู้จัก
+          if (request.method === "POST") {
+            const out = await createLineWorkspaceInvite(env, key);
+            return cors(json(out, out.ok ? 200 : 400));
+          }
           return cors(json(await getLineGroupsOverview(env, key, {
             refresh: url.searchParams.get("refresh") === "1",
           })));
         }
 
-        if (url.pathname === "/api/line-workspaces/invite" && request.method === "POST") {
+        if ((url.pathname === "/api/line-workspaces/invite" || url.pathname === "/api/line-groups/invite") && request.method === "POST") {
           if (access.role !== "owner") return cors(json({ ok:false, error:"owner_only" }, 403));
           const out = await createLineWorkspaceInvite(env, key);
           return cors(json(out, out.ok ? 200 : 400));
