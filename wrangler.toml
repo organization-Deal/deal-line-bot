@@ -3,33 +3,22 @@ main = "src/entry-mobile-ux.js"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
+[build]
+command = "node apply-v740-team-auto-onboarding.mjs"
+
 [vars]
-# ชีทเริ่มต้น ใช้เมื่อบริษัท/กลุ่มยังไม่ได้ผูกกับชีทเฉพาะ
 DEFAULT_SHEET_ID = ""
 SHEET_TAB = "รายจ่าย"
-
-# โฟลเดอร์ Drive กลาง (เว้นว่างได้ เพราะแต่ละบริษัทใช้โฟลเดอร์ของตัวเอง)
 DRIVE_FOLDER_ID = ""
-
-# OCR
 CLAUDE_MODEL = "claude-sonnet-4-5"
-
-# URLs
 DASHBOARD_URL = "https://deal-dashboard.organization-23c.workers.dev"
 WORKER_URL = "https://accoutingsuppor02.organization-23c.workers.dev"
-
-# Gmail Connect
-# ไม่ใช้ EMAIL_DOMAIN / EMAIL_PREFIX รุ่น Forward Email แล้ว
 GMAIL_INITIAL_LOOKBACK_DAYS = "45"
 GMAIL_SYNC_BATCH = "5"
 GMAIL_CRON_MAX_MESSAGES = "3"
-
-# Commercial Pilot — แต่ละบัญชีทดลองใช้ฟรี 60 วันนับจากวันเริ่มใช้งานครั้งแรก
-# BETA_FREE_UNTIL ไม่ใช้แล้ว (Trial ไม่ผูกวันสิ้นสุดกลาง)
 BETA_TRIAL_DAYS = "60"
 SUBSCRIPTION_ENFORCEMENT = "1"
 
-# Cron เดียวใช้ซิงก์ Gmail + ตรวจรอบเบิกอัตโนมัติ
 [triggers]
 crons = ["* * * * *"]
 
@@ -37,7 +26,6 @@ crons = ["* * * * *"]
 binding = "KV"
 id = "19ef27ff24a044acb0bf6856ae733636"
 
-# รับรูปหลายใบ: Durable Object แยก session ตามบริษัท + ผู้ส่ง
 [[durable_objects.bindings]]
 name = "MULTI_SESSIONS"
 class_name = "MultiExpenseSession"
@@ -45,15 +33,3 @@ class_name = "MultiExpenseSession"
 [[migrations]]
 tag = "multi_documents_v1"
 new_sqlite_classes = ["MultiExpenseSession"]
-
-# Secrets ที่ต้องมีใน Cloudflare (ห้ามใส่ค่าจริงในไฟล์นี้)
-# ADMIN_KEY
-# LINE_CHANNEL_SECRET
-# LINE_ACCESS_TOKEN
-# CLAUDE_KEY
-# GOOGLE_SA_EMAIL
-# GOOGLE_SA_PRIVATE_KEY
-# GOOGLE_OAUTH_CLIENT_ID
-# GOOGLE_OAUTH_CLIENT_SECRET
-# GMAIL_OAUTH_CLIENT_ID
-# GMAIL_OAUTH_CLIENT_SECRET
