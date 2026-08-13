@@ -33,7 +33,7 @@ import {
   ensureBatchTab, getBatchDashboard, createReimbursementBatches,
   requestUrgentBatch, updateReimbursementBatchStatus,
   updateReimbursementBatchWorkflow, updateExpenseReviewWorkflow, uploadReimbursementPaymentSlip,
-  initializeNewExpenseWorkflow, runScheduledReimbursementBatches,
+  runScheduledReimbursementBatches,
 } from "./batches.js";
 import {
   ensureReconciliationTab, getReconciliationDashboard,
@@ -57,6 +57,7 @@ import { classifyTransferByCompanyAccounts } from "./account-direction.js";
 import {
   rememberLineEventMembers,
   listLineWorkspaceMembers,
+  listLineWorkspacesForAccount,
   bindApproverLine,
   notifyApproverAssignment,
   notifyApproversForBatchOutput,
@@ -72,7 +73,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v7.33_FLEXIBLE_REIMBURSEMENT_WORKFLOW_20260813";
+const VERSION = "DEAL_LINE_BOT_v7.35_MULTI_LINE_GROUPS_20260813";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -123,7 +124,7 @@ function accessCan(access,path,method="GET"){
   }
   if(access?.role==="approver"){
     if(!write)return ["/api/expenses","/api/batches","/api/settings","/api/workspace-links","/api/subscription","/api/businesses","/api/accounting/today","/api/accounting/whoami"].some(p=>path===p||path.startsWith(p+"/"));
-    return ["/api/expense-workflow","/api/batch-workflow"].includes(path);
+    return ["/api/expense-workflow","/api/batch-workflow","/api/batch-status"].includes(path);
   }
   if(access?.role==="viewer")return !write&&!path.includes("/backup")&&!path.includes("/access");
   return false;
@@ -147,8 +148,8 @@ async function createDashAccess(env,key,{
     name:String(name||DASH_ROLES[r]).trim().slice(0,120),
     role:r,
     lineUserId:String(lineUserId||"").trim().slice(0,120),
-    lineGroupTenant:["approver","accountant"].includes(r)?String(lineGroupTenant||"").trim().slice(0,120):"",
-    lineGroupName:["approver","accountant"].includes(r)?String(lineGroupName||"").trim().slice(0,160):"",
+    lineGroupTenant:r==="approver"?String(lineGroupTenant||"").trim().slice(0,120):"",
+    lineGroupName:r==="approver"?String(lineGroupName||"").trim().slice(0,160):"",
     companyName:String(companyName||"").trim().slice(0,160),
     active:true,
     createdAt:new Date().toISOString()
@@ -272,11 +273,20 @@ function accountRootMapKey(tenant) { return `accountroot:v1:${tenant}`; }
 function businessAccountKey(rootTenant) { return `businessaccount:v1:${rootTenant}`; }
 function businessMetaKey(tenant) { return `businessmeta:v1:${tenant}`; }
 function businessInviteKey(code) { return `businessinvite:v1:${String(code || "").toUpperCase()}`; }
+const LINE_GROUP_ONBOARDING_MARKER = "LINE_GROUP_ONBOARDING_V7_35_20260813";
+function lineWorkspaceInviteKey(code) { return `lineworkspaceinvite:v1:${String(code || "").toUpperCase()}`; }
+function lineWorkspaceBusinessKey(tenant) { return `lineworkspacebusiness:v1:${String(tenant || "").trim()}`; }
 
 async function getAccountRoot(env, tenant) {
   const key = String(tenant || "").trim();
   if (!key) return "";
   return (await env.KV.get(accountRootMapKey(key))) || key;
+}
+
+async function operationalTenantKey(env, tenant) {
+  const raw = String(tenant || "").trim();
+  if (!raw) return "";
+  return String((await env.KV.get(lineWorkspaceBusinessKey(raw))) || raw).trim() || raw;
 }
 
 async function ensureBusinessAccount(env, tenant) {
@@ -309,88 +319,32 @@ function lineWorkspaceSourceTypeV727(tenant = "") {
 }
 
 async function getLineGroupsOverview(env, currentTenant, { refresh = false } = {}) {
-  const account = await ensureBusinessAccount(env, currentTenant);
+  // v7.35: account หนึ่งมีหลายธุรกิจ และธุรกิจหนึ่งมีหลาย LINE groups ได้
+  // Registry v7.34 เก็บกลุ่มระดับ account; ตรงนี้ scope กลับมาเฉพาะธุรกิจปัจจุบัน
+  const businessTenant = await operationalTenantKey(env, currentTenant);
+  const data = await listLineWorkspacesForAccount(env, businessTenant, { refresh });
+  const account = await ensureBusinessAccount(env, businessTenant);
+  const businessSheetId = String((await env.KV.get(`tenant:${businessTenant}`)) || "").trim();
   const rows = [];
-
-  for (let i = 0; i < account.businesses.length; i++) {
-    const tenant = String(account.businesses[i] || "").trim();
-    if (!tenant) continue;
-
-    const sourceType = lineWorkspaceSourceTypeV727(tenant);
-    const sheetId = await env.KV.get(`tenant:${tenant}`);
-    const token = sheetId ? await getUserToken(env, tenant).catch(() => null) : null;
-    const settings = sheetId && token ? await readSettings(env, sheetId, token).catch(() => ({})) : {};
-    const meta = await readBusinessMeta(env, tenant).catch(() => ({}));
-    const businessName =
-      settingValue(settings, "company_name") ||
-      String(meta.name || "").trim() ||
-      (i === 0 ? "ธุรกิจหลัก" : `ธุรกิจ ${i + 1}`);
-
-    let groupName = String(meta.lineGroupName || meta.groupName || "").trim();
-    let connected = sourceType === "direct";
-    let error = "";
-
-    if (sourceType === "group" && env.LINE_ACCESS_TOKEN) {
-      const cacheKey = `linegroupmeta:v727:${tenant}`;
-      const cached = !refresh ? await env.KV.get(cacheKey, "json").catch(() => null) : null;
-      if (cached?.groupName) {
-        groupName = String(cached.groupName || groupName).trim();
-        connected = cached.connected === true;
-      } else {
-        try {
-          const response = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(tenant)}/summary`, {
-            headers: { Authorization: `Bearer ${env.LINE_ACCESS_TOKEN}` },
-          });
-          if (response.ok) {
-            const body = await response.json().catch(() => ({}));
-            groupName = String(body.groupName || groupName).trim();
-            connected = true;
-          } else {
-            connected = false;
-            error = `LINE ${response.status}`;
-          }
-        } catch (e) {
-          connected = false;
-          error = String(e?.message || e).slice(0, 160);
-        }
-        await env.KV.put(cacheKey, JSON.stringify({
-          groupName,
-          connected,
-          error,
-          checkedAt: new Date().toISOString(),
-        }), { expirationTtl: 60 * 60 * 6 }).catch(() => {});
-      }
+  for (const row of (data.rows || [])) {
+    const groupTenant = String(row.tenant || row.groupId || "").trim();
+    if (!groupTenant) continue;
+    let mappedBusiness = String((await env.KV.get(lineWorkspaceBusinessKey(groupTenant))) || "").trim();
+    if (!mappedBusiness && account.businesses.includes(groupTenant)) mappedBusiness = groupTenant;
+    if (!mappedBusiness && businessSheetId && String(row.sheetId || "").trim() === businessSheetId) {
+      mappedBusiness = businessTenant;
+      await env.KV.put(lineWorkspaceBusinessKey(groupTenant), businessTenant).catch(() => {});
     }
-
-    if (!groupName) {
-      groupName =
-        sourceType === "group" ? `LINE Group ···${tenant.slice(-6)}` :
-        sourceType === "room" ? `LINE Room ···${tenant.slice(-6)}` :
-        sourceType === "direct" ? "แชทส่วนตัว" :
-        businessName;
-    }
-
-    rows.push({
-      tenant,
-      businessName,
-      isRoot: tenant === account.rootTenant,
-      isCurrent: tenant === currentTenant,
-      sheetId: sheetId || "",
-      sourceType,
-      groupId: sourceType === "group" ? tenant : "",
-      groupName,
-      connected,
-      error,
-    });
+    if (mappedBusiness !== businessTenant) continue;
+    rows.push({ ...row, businessTenant });
   }
-
   return {
-    ok: true,
-    rootTenant: account.rootTenant,
-    currentTenant,
+    ...data,
+    currentTenant: businessTenant,
+    businessTenant,
     rows,
-    groupCount: rows.filter((row) => row.sourceType === "group").length,
-    refreshedAt: new Date().toISOString(),
+    groupCount: rows.filter((row) => String(row.sourceType || "") === "group").length,
+    onboardingVersion: LINE_GROUP_ONBOARDING_MARKER,
   };
 }
 
@@ -448,6 +402,106 @@ async function listBusinessWorkspaces(env, currentTenant) {
     effectivePlan: subscription?.effectivePlan || "free",
     planName: subscription?.planName || "ฟรี",
     betaActive,
+  };
+}
+
+async function createLineWorkspaceInvite(env, currentTenant) {
+  const businessTenant = await operationalTenantKey(env, currentTenant);
+  const account = await ensureBusinessAccount(env, businessTenant);
+  if (!account.businesses.includes(businessTenant)) {
+    return { ok:false, reason:"business_not_in_account", message:"ไม่พบธุรกิจนี้ในบัญชีหลัก" };
+  }
+  const sheetId = String((await env.KV.get(`tenant:${businessTenant}`)) || "").trim();
+  if (!sheetId) return { ok:false, reason:"business_not_connected", message:"ธุรกิจนี้ยังไม่ได้เชื่อม Google / Sheet" };
+  const token = await getUserToken(env, businessTenant).catch(() => null);
+  const settings = token ? await readSettings(env, sheetId, token).catch(() => ({})) : {};
+  const meta = await readBusinessMeta(env, businessTenant).catch(() => ({}));
+  const companyName = settingValue(settings, "company_name") || String(meta.name || "").trim() || "ธุรกิจนี้";
+  const code = randomBusinessInviteCode();
+  const now = Date.now();
+  const expiresAt = new Date(now + 30 * 60 * 1000).toISOString();
+  await env.KV.put(lineWorkspaceInviteKey(code), JSON.stringify({
+    schema: "LINE_WORKSPACE_INVITE_V1",
+    code,
+    rootTenant: account.rootTenant,
+    businessTenant,
+    companyName,
+    createdAt: new Date(now).toISOString(),
+    expiresAt,
+  }), { expirationTtl: 30 * 60 });
+  return {
+    ok:true,
+    code,
+    command:`เชื่อมกลุ่ม ${code}`,
+    companyName,
+    businessTenant,
+    rootTenant: account.rootTenant,
+    expiresAt,
+    instruction:`เพิ่ม LINE OA เข้ากลุ่มที่ต้องการ แล้วพิมพ์ “เชื่อมกลุ่ม ${code}” ในกลุ่มนั้น`,
+  };
+}
+
+async function linkLineWorkspaceFromInvite(env, event, codeRaw) {
+  const rawTenant = tenantKey(event?.source || {});
+  const sourceType = event?.source?.groupId ? "group" : event?.source?.roomId ? "room" : "";
+  if (!sourceType || !/^[CR]/i.test(rawTenant)) {
+    return { ok:false, reason:"group_required", message:"คำสั่งเชื่อมกลุ่มต้องส่งในกลุ่ม LINE ที่ต้องการเชื่อม" };
+  }
+  const code = String(codeRaw || "").trim().toUpperCase();
+  const invite = await env.KV.get(lineWorkspaceInviteKey(code), "json").catch(() => null);
+  if (!invite?.businessTenant) {
+    return { ok:false, reason:"invalid_invite", message:"รหัสเชื่อมกลุ่มไม่ถูกต้องหรือหมดอายุแล้ว กรุณาสร้างรหัสใหม่จาก Dashboard" };
+  }
+  if (Date.parse(invite.expiresAt || "") <= Date.now()) {
+    await env.KV.delete(lineWorkspaceInviteKey(code));
+    return { ok:false, reason:"expired_invite", message:"รหัสเชื่อมกลุ่มหมดอายุแล้ว กรุณาสร้างรหัสใหม่จาก Dashboard" };
+  }
+
+  const businessTenant = await operationalTenantKey(env, invite.businessTenant);
+  const rootTenant = await getAccountRoot(env, businessTenant);
+  const account = await ensureBusinessAccount(env, businessTenant);
+  if (!account.businesses.includes(businessTenant) || rootTenant !== invite.rootTenant) {
+    return { ok:false, reason:"business_scope_changed", message:"โครงสร้างบัญชีธุรกิจเปลี่ยนแล้ว กรุณาสร้างรหัสใหม่จาก Dashboard" };
+  }
+
+  const businessSheetId = String((await env.KV.get(`tenant:${businessTenant}`)) || "").trim();
+  const businessRefresh = String((await env.KV.get(`gtoken:${businessTenant}`)) || "").trim();
+  if (!businessSheetId || !businessRefresh) {
+    return { ok:false, reason:"business_google_missing", message:"ธุรกิจต้นทางยังไม่มีสิทธิ์ Google กรุณาเชื่อม Google ที่ธุรกิจหลักก่อน" };
+  }
+
+  const currentBusiness = String((await env.KV.get(lineWorkspaceBusinessKey(rawTenant))) || "").trim();
+  if (currentBusiness && currentBusiness !== businessTenant) {
+    return { ok:false, reason:"group_linked_other_business", message:"กลุ่ม LINE นี้ถูกเชื่อมกับธุรกิจอื่นอยู่แล้ว จึงไม่ย้ายอัตโนมัติเพื่อป้องกันข้อมูลปะปน" };
+  }
+  const existingSheetId = String((await env.KV.get(`tenant:${rawTenant}`)) || "").trim();
+  if (existingSheetId && existingSheetId !== businessSheetId && !currentBusiness) {
+    return { ok:false, reason:"group_has_other_data", message:"กลุ่มนี้มีข้อมูล/Sheet ของตัวเองอยู่แล้ว ถ้าต้องการย้ายข้อมูลเข้าบริษัทนี้ให้ดำเนินการผ่านเมนูย้ายธุรกิจเพื่อป้องกันข้อมูลหาย" };
+  }
+
+  const groupName = (await tenantTitle(env, event.source)) || (sourceType === "group" ? "กลุ่ม LINE" : "ห้อง LINE");
+  const aliasRefresh = String((await env.KV.get(`gtoken:${rawTenant}`)) || "").trim();
+  await Promise.all([
+    env.KV.put(lineWorkspaceBusinessKey(rawTenant), businessTenant),
+    env.KV.put(accountRootMapKey(rawTenant), rootTenant),
+    env.KV.put(`tenant:${rawTenant}`, businessSheetId),
+    aliasRefresh ? Promise.resolve() : env.KV.put(`gtoken:${rawTenant}`, businessRefresh),
+    env.KV.delete(lineWorkspaceInviteKey(code)),
+  ]);
+
+  // v7.34 registry จะย้าย group record เข้าบัญชีที่ถูกต้องจาก accountroot + tenant mapping
+  await listLineWorkspacesForAccount(env, businessTenant, { refresh:true }).catch((e) =>
+    console.warn("refresh LINE workspace after link", rawTenant, e?.message || e)
+  );
+
+  return {
+    ok:true,
+    groupTenant:rawTenant,
+    groupName,
+    businessTenant,
+    rootTenant,
+    companyName:String(invite.companyName || "ธุรกิจนี้"),
+    dashboardUrl:await dashUrl(env, businessTenant),
   };
 }
 
@@ -979,6 +1033,12 @@ export default {
           })));
         }
 
+        if (url.pathname === "/api/line-workspaces/invite" && request.method === "POST") {
+          if (access.role !== "owner") return cors(json({ ok:false, error:"owner_only" }, 403));
+          const out = await createLineWorkspaceInvite(env, key);
+          return cors(json(out, out.ok ? 200 : 400));
+        }
+
         if (url.pathname === "/api/businesses") {
           const info=await listBusinessWorkspaces(env,key);
           if(access.role!=="owner"){
@@ -1102,7 +1162,7 @@ export default {
             const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
             let record={...rec,url:`${base}?tenant=${encodeURIComponent(key)}&k=${rec.token}`};
             let lineNotification={attempted:false,sent:false,accepted:false};
-            if(["approver","accountant"].includes(rec.role)&&rec.lineUserId){
+            if(rec.role==="approver"&&rec.lineUserId){
               lineNotification=await notifyApproverAssignment(env,key,record)
                 .catch(e=>({ok:false,attempted:true,sent:false,accepted:false,reason:String(e?.message||e).slice(0,180)}));
               const saved=await patchDashAccessRecord(env,key,rec.token,lineNotificationPatch(lineNotification));
@@ -1122,7 +1182,7 @@ export default {
           const accessToken=String(b.token||"").trim();
           const current=await readDashAccessRecord(env,key,accessToken);
           if(!current||current.active===false)return cors(json({ok:false,error:"access_not_found",message:"ไม่พบสิทธิ์ผู้ใช้งานนี้"},404));
-          if(!["approver","accountant"].includes(current.role)||!current.lineUserId)return cors(json({ok:false,error:"workflow_line_not_linked",message:"สิทธิ์นี้ยังไม่ได้ผูก LINE สำหรับรับงาน Workflow"},400));
+          if(current.role!=="approver"||!current.lineUserId)return cors(json({ok:false,error:"approver_line_not_linked",message:"สิทธิ์นี้ยังไม่ได้ผูก LINE ผู้อนุมัติ"},400));
           const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
           const record={...current,token:accessToken,url:`${base}?tenant=${encodeURIComponent(key)}&k=${accessToken}`};
           const lineNotification=await notifyApproverAssignment(env,key,record)
@@ -1335,10 +1395,6 @@ export default {
         if (url.pathname === "/api/settings") {
           if (request.method === "POST") {
             const b = await request.json();
-            const workflowKeys=["reimbursement_workflow_preset","expense_approval_enabled","accounting_review_enabled","line_workflow_notify_enabled"];
-            if(access.role!=="owner"&&workflowKeys.some((field)=>Object.prototype.hasOwnProperty.call(b||{},field))){
-              return cors(json({ok:false,error:"owner_only_workflow",message:"เฉพาะ Owner เท่านั้นที่เปลี่ยน Workflow เบิกจ่ายได้"},403));
-            }
             const beforeSettings=await readSettings(env,sheetId,token).catch(()=>({}));
             const saved = await writeSettings(env, sheetId, b, token);
             await ensureTenantDriveFolders(env, key, token, {
@@ -1418,8 +1474,7 @@ export default {
 
         /* ใบเบิกหลัก — รวมหลายรายการย่อยของผู้เบิกเป็นไฟล์เดียว */
         if (url.pathname === "/api/batches") {
-          const dashboard = await getBatchDashboard(env, sheetId, token);
-          return cors(json({ ...dashboard, currentAccessRole: access.role, currentAccessName: access.name || "" }));
+          return cors(json(await getBatchDashboard(env, sheetId, token)));
         }
 
         if (url.pathname === "/api/batch-close" && request.method === "POST") {
@@ -1458,9 +1513,7 @@ export default {
 
         if (url.pathname === "/api/batch-workflow" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
-          const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token, {
-            tenant: key, actorRole: access.role, actorName: access.name || "Dashboard"
-          });
+          const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token, { tenant: key });
           if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:`BATCH_${String(b.action||"WORKFLOW").toUpperCase()}`,entityType:"reimbursement_batch",entityId:b.batchId,summary:`ดำเนินการรอบเบิก: ${b.action||"workflow"}`,after:b.payload||{}});
           return cors(json(out, out.ok ? 200 : 400));
         }
@@ -1471,9 +1524,7 @@ export default {
           const b = await request.json().catch(() => ({}));
           const before=await getExpenseById(env,sheetId,b.expenseId,token);
           if(before)await assertPeriodOpen(env,sheetId,before.dateISO||before.dateText||new Date(),token);
-          const out = await updateExpenseReviewWorkflow(env, key, sheetId, b.expenseId, b.action, b.payload || {}, token, {
-            actorRole: access.role, actorName: access.name || "Dashboard"
-          });
+          const out = await updateExpenseReviewWorkflow(env, key, sheetId, b.expenseId, b.action, b.payload || {}, token);
           if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:`EXPENSE_${String(b.action||"WORKFLOW").toUpperCase()}`,entityType:"expense",entityId:b.expenseId,summary:`ดำเนินการรายจ่าย: ${b.action||"workflow"}`,before,after:out});
           return cors(json(out, out.ok ? 200 : 400));
         }
@@ -1483,9 +1534,7 @@ export default {
           const batchId = String(form.get("batchId") || "");
           const paymentChannelId = String(form.get("paymentChannelId") || "");
           const file = form.get("file");
-          const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token, {
-            paymentChannelId, tenant: key, actorRole: access.role, actorName: access.name || "Dashboard"
-          });
+          const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token, { paymentChannelId, tenant: key });
           if(out.ok){
             await postReimbursementPaymentJournal(env,sheetId,out.record||{id:batchId,batchId,total:out.total,paidAt:new Date().toISOString()},token,access.name||"Dashboard").catch(e=>console.warn("reimbursement payment journal",e.message));
             await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"UPLOAD_PAYMENT_SLIP",entityType:"reimbursement_batch",entityId:batchId,summary:"อัปโหลดหลักฐานโอนเงินคืน",after:{paymentChannelId}});
@@ -1670,10 +1719,11 @@ export default {
     try { body = JSON.parse(raw); } catch { return new Response("bad json", { status: 400 }); }
 
     for (const event of body.events || []) {
-      const key = tenantKey(event.source);
+      const rawKey = tenantKey(event.source);
+      const key = await operationalTenantKey(env, rawKey);
       ctx.waitUntil(
         rememberLineEventMembers(env,event)
-          .catch(e=>console.warn("remember LINE member",key,e?.message||e))
+          .catch(e=>console.warn("remember LINE member",rawKey,e?.message||e))
       );
       const isImage = event.type === "message" && event.message?.type === "image";
       const postbackAct = event.type === "postback" ? new URLSearchParams(event.postback?.data || "").get("act") : "";
@@ -1813,7 +1863,8 @@ async function tenantTitle(env, source) {
 }
 
 async function resolveSheet(env, source) {
-  const key = tenantKey(source);
+  const rawKey = tenantKey(source);
+  const key = await operationalTenantKey(env, rawKey);
   const userTok = await getUserToken(env, key);
   if (userTok) {
     let sheetId = await env.KV.get(`tenant:${key}`);
@@ -1841,6 +1892,7 @@ async function getDisplayName(env, source) {
 }
 
 async function dashUrl(env, key, path = "") {
+  key = await operationalTenantKey(env, key);
   if (!env.DASHBOARD_URL) return null;
   const base = env.DASHBOARD_URL.replace(/\/$/, "");
   const tok = await getDashToken(env, key);
@@ -1915,6 +1967,38 @@ function connectMsg(env, key) {
         { type: "button", style: "primary", color: "#1F6E56", height: "sm",
           action: { type: "uri", label: "เชื่อม Google", uri: url } },
       ] },
+    },
+  };
+}
+
+function unlinkedLineGroupCard(env, rawKey) {
+  const connectUrl = `${env.WORKER_URL}/oauth/connect?tenant=${encodeURIComponent(rawKey)}`;
+  return {
+    type: "flex",
+    altText: "กลุ่ม LINE ใหม่นี้ยังไม่ได้ผูกกับบริษัท",
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box", layout: "vertical", paddingAll: "20px", spacing: "sm",
+        contents: [
+          { type:"text", text:"กลุ่ม LINE ใหม่", size:"xs", weight:"bold", color:"#147A36" },
+          { type:"text", text:"กลุ่มนี้จะใช้กับบริษัทไหน?", size:"xl", weight:"bold", color:"#111111", wrap:true },
+          { type:"text", text:"ถ้าเป็นกลุ่มเพิ่มของบริษัทเดิม ไม่ต้องเชื่อม Google ใหม่ และไม่เพิ่มจำนวนธุรกิจ", size:"sm", color:"#6E6E73", wrap:true, margin:"sm" },
+          { type:"box", layout:"vertical", backgroundColor:"#F5F5F7", cornerRadius:"14px", paddingAll:"14px", margin:"md", spacing:"xs", contents:[
+            { type:"text", text:"บริษัทเดิม", size:"sm", weight:"bold", color:"#111111" },
+            { type:"text", text:"เปิด Dashboard ของบริษัท > จัดการธุรกิจ > กลุ่ม LINE > เชื่อมกลุ่ม LINE แล้วคัดลอกคำสั่งมาวางในกลุ่มนี้", size:"xs", color:"#6E6E73", wrap:true },
+          ]},
+        ],
+      },
+      footer: {
+        type:"box", layout:"vertical", paddingAll:"14px", spacing:"sm",
+        contents:[
+          { type:"button", style:"primary", color:"#111111", height:"sm", action:{ type:"message", label:"วิธีเชื่อมกับบริษัทเดิม", text:"วิธีเชื่อมกลุ่ม" } },
+          { type:"button", style:"secondary", height:"sm", action:{ type:"uri", label:"ตั้งเป็นธุรกิจใหม่", uri:connectUrl } },
+        ],
+      },
+      styles:{ body:{backgroundColor:"#FFFFFF"}, footer:{backgroundColor:"#FFFFFF"} },
     },
   };
 }
@@ -2035,20 +2119,30 @@ function memberProfileCard(profileUrl, pendingId, displayName, missing = []) {
 /* ═════════════════════════ event handler ═════════════════════════ */
 
 async function handleEvent(event, env) {
-  const key = tenantKey(event.source);
-  console.log(`[event] type=${event.type} tenant=${key} user=${event.source?.userId || "-"}`);
+  const rawKey = tenantKey(event.source);
+  const key = await operationalTenantKey(env, rawKey);
+  console.log(`[event] type=${event.type} tenant=${key} rawTenant=${rawKey} user=${event.source?.userId || "-"}`);
 
   if (event.type === "join" || event.type === "follow") {
     const existingSheetId = await env.KV.get(`tenant:${key}`);
     const existingToken = await env.KV.get(`gtoken:${key}`);
+    if (rawKey !== key && existingSheetId && existingToken) {
+      return reply(env, event.replyToken, [
+        textMsg("กลุ่มนี้เชื่อมกับบริษัทเดิมแล้ว ✅\nใช้ Sheet / Drive / Gmail / การตั้งค่าบริษัทชุดเดียวกัน และไม่ถูกนับเป็นธุรกิจเพิ่ม"),
+        await dashboardMsg(env, key),
+      ]);
+    }
     if (existingSheetId && existingToken) {
       return reply(env, event.replyToken, [
         textMsg("พบธุรกิจที่เคยเชื่อมไว้แล้วครับ ✅\nกลุ่มนี้ใช้ข้อมูลบริษัท Sheet และ Drive เดิมได้เลย ไม่ต้องตั้งค่าใหม่"),
         await dashboardMsg(env, key),
       ]);
     }
+    if (event.source?.groupId || event.source?.roomId) {
+      return reply(env, event.replyToken, unlinkedLineGroupCard(env, rawKey));
+    }
     return reply(env, event.replyToken, [
-      textMsg("สวัสดีครับ ผมน้องช่วยบัญชีของ DEAL 📒\nกดเชื่อม Google ด้วยบัญชีเดิม ระบบจะค้นหาธุรกิจที่เคยสร้างไว้และผูกกลุ่มนี้ให้อัตโนมัติ"),
+      textMsg("สวัสดีครับ ผมน้องช่วยบัญชีของ DEAL 📒\nกดเชื่อม Google เพื่อเริ่มใช้งาน"),
       connectMsg(env, key),
     ]);
   }
@@ -2378,15 +2472,6 @@ ${r.customer || pending.record?.transferor || "ลูกค้าทั่วไ
       batchDocId: "",
       batchClaimPdfUrl: "",
     };
-    const workflowInit = await initializeNewExpenseWorkflow(env, key, pending.sheetId, [rec], token)
-      .catch((error) => ({ ok:false, status:"รอตรวจเอกสาร", reason:String(error?.message || error).slice(0,180) }));
-    if (workflowInit?.status) {
-      rec = { ...rec, status: workflowInit.status, batchStatus: workflowInit.status };
-    }
-    if (workflowInit?.ok === false) {
-      console.warn("initialize reimbursement workflow", workflowInit.reason || workflowInit.message || "failed");
-    }
-
     await postExpenseJournal(env,pending.sheetId,rec,token,pending.sender||"LINE").catch(e=>console.warn("line expense journal",e.message));
     await writeAudit(env,pending.sheetId,token,{actor:pending.sender||"LINE",action:"CREATE_EXPENSE",entityType:"expense",entityId:rowId,summary:`บันทึกรายจ่ายจาก LINE ${rec.vendor||""} ${rec.amount||0}`,after:rec,source:"LINE"});
 
@@ -2568,6 +2653,26 @@ function promptFor(field) {
 async function handleText(event, env, key) {
   const text = (event.message.text || "").trim();
   const uid = event.source.userId;
+
+  const lineGroupInviteMatch = text.match(/^เชื่อมกลุ่ม\s+([A-Z0-9]{6,10})$/i);
+  if (lineGroupInviteMatch) {
+    try {
+      const out = await linkLineWorkspaceFromInvite(env, event, lineGroupInviteMatch[1]);
+      if (!out.ok) return reply(env, event.replyToken, textMsg(out.message || "เชื่อมกลุ่มไม่สำเร็จ"));
+      return reply(env, event.replyToken, textMsg(
+        `เชื่อมกลุ่มสำเร็จ ✅\nกลุ่ม “${out.groupName}” ใช้ข้อมูลของ ${out.companyName} แล้ว\n\n✓ ใช้ Sheet / Drive / Gmail / การตั้งค่าบริษัทชุดเดิม\n✓ ไม่ถูกนับเป็นธุรกิจเพิ่ม\n✓ ส่งเอกสารจากกลุ่มนี้เข้าบริษัทเดิมได้ทันที\n\nDashboard:\n${out.dashboardUrl || ""}`
+      ));
+    } catch (e) {
+      console.error("link LINE group invite", e);
+      return reply(env, event.replyToken, textMsg("เชื่อมกลุ่มไม่สำเร็จ กรุณาสร้างรหัสใหม่จาก Dashboard แล้วลองอีกครั้ง"));
+    }
+  }
+
+  if (/^(วิธีเชื่อมกลุ่ม|เพิ่มกลุ่ม|เชื่อมกลุ่ม)$/i.test(text)) {
+    return reply(env, event.replyToken, textMsg(
+      "ถ้าเป็นกลุ่มเพิ่มของบริษัทเดิม ไม่ต้องเชื่อม Google ใหม่ครับ ✅\n\n1) เปิด Dashboard ของบริษัทเดิม\n2) ไปที่ จัดการธุรกิจ > กลุ่ม LINE\n3) กด + เชื่อมกลุ่ม LINE\n4) กดคัดลอกคำสั่ง แล้วนำมาวางในกลุ่มนี้\n\nรหัสมีอายุ 30 นาที และกลุ่มที่เพิ่มจะไม่ถูกนับเป็นธุรกิจใหม่"
+    ));
+  }
 
   const businessInviteMatch = text.match(/^เชื่อมธุรกิจ\s+([A-Z0-9]{6,10})$/i);
   if (businessInviteMatch) {
