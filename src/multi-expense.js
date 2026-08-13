@@ -11,6 +11,7 @@ import {
 import { createExpenseDocuments } from "./documents.js";
 import { createIncomeFromOcr } from "./income.js";
 import { assertPeriodOpen, postExpenseJournal, postIncomeInvoiceJournal, postIncomePaymentJournal, writeAudit, upsertContact } from "./accounting-suite.js";
+import { initializeNewExpenseWorkflow } from "./batches.js";
 import {
   createMemberOnboardingUrl, getMemberProfile,
   memberProfileComplete, missingMemberFields,
@@ -1164,6 +1165,24 @@ export class MultiExpenseSession {
       await this.save(s);
     }
 
+    const savedExpenses = s.saved.filter((r) => !["รายรับ", "income"].includes(String(r.type || "")));
+    let workflowInit = null;
+    if (savedExpenses.length) {
+      workflowInit = await initializeNewExpenseWorkflow(this.env, s.tenant, sheetId, savedExpenses, token)
+        .catch((error) => ({ ok:false, status:"รอตรวจเอกสาร", reason:String(error?.message || error).slice(0,180) }));
+      const nextStatus = String(workflowInit?.status || "รอตรวจเอกสาร");
+      s.saved = s.saved.map((row) => ["รายรับ", "income"].includes(String(row.type || ""))
+        ? row
+        : { ...row, status: nextStatus, batchStatus: nextStatus });
+      await Promise.allSettled(savedExpenses.map((row) => writeAudit(this.env, sheetId, token, {
+        actor:s.displayName||"LINE", action:"WORKFLOW_STARTED", entityType:"expense", entityId:row.id||"",
+        summary:`ส่งรายการเข้าสู่ ${nextStatus}`, after:{ batchStatus:nextStatus }, source:"LINE"
+      })));
+      if (workflowInit?.ok === false) {
+        console.warn(`[multi-workflow] initialize failed sid=${s.sid}`, workflowInit.reason || workflowInit.message || "failed");
+      }
+    }
+
     s.status = "saving_docs";
     await this.save(s);
 
@@ -1174,7 +1193,12 @@ export class MultiExpenseSession {
       try {
         const incomeCount = s.saved.filter((r) => ["รายรับ", "income"].includes(String(r.type || ""))).length;
         const expenseCount = s.saved.length - incomeCount;
-        const nextText = expenseCount > 0 ? "กำลังสร้างเอกสารเบิกจ่ายอัตโนมัติ" : "บันทึกรายรับเข้าระบบแล้ว";
+        const workflowStatus = String(workflowInit?.status || "");
+        const workflowLabel = workflowStatus === "รออนุมัติค่าใช้จ่าย" ? "ส่งให้ผู้อนุมัติแล้ว"
+          : workflowStatus === "รอตรวจเอกสาร" ? "ส่งเข้าคิวฝ่ายบัญชีตรวจเอกสารแล้ว"
+          : workflowStatus === "รอโอนเงิน" ? "พร้อมเข้าสู่ขั้นตอนโอนเงิน"
+          : "เข้าสู่ Workflow เบิกจ่ายแล้ว";
+        const nextText = expenseCount > 0 ? `${workflowLabel} · กำลังสร้างเอกสารเบิกจ่ายอัตโนมัติ` : "บันทึกรายรับเข้าระบบแล้ว";
         const acknowledged = await push(this.env, s.targetId, textMsg(
           `บันทึกชุดเอกสารแล้ว ✅
 ${s.saved.length} รายการ · รวม ฿${money(total)}${incomeCount ? `

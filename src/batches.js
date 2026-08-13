@@ -13,8 +13,12 @@ import {
 import { createBatchClaimPdf } from "./batch-documents.js";
 import { uploadTenantFile } from "./drive.js";
 import { push, textMsg } from "./line.js";
-import { notifyApproversForBatchOutput } from "./approver-line.js"; // LINE_APPROVER_NOTIFY_V7_26_20260811
+import { notifyApproversForBatchOutput, notifyWorkflowStage } from "./approver-line.js"; // FLEX_WORKFLOW_NOTIFY_V7_33
 import { buildReimbursementCorrectionCard } from "./card.js";
+import {
+  reimbursementWorkflowConfig, initialExpenseWorkflowStatus, workflowStageFromStatus,
+  actorCanHandleStage, nextStatusAfterApproval,
+} from "./workflow-config.js";
 import {
   listPaymentChannels,
   findPaymentChannel,
@@ -25,7 +29,7 @@ import {
 const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
 const DRIVE = "https://www.googleapis.com/drive/v3";
 export const TAB_BATCHES = "รอบเบิก";
-export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V7_PRIMARY_REVIEW_OPTIONAL_MERGE_20260805";
+export const BATCH_VERSION = "REIMBURSEMENT_ACCOUNTING_TABLE_V7_33_FLEXIBLE_WORKFLOW_20260813";
 
 const LOCAL_BATCH_LOCKS = new Map();
 const LOCAL_SCHEDULE_CLAIMS = new Set();
@@ -190,7 +194,7 @@ function isEligible(rec) {
   if (hasMainClaim) return false;
   // รายการที่ผู้เบิกยืนยันแล้วใช้สถานะ "รอตรวจเอกสาร" ได้ทันที
   // แต่ยังถือเป็นรายการย่อยที่เลือกไปรวมเป็นใบเบิกหลักได้ ตราบใดที่ยังไม่มีเลขใบเบิก
-  if (["รวมรอบแล้ว", "ต้องแก้ไข", "รอโอนเงิน", "รอจ่าย", "รอหลักฐานการโอน", "อนุมัติแล้ว", "จ่ายแล้ว", "ยกเลิก", "ถูกรวมแล้ว"].includes(String(rec.batchStatus || "").trim())) return false;
+  if (["รวมรอบแล้ว", "ต้องแก้ไข", "ไม่อนุมัติ", "รอโอนเงิน", "รอจ่าย", "รอหลักฐานการโอน", "อนุมัติแล้ว", "จ่ายแล้ว", "ยกเลิก", "ถูกรวมแล้ว"].includes(String(rec.batchStatus || "").trim())) return false;
   return true;
 }
 
@@ -199,6 +203,29 @@ function isMergeableReviewBatch(batch = {}) {
   if (!["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(status)) return false;
   if (batch.approvedAt || batch.paidAt || batch.paymentSlipUrl) return false;
   return Array.isArray(batch.itemIds) && batch.itemIds.length > 0;
+}
+
+function batchStartStatus(items = [], settings = {}, forced = "") {
+  const force = String(forced || "").trim();
+  if (["รออนุมัติค่าใช้จ่าย", "รอตรวจเอกสาร", "รอโอนเงิน"].includes(force)) return force;
+  const statuses = (items || []).map((item) => String(item?.batchStatus || "").trim());
+  if (statuses.includes("รออนุมัติค่าใช้จ่าย")) return "รออนุมัติค่าใช้จ่าย";
+  if (statuses.some((status) => ["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(status))) return "รอตรวจเอกสาร";
+  return initialExpenseWorkflowStatus(settings);
+}
+
+function workflowSummaryFromExpenses(records = [], extra = {}) {
+  const rows = (Array.isArray(records) ? records : []).filter(Boolean);
+  const itemIds = rows.map((r) => String(r.id || "")).filter(Boolean);
+  const payerNames = [...new Set(rows.map((r) => String(r.payerName || r.sender || "").trim()).filter(Boolean))];
+  return {
+    itemIds,
+    itemCount: rows.length,
+    total: rows.reduce((sum, r) => sum + (Number(r.amount) || 0), 0),
+    payerNames,
+    payerName: payerNames[0] || "",
+    ...extra,
+  };
 }
 
 function parseList(raw) {
@@ -530,7 +557,13 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
   ]);
   const requestedPayer = String(options.payerKey || "").trim();
 
-  let eligible = all.filter((rec) => sourceBatchItemIds.has(String(rec.id)) ? basicExpenseMergeEligible(rec) : isEligible(rec));
+  const forcedWorkflowStatus = String(options.forceWorkflowStatus || "").trim();
+  let eligible = all.filter((rec) => {
+    const id = String(rec.id || "");
+    if (sourceBatchItemIds.has(id)) return basicExpenseMergeEligible(rec);
+    if (forcedWorkflowStatus && selected.has(id)) return basicExpenseMergeEligible(rec);
+    return isEligible(rec);
+  });
   if (selected.size) eligible = eligible.filter((r) => selected.has(String(r.id)));
   if (selected.size) {
     const found = new Set(eligible.map((r) => String(r.id)));
@@ -575,8 +608,9 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
       const docId = chunks.length > 1 ? `${baseDocId}-P${p + 1}` : baseDocId;
       const period = periodOf(items);
       const total = items.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+      const workflowStatus = batchStartStatus(items, settings, forcedWorkflowStatus);
       const batchDraft = {
-        id: id8(), runNo, docId, type, status: "รอตรวจเอกสาร",
+        id: id8(), runNo, docId, type, status: workflowStatus,
         payerId: profile.lineUserId || profile.payerId || group.key, payerName: profile.name || group.name,
         itemCount: items.length, total,
         periodStart: period.start, periodEnd: period.end,
@@ -603,7 +637,7 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
       const itemPatches = new Map(items.map((item) => [String(item.id), {
         payerId: item.payerId || profile.lineUserId || profile.payerId || group.key,
         batchType: type,
-        batchStatus: "รอตรวจเอกสาร",
+        batchStatus: workflowStatus,
         batchNo: runNo,
         batchDocId: docId,
         batchClaimPdfUrl: pdf.pdfUrl,
@@ -615,7 +649,7 @@ async function createReimbursementBatchesUnlocked(env, tenant, sheetId, token, o
       } catch (e) {
         // ป้องกันครึ่งรอบ: คืนรายการทั้งหมดกลับเข้าคิว และทำเครื่องหมายใบเบิกว่ายกเลิก
         await updateExpensesByIds(env, sheetId, items.map((item) => item.id), {
-          batchType: "ปกติ", batchStatus: "รอตรวจเอกสาร", batchNo: "",
+          batchType: "ปกติ", batchStatus: initialExpenseWorkflowStatus(settings), batchNo: "",
           batchDocId: "", batchClaimPdfUrl: "", batchPart: "", batchCreatedAt: "",
         }, token).catch(() => {});
         await updateBatchRow(env, sheetId, saved.id, {
@@ -736,12 +770,68 @@ export async function createReimbursementBatches(env, tenant, sheetId, token, op
   }
 }
 
+export async function initializeNewExpenseWorkflow(env, tenant, sheetId, records = [], token = null, options = {}) {
+  const inputRows = (Array.isArray(records) ? records : [records]).filter(Boolean);
+  if (!inputRows.length) return { ok: true, skipped: true, reason: "no_expenses" };
+  const settings = options.settings || await readSettings(env, sheetId, token);
+  const workflow = reimbursementWorkflowConfig(settings);
+  const status = initialExpenseWorkflowStatus(workflow);
+  const ids = inputRows.map((row) => String(row?.id || row || "").trim()).filter(Boolean);
+  if (!ids.length) return { ok: true, skipped: true, reason: "no_expense_ids", workflow, status };
 
-export async function updateExpenseReviewWorkflow(env, tenant, sheetId, expenseId, action, payload = {}, token = null) {
+  await updateExpensesByIds(env, sheetId, ids, {
+    batchType: "ปกติ",
+    batchStatus: status,
+  }, token);
+
+  const all = await readExpenses(env, sheetId, token);
+  const wanted = new Set(ids);
+  const rows = all.filter((row) => wanted.has(String(row.id || "")));
+  let batchOutput = null;
+
+  // ถ้าปิดทั้งด่านอนุมัติและตรวจบัญชี ให้สร้างใบเบิกเดี่ยวแล้วส่งเข้ารอโอนทันที
+  // เพื่อไม่ให้รายการหายจากคิว เพราะหน้าโอนทำงานบน batch เป็นหลัก
+  if (status === "รอโอนเงิน") {
+    try {
+      batchOutput = await createReimbursementBatches(env, tenant, sheetId, token, {
+        expenseIds: ids,
+        mergeItems: false,
+        maxItems: 1,
+        forceWorkflowStatus: "รอโอนเงิน",
+        settings,
+        note: "Workflow แบบเร็ว: ข้ามด่านอนุมัติและตรวจเอกสาร เข้ารอโอนอัตโนมัติ",
+      });
+      if (!batchOutput?.ok || !(batchOutput.batches || []).length) {
+        const reason = batchOutput?.message || batchOutput?.reason || "สร้างใบเบิกสำหรับขั้นจ่ายเงินไม่สำเร็จ";
+        await updateExpensesByIds(env, sheetId, ids, { batchStatus: "รอตรวจเอกสาร" }, token);
+        return { ok: false, reason: "fast_flow_batch_failed", message: reason, status: "รอตรวจเอกสาร", workflow, batchOutput };
+      }
+    } catch (error) {
+      await updateExpensesByIds(env, sheetId, ids, { batchStatus: "รอตรวจเอกสาร" }, token).catch(() => {});
+      return { ok: false, reason: "fast_flow_batch_failed", message: String(error?.message || error).slice(0, 180), status: "รอตรวจเอกสาร", workflow };
+    }
+  }
+
+  let notification = { ok: true, skipped: true, reason: "line_workflow_notify_disabled" };
+  if (workflow.lineNotifyEnabled && status !== "รอโอนเงิน") {
+    const stage = status === "รออนุมัติค่าใช้จ่าย" ? "approval" : "review";
+    const role = stage === "approval" ? "approver" : "accountant";
+    notification = await notifyWorkflowStage(env, tenant, {
+      role, stage,
+      eventKey: `items:${ids.slice().sort().join("_")}`,
+      ...workflowSummaryFromExpenses(rows.length ? rows : inputRows),
+    }).catch((error) => ({ ok: false, reason: String(error?.message || error).slice(0, 160) }));
+  }
+
+  return { ok: true, status, workflow, notification, batchOutput };
+}
+
+
+export async function updateExpenseReviewWorkflow(env, tenant, sheetId, expenseId, action, payload = {}, token = null, options = {}) {
   const id = String(expenseId || "").trim();
   if (!id) return { ok: false, reason: "expense_id_required", message: "ไม่พบรหัสรายการเบิก" };
   if (!["approve", "reject"].includes(String(action || ""))) {
-    return { ok: false, reason: "bad_action", message: "รายการที่ยังไม่รวมใบเบิกรองรับเฉพาะเอกสารผ่านหรือตีกลับ" };
+    return { ok: false, reason: "bad_action", message: "รายการนี้รองรับเฉพาะอนุมัติ/ผ่าน หรือไม่อนุมัติ/ตีกลับ" };
   }
 
   const expenses = await readExpenses(env, sheetId, token);
@@ -767,12 +857,16 @@ export async function updateExpenseReviewWorkflow(env, tenant, sheetId, expenseI
   let promoted = false;
 
   if (!batch) {
+    const currentStatus = String(expense.batchStatus || "").trim();
     const created = await createReimbursementBatches(env, tenant, sheetId, token, {
       type: String(expense.batchType || "") === "ด่วน" ? "ด่วน" : "ปกติ",
       expenseIds: [id],
       mergeItems: false,
       maxItems: 1,
-      note: "สร้างใบเบิกรายการอัตโนมัติเพื่อเข้าสู่ Workflow ตรวจเอกสาร",
+      forceWorkflowStatus: ["รออนุมัติค่าใช้จ่าย", "รอตรวจเอกสาร", "รอโอนเงิน"].includes(currentStatus) ? currentStatus : "",
+      note: currentStatus === "รออนุมัติค่าใช้จ่าย"
+        ? "สร้างใบเบิกรายการอัตโนมัติเพื่อเข้าสู่ Workflow อนุมัติค่าใช้จ่าย"
+        : "สร้างใบเบิกรายการอัตโนมัติเพื่อเข้าสู่ Workflow ตรวจเอกสาร",
     });
     if (!created.ok) return created;
     batch = Array.isArray(created.batches) ? created.batches[0] : null;
@@ -793,7 +887,11 @@ export async function updateExpenseReviewWorkflow(env, tenant, sheetId, expenseI
   const nextPayload = { ...(payload || {}) };
   if (action === "reject") nextPayload.itemIds = [id];
   const result = await updateReimbursementBatchWorkflow(
-    env, sheetId, batch.id || batch.docId, action, nextPayload, token, { tenant }
+    env, sheetId, batch.id || batch.docId, action, nextPayload, token, {
+      tenant,
+      actorRole: options.actorRole || "",
+      actorName: options.actorName || "",
+    }
   );
   return {
     ...result,
@@ -814,6 +912,13 @@ export async function requestUrgentBatch(env, tenant, sheetId, token, expenseIds
   if (!records.length) return { ok: false, reason: "no_eligible_items" };
 
   const recordIds = records.map((r) => String(r.id));
+  const settings = await readSettings(env, sheetId, token);
+  const originalStatusById = new Map(records.map((r) => [String(r.id), String(r.batchStatus || "").trim()]));
+  const targetStatus = records.some((r) => String(r.batchStatus || "").trim() === "รออนุมัติค่าใช้จ่าย")
+    ? "รออนุมัติค่าใช้จ่าย"
+    : records.some((r) => ["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(String(r.batchStatus || "").trim()))
+      ? "รอตรวจเอกสาร"
+      : initialExpenseWorkflowStatus(settings);
   await updateExpensesByIds(env, sheetId, recordIds, {
     batchType: "ด่วน",
     batchStatus: "ขอเบิกด่วน",
@@ -824,14 +929,17 @@ export async function requestUrgentBatch(env, tenant, sheetId, token, expenseIds
     return await createReimbursementBatches(env, tenant, sheetId, token, {
       type: "ด่วน",
       expenseIds: recordIds,
+      forceWorkflowStatus: targetStatus,
+      settings,
       note: "สร้างใบเบิกด่วนจากคำขอผู้เบิก",
     });
   } catch (error) {
-    await updateExpensesByIds(env, sheetId, recordIds, {
-      batchType: "ปกติ",
-      batchStatus: "รอตรวจเอกสาร",
+    const rollback = new Map(records.map((r) => [String(r.id), {
+      batchType: String(r.batchType || "ปกติ") || "ปกติ",
+      batchStatus: originalStatusById.get(String(r.id)) || initialExpenseWorkflowStatus(settings),
       urgentRequestedAt: "",
-    }, token).catch(() => {});
+    }]));
+    await updateExpensesByIdPatches(env, sheetId, rollback, token).catch(() => {});
     throw error;
   }
 }
@@ -842,6 +950,7 @@ export async function getBatchDashboard(env, sheetId, token = null) {
     listBatches(env, sheetId, token),
     readSettings(env, sheetId, token),
   ]);
+  const workflow = reimbursementWorkflowConfig(settings);
   const paymentChannels = listPaymentChannels(settings);
   const paymentChannelById = new Map(paymentChannels.map((channel) => [String(channel.id), channel]));
   const pending = expenses.filter(isEligible);
@@ -849,7 +958,9 @@ export async function getBatchDashboard(env, sheetId, token = null) {
     id: r.id, dateISO: r.dateISO, dateText: r.dateText, createdAt: r.createdAt,
     vendor: r.vendor, transferor: r.transferor, payerName: r.payerName,
     note: r.note, amount: r.amount, category: r.category, docType: r.docType,
-    batchType: r.batchType || "ปกติ", batchStatus: r.batchStatus || "รอตรวจเอกสาร",
+    batchType: r.batchType || "ปกติ",
+    batchStatus: r.batchStatus || initialExpenseWorkflowStatus(workflow),
+    workflowStep: workflowStageFromStatus(r.batchStatus || initialExpenseWorkflowStatus(workflow)),
     imageUrl: r.imageUrl, claimPdfUrl: r.claimPdfUrl, receiptPdfUrl: r.receiptPdfUrl,
     attReceipt: r.attReceipt || "", attTax: r.attTax || "", attSlip: r.attSlip || "", attOther: r.attOther || "",
     duplicateStatus: r.duplicateStatus || "", duplicateOf: r.duplicateOf || "",
@@ -885,12 +996,8 @@ export async function getBatchDashboard(env, sheetId, token = null) {
     const profile = payerProfile(settings, b.payerId, b.payerName);
     const missing = missingProfileFields(profile);
     const items = (b.itemIds || []).map((id) => expensesById.get(String(id))).filter(Boolean).map(itemView);
-    const status = String(b.status || "รอตรวจเอกสาร");
-    const workflowStep = status === "จ่ายแล้ว" || b.paymentSlipUrl ? "paid"
-      : ["ยกเลิก", "ไม่อนุมัติ", "rejected", "Rejected"].includes(status) ? "rejected"
-      : status === "ต้องแก้ไข" || status === "ตีกลับ" ? "correction"
-      : status === "รอตรวจเอกสาร" || status === "รออนุมัติ" || status === "รวมรอบแล้ว" ? "review"
-      : "payment";
+    const status = String(b.status || initialExpenseWorkflowStatus(workflow));
+    const workflowStep = status === "จ่ายแล้ว" || b.paymentSlipUrl ? "paid" : workflowStageFromStatus(status);
     return {
       ...b,
       status,
@@ -928,7 +1035,9 @@ export async function getBatchDashboard(env, sheetId, token = null) {
       maxItems: Number(settings.batch_max_items || 10),
       mergeItems: String(settings.batch_merge_items ?? "TRUE").toUpperCase() !== "FALSE",
       timezone: settings.batch_timezone || "Asia/Bangkok",
+      workflow,
     },
+    workflow,
     pending: {
       itemCount: pending.length,
       total: pending.reduce((sum, r) => sum + (Number(r.amount) || 0), 0),
@@ -939,6 +1048,7 @@ export async function getBatchDashboard(env, sheetId, token = null) {
     batches: enriched,
     summary: {
       processing: summarizeRows(active),
+      awaitingApproval: summarizeRows(rowsByStep("approval")),
       awaitingReview: summarizeRows(rowsByStep("review")),
       correctionRequired: summarizeRows(rowsByStep("correction")),
       waitingPayment: summarizeRows(rowsByStep("payment")),
@@ -946,7 +1056,6 @@ export async function getBatchDashboard(env, sheetId, token = null) {
       paid: summarizeRows(rowsByStep("paid")),
       rejected: summarizeRows(rowsByStep("rejected")),
       // aliases สำหรับ Dashboard รุ่นก่อน ระหว่าง deploy สอง Repo
-      awaitingApproval: summarizeRows(rowsByStep("review")),
       peakPending: summarizeRows([]),
       transferPending: summarizeRows(rowsByStep("payment")),
       slipPending: summarizeRows([]),
@@ -957,7 +1066,7 @@ export async function getBatchDashboard(env, sheetId, token = null) {
 export async function updateReimbursementBatchStatus(env, sheetId, batchId, status, token = null) {
   const legacy = { "รออนุมัติ": "รอตรวจเอกสาร", "อนุมัติแล้ว": "รอโอนเงิน", "รอจ่าย": "รอโอนเงิน", "ตีกลับ": "ต้องแก้ไข" };
   const normalized = legacy[status] || status;
-  const allowed = new Set(["รอตรวจเอกสาร", "ต้องแก้ไข", "รอโอนเงิน", "รอหลักฐานการโอน", "ยกเลิก"]);
+  const allowed = new Set(["รออนุมัติค่าใช้จ่าย", "รอตรวจเอกสาร", "ต้องแก้ไข", "รอโอนเงิน", "รอหลักฐานการโอน", "ยกเลิก"]);
   if (!allowed.has(normalized)) {
     if (normalized === "จ่ายแล้ว") return { ok: false, reason: "payment_slip_required", message: "ต้องแนบหลักฐานการโอนก่อน ระบบจึงจะเปลี่ยนเป็นจ่ายแล้ว" };
     return { ok: false, reason: "bad_status" };
@@ -1027,6 +1136,25 @@ async function notifyCorrectionRequired(env, sheetId, rec, items, reason, token 
     return { status: ok ? "แจ้งแก้ไขแล้ว" : "แจ้งแก้ไขไม่สำเร็จ", at: ok ? new Date().toISOString() : "" };
   } catch (e) {
     return { status: `แจ้งแก้ไขไม่สำเร็จ: ${String(e.message || e).slice(0, 100)}`, at: "" };
+  }
+}
+
+async function notifyExpenseNotApproved(env, sheetId, rec, reason, token = null) {
+  const recipientId = await resolveLineRecipient(env, sheetId, rec, token);
+  if (!recipientId) return { status: "ไม่มี LINE User ID", at: "" };
+  const lines = [
+    "รายการเบิกไม่ได้รับอนุมัติ",
+    rec.docId || rec.runNo || rec.id ? `ใบเบิก ${rec.docId || rec.runNo || rec.id}` : "",
+    rec.payerName ? `ผู้เบิก: ${rec.payerName}` : "",
+    `ยอดรวม ฿${Number(rec.total || 0).toLocaleString("th-TH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+    `เหตุผล: ${reason}`,
+    "รายการนี้ถูกปิดเป็นไม่อนุมัติ หากต้องการเบิกใหม่ให้สร้างรายการใหม่",
+  ].filter(Boolean).join("\n");
+  try {
+    const ok = await push(env, recipientId, textMsg(lines));
+    return { status: ok ? "แจ้งไม่อนุมัติแล้ว" : "แจ้งไม่อนุมัติไม่สำเร็จ", at: ok ? new Date().toISOString() : "" };
+  } catch (e) {
+    return { status: `แจ้งไม่อนุมัติไม่สำเร็จ: ${String(e.message || e).slice(0, 100)}`, at: "" };
   }
 }
 
@@ -1238,20 +1366,57 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
   const rec = await findBatch(env, sheetId, batchId, token);
   if (!rec) return { ok: false, reason: "not_found", message: "ไม่พบใบเบิก" };
   const now = new Date().toISOString();
+  const workflowSettings = await readSettings(env, sheetId, token).catch(() => ({}));
+  const workflow = reimbursementWorkflowConfig(workflowSettings);
+  const actorRole = String(options.actorRole || "").trim();
 
   if (action === "approve") {
-    const current = String(rec.status || "");
-    if (["จ่ายแล้ว", "ยกเลิก"].includes(current)) return { ok: false, reason: "batch_closed", message: "ใบเบิกนี้ปิดงานแล้ว" };
-    if (!["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(current)) {
-      return { ok: false, reason: "not_waiting_review", message: "ใบเบิกนี้ไม่ได้อยู่ในขั้นตรวจเอกสาร" };
+    const current = String(rec.status || "").trim();
+    if (["จ่ายแล้ว", "ยกเลิก", "ไม่อนุมัติ"].includes(current)) {
+      return { ok: false, reason: "batch_closed", message: "ใบเบิกนี้ปิดงานแล้ว" };
     }
+    const stage = workflowStageFromStatus(current);
+    if (!["approval", "review"].includes(stage)) {
+      return { ok: false, reason: "not_waiting_workflow", message: "ใบเบิกนี้ไม่ได้อยู่ในขั้นอนุมัติหรือตรวจเอกสาร" };
+    }
+    if (!actorCanHandleStage(actorRole, stage)) {
+      return {
+        ok: false, reason: "forbidden_stage",
+        message: stage === "approval" ? "ขั้นนี้ต้องใช้สิทธิ์ผู้อนุมัติ" : "ขั้นนี้ต้องใช้สิทธิ์บัญชี/ตรวจเอกสาร",
+      };
+    }
+
+    if (stage === "approval") {
+      const nextStatus = nextStatusAfterApproval(workflow);
+      const patch = {
+        status: nextStatus, rejectionReason: "", updatedAt: now,
+        ...(nextStatus === "รอโอนเงิน" ? { approvedAt: rec.approvedAt || now } : {}),
+        auditLog: auditJson(rec, "expense_approved", { nextStatus, actorRole: actorRole || "system" }),
+      };
+      const out = await updateBatchRow(env, sheetId, batchId, patch, token, rec);
+      if (out.ok) {
+        await patchBatchExpenses(env, sheetId, rec.itemIds, { paid: false, batchStatus: nextStatus }, token);
+        if (nextStatus === "รอตรวจเอกสาร" && workflow.lineNotifyEnabled && options.tenant) {
+          const expenseRows = await readExpenses(env, sheetId, token).catch(() => []);
+          const wanted = new Set((rec.itemIds || []).map(String));
+          const items = expenseRows.filter((item) => wanted.has(String(item.id || "")));
+          await notifyWorkflowStage(env, options.tenant, {
+            role: "accountant", stage: "review",
+            eventKey: `batch:${rec.id || rec.docId}:review:${now}`,
+            ...workflowSummaryFromExpenses(items, { itemCount: Number(rec.itemCount || items.length || 0), total: Number(rec.total || 0), docId: rec.docId || "", runNo: rec.runNo || "" }),
+          }).catch((error) => console.warn("notify accounting after approval", error?.message || error));
+        }
+      }
+      return { ...out, workflowStage: stage, nextStatus };
+    }
+
     const patch = {
       status: "รอโอนเงิน", approvedAt: rec.approvedAt || now, rejectionReason: "",
-      updatedAt: now, auditLog: auditJson(rec, "documents_approved", {}),
+      updatedAt: now, auditLog: auditJson(rec, "documents_approved", { actorRole: actorRole || "system" }),
     };
     const out = await updateBatchRow(env, sheetId, batchId, patch, token, rec);
     if (out.ok) await patchBatchExpenses(env, sheetId, rec.itemIds, { paid: false, batchStatus: "รอโอนเงิน" }, token);
-    return out;
+    return { ...out, workflowStage: stage, nextStatus: "รอโอนเงิน" };
   }
 
   if (action === "assign_payment_channel") {
@@ -1260,8 +1425,10 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
     if (closed || (current === "จ่ายแล้ว" && String(rec.reconcileStatus || "") === "กระทบยอดแล้ว")) {
       return { ok: false, reason: "batch_closed", message: "ใบเบิกนี้ปิดงานหรือกระทบยอดแล้ว จึงเปลี่ยนบัญชีที่จ่ายไม่ได้" };
     }
-    const settings = await readSettings(env, sheetId, token);
-    const channel = findPaymentChannel(settings, payload.paymentChannelId || payload.channelId, { activeOnly: true });
+    if (actorRole && !["owner", "accountant"].includes(actorRole)) {
+      return { ok: false, reason: "forbidden_stage", message: "สิทธิ์นี้ไม่สามารถเลือกบัญชีที่ใช้จ่ายได้" };
+    }
+    const channel = findPaymentChannel(workflowSettings, payload.paymentChannelId || payload.channelId, { activeOnly: true });
     if (!channel) return { ok: false, reason: "payment_channel_not_found", message: "ไม่พบช่องทางการเงิน หรือช่องทางนี้ถูกปิดใช้งาน" };
     const snapshot = channelSnapshot(channel);
     const patch = {
@@ -1276,10 +1443,13 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
   if (action === "peak_recorded") return { ok: false, reason: "peak_removed", message: "ตัดขั้น PEAK ออกจาก Flow แล้ว" };
 
   if (action === "transfer_set") {
+    if (actorRole && !["owner", "accountant"].includes(actorRole)) {
+      return { ok: false, reason: "forbidden_stage", message: "สิทธิ์นี้ไม่สามารถตั้งโอนได้" };
+    }
     const current = String(rec.status || "");
     if (!["รอโอนเงิน", "อนุมัติแล้ว", "รอจ่าย"].includes(current)) {
-      const message = ["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(current)
-        ? "ต้องตรวจเอกสารและกดเอกสารผ่านก่อน"
+      const message = ["รออนุมัติค่าใช้จ่าย", "รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(current)
+        ? "ต้องผ่านขั้นอนุมัติ/ตรวจเอกสารที่เปิดใช้งานก่อน"
         : "ใบเบิกนี้ไม่ได้อยู่ในสถานะรอโอนเงิน";
       return { ok: false, reason: "batch_not_payable", message };
     }
@@ -1294,11 +1464,19 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
   }
 
   if (action === "reject") {
-    if (!["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(String(rec.status || ""))) {
-      return { ok: false, reason: "not_waiting_review", message: "ตีกลับได้เฉพาะใบเบิกที่กำลังตรวจเอกสาร" };
+    const current = String(rec.status || "").trim();
+    const stage = workflowStageFromStatus(current);
+    if (!["approval", "review"].includes(stage)) {
+      return { ok: false, reason: "not_waiting_workflow", message: "รายการนี้ไม่ได้อยู่ในขั้นที่สามารถปฏิเสธหรือตีกลับได้" };
+    }
+    if (!actorCanHandleStage(actorRole, stage)) {
+      return {
+        ok: false, reason: "forbidden_stage",
+        message: stage === "approval" ? "ขั้นนี้ต้องใช้สิทธิ์ผู้อนุมัติ" : "ขั้นนี้ต้องใช้สิทธิ์บัญชี/ตรวจเอกสาร",
+      };
     }
     const reason = String(payload.reason || "").trim();
-    if (!reason) return { ok: false, reason: "reason_required", message: "กรุณาระบุเหตุผลที่ตีกลับ" };
+    if (!reason) return { ok: false, reason: "reason_required", message: "กรุณาระบุเหตุผล" };
     const selected = new Set((Array.isArray(payload.itemIds) ? payload.itemIds : []).map(String));
     const batchItemIds = new Set((rec.itemIds || []).map(String));
     const expenseRows = await readExpenses(env, sheetId, token);
@@ -1306,20 +1484,44 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
       batchItemIds.has(String(item.id || "")) &&
       (!selected.size || selected.has(String(item.id || "")))
     );
+
+    if (stage === "approval") {
+      const patch = {
+        status: "ไม่อนุมัติ", rejectionReason: reason, updatedAt: now,
+        auditLog: auditJson(rec, "expense_not_approved", { reason, actorRole: actorRole || "system" }),
+      };
+      let out = await updateBatchRow(env, sheetId, batchId, patch, token, rec);
+      if (out.ok) {
+        await patchBatchExpenses(env, sheetId, rec.itemIds, { paid: false, batchStatus: "ไม่อนุมัติ" }, token);
+        const notice = await notifyExpenseNotApproved(env, sheetId, { ...rec, ...patch }, reason, token);
+        const rejectedRecord = { ...rec, ...patch };
+        out = await updateBatchRow(env, sheetId, batchId, {
+          lineNotifyStatus: notice.status, lineNotifyAt: notice.at, updatedAt: new Date().toISOString(),
+          auditLog: auditJson(rejectedRecord, "rejection_notified", { status: notice.status }),
+        }, token, rejectedRecord);
+        return { ...out, workflowStage: stage, nextStatus: "ไม่อนุมัติ", notificationStatus: notice.status };
+      }
+      return out;
+    }
+
     const patch = {
       status: "ต้องแก้ไข", rejectionReason: reason, updatedAt: now,
-      auditLog: auditJson(rec, "documents_rejected", { reason, itemIds: [...selected] }),
+      auditLog: auditJson(rec, "documents_rejected", { reason, itemIds: [...selected], actorRole: actorRole || "system" }),
     };
     let out = await updateBatchRow(env, sheetId, batchId, patch, token, rec);
     if (out.ok) {
       await patchBatchExpenses(env, sheetId, rec.itemIds, { paid: false, batchStatus: "ต้องแก้ไข" }, token);
-      const notice = await notifyCorrectionRequired(env, sheetId, rec, allItems.length ? allItems : (rec.itemIds || []).map((id) => ({ id, vendor: "รายการเบิก" })), reason, token);
+      const notice = await notifyCorrectionRequired(
+        env, sheetId, rec,
+        allItems.length ? allItems : (rec.itemIds || []).map((id) => ({ id, vendor: "รายการเบิก" })),
+        reason, token
+      );
       const rejectedRecord = { ...rec, ...patch };
       out = await updateBatchRow(env, sheetId, batchId, {
         lineNotifyStatus: notice.status, lineNotifyAt: notice.at, updatedAt: new Date().toISOString(),
-        auditLog: auditJson({ ...rejectedRecord, auditEvents: [...(rec.auditEvents || []), { at: now, action: "documents_rejected", detail: { reason } }] }, "correction_notified", { status: notice.status }),
+        auditLog: auditJson(rejectedRecord, "correction_notified", { status: notice.status }),
       }, token, rejectedRecord);
-      return { ...out, notificationStatus: notice.status };
+      return { ...out, workflowStage: stage, nextStatus: "ต้องแก้ไข", notificationStatus: notice.status };
     }
     return out;
   }
@@ -1354,11 +1556,24 @@ export async function updateReimbursementBatchWorkflow(env, sheetId, batchId, ac
         batchClaimPdfUrl: mainClaim.pdfUrl,
       }, token);
       await removeOldMainClaim(token, rec.pdfUrl, mainClaim.fileId);
+      if (workflow.lineNotifyEnabled && options.tenant) {
+        const expenseRows = await readExpenses(env, sheetId, token).catch(() => []);
+        const wanted = new Set((rec.itemIds || []).map(String));
+        const items = expenseRows.filter((item) => wanted.has(String(item.id || "")));
+        await notifyWorkflowStage(env, options.tenant, {
+          role: "accountant", stage: "review",
+          eventKey: `batch:${rec.id || rec.docId}:resubmit:${now}`,
+          ...workflowSummaryFromExpenses(items, { itemCount: Number(rec.itemCount || items.length || 0), total: Number(rec.total || 0), docId: rec.docId || "", runNo: rec.runNo || "" }),
+        }).catch((error) => console.warn("notify accounting after resubmit", error?.message || error));
+      }
     }
-    return { ...out, pdfUrl: mainClaim.pdfUrl };
+    return { ...out, pdfUrl: mainClaim.pdfUrl, nextStatus: "รอตรวจเอกสาร" };
   }
 
   if (action === "retry_payment_notification") {
+    if (actorRole && !["owner", "accountant"].includes(actorRole)) {
+      return { ok: false, reason: "forbidden_stage", message: "สิทธิ์นี้ไม่สามารถจัดการการจ่ายเงินได้" };
+    }
     if (!rec.paymentSlipUrl) return { ok: false, reason: "slip_missing", message: "ยังไม่มีหลักฐานการโอน" };
     const uploadEvent = [...(rec.auditEvents || [])].reverse().find((e) => e?.action === "payment_slip_uploaded");
     const mediaType = String(uploadEvent?.detail?.mediaType || "");
@@ -1411,8 +1626,11 @@ export async function uploadReimbursementPaymentSlip(env, sheetId, batchId, file
   if (!paymentChannel) {
     return { ok: false, reason: "payment_channel_required", message: "กรุณาเลือกบัญชีหรือช่องทางการเงินที่ใช้โอนรายการนี้" };
   }
-  if (["ต้องแก้ไข", "ตีกลับ", "รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(currentStatus)) {
-    return { ok: false, reason: "review_required", message: "ต้องให้เอกสารผ่านก่อนแนบหลักฐานการโอน" };
+  if (options.actorRole && !["owner", "accountant"].includes(String(options.actorRole))) {
+    return { ok: false, reason: "forbidden_stage", message: "สิทธิ์นี้ไม่สามารถบันทึกการจ่ายเงินได้" };
+  }
+  if (["ต้องแก้ไข", "ตีกลับ", "รออนุมัติค่าใช้จ่าย", "รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว", "ไม่อนุมัติ"].includes(currentStatus)) {
+    return { ok: false, reason: "review_required", message: "ต้องผ่านขั้นอนุมัติ/ตรวจเอกสารที่เปิดใช้งานก่อนแนบหลักฐานการโอน" };
   }
   if (currentStatus === "จ่ายแล้ว" || rec.paymentSlipUrl) return { ok: false, reason: "already_paid", message: "ใบเบิกนี้แนบหลักฐานและปิดงานแล้ว" };
   if (!["รอโอนเงิน", "อนุมัติแล้ว", "รอจ่าย", "รอหลักฐานการโอน"].includes(currentStatus)

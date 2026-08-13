@@ -4,7 +4,7 @@ import { enhanceMobileWebResponse } from "./mobile-web-ux.js";
 
 export { MultiExpenseSession } from "./index.js";
 
-const VERSION = "DEAL_LINE_BOT_v7.28_LINE_DIRECT_DIAGNOSTIC_20260812";
+const VERSION = "DEAL_LINE_BOT_v7.33_FLEXIBLE_REIMBURSEMENT_WORKFLOW_20260813";
 
 async function wrappedFetch(request, env, ctx) {
   const url = new URL(request.url);

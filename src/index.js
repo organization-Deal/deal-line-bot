@@ -33,7 +33,7 @@ import {
   ensureBatchTab, getBatchDashboard, createReimbursementBatches,
   requestUrgentBatch, updateReimbursementBatchStatus,
   updateReimbursementBatchWorkflow, updateExpenseReviewWorkflow, uploadReimbursementPaymentSlip,
-  runScheduledReimbursementBatches,
+  initializeNewExpenseWorkflow, runScheduledReimbursementBatches,
 } from "./batches.js";
 import {
   ensureReconciliationTab, getReconciliationDashboard,
@@ -72,7 +72,7 @@ import {
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
-const VERSION = "DEAL_LINE_BOT_v7.32_EXISTING_BUSINESS_MERGE_20260813";
+const VERSION = "DEAL_LINE_BOT_v7.33_FLEXIBLE_REIMBURSEMENT_WORKFLOW_20260813";
 
 const PENDING_ACTS = new Set(["confirm", "confirm_force", "cancel"]);
 const MSG_STALE = "การ์ดใบนี้เก่าแล้วครับ 🙏 เลื่อนลงไปใช้การ์ดใบล่าสุดของรายการนี้แทน";
@@ -123,7 +123,7 @@ function accessCan(access,path,method="GET"){
   }
   if(access?.role==="approver"){
     if(!write)return ["/api/expenses","/api/batches","/api/settings","/api/workspace-links","/api/subscription","/api/businesses","/api/accounting/today","/api/accounting/whoami"].some(p=>path===p||path.startsWith(p+"/"));
-    return ["/api/expense-workflow","/api/batch-workflow","/api/batch-status"].includes(path);
+    return ["/api/expense-workflow","/api/batch-workflow"].includes(path);
   }
   if(access?.role==="viewer")return !write&&!path.includes("/backup")&&!path.includes("/access");
   return false;
@@ -147,8 +147,8 @@ async function createDashAccess(env,key,{
     name:String(name||DASH_ROLES[r]).trim().slice(0,120),
     role:r,
     lineUserId:String(lineUserId||"").trim().slice(0,120),
-    lineGroupTenant:r==="approver"?String(lineGroupTenant||"").trim().slice(0,120):"",
-    lineGroupName:r==="approver"?String(lineGroupName||"").trim().slice(0,160):"",
+    lineGroupTenant:["approver","accountant"].includes(r)?String(lineGroupTenant||"").trim().slice(0,120):"",
+    lineGroupName:["approver","accountant"].includes(r)?String(lineGroupName||"").trim().slice(0,160):"",
     companyName:String(companyName||"").trim().slice(0,160),
     active:true,
     createdAt:new Date().toISOString()
@@ -1102,7 +1102,7 @@ export default {
             const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
             let record={...rec,url:`${base}?tenant=${encodeURIComponent(key)}&k=${rec.token}`};
             let lineNotification={attempted:false,sent:false,accepted:false};
-            if(rec.role==="approver"&&rec.lineUserId){
+            if(["approver","accountant"].includes(rec.role)&&rec.lineUserId){
               lineNotification=await notifyApproverAssignment(env,key,record)
                 .catch(e=>({ok:false,attempted:true,sent:false,accepted:false,reason:String(e?.message||e).slice(0,180)}));
               const saved=await patchDashAccessRecord(env,key,rec.token,lineNotificationPatch(lineNotification));
@@ -1122,7 +1122,7 @@ export default {
           const accessToken=String(b.token||"").trim();
           const current=await readDashAccessRecord(env,key,accessToken);
           if(!current||current.active===false)return cors(json({ok:false,error:"access_not_found",message:"ไม่พบสิทธิ์ผู้ใช้งานนี้"},404));
-          if(current.role!=="approver"||!current.lineUserId)return cors(json({ok:false,error:"approver_line_not_linked",message:"สิทธิ์นี้ยังไม่ได้ผูก LINE ผู้อนุมัติ"},400));
+          if(!["approver","accountant"].includes(current.role)||!current.lineUserId)return cors(json({ok:false,error:"workflow_line_not_linked",message:"สิทธิ์นี้ยังไม่ได้ผูก LINE สำหรับรับงาน Workflow"},400));
           const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
           const record={...current,token:accessToken,url:`${base}?tenant=${encodeURIComponent(key)}&k=${accessToken}`};
           const lineNotification=await notifyApproverAssignment(env,key,record)
@@ -1335,6 +1335,10 @@ export default {
         if (url.pathname === "/api/settings") {
           if (request.method === "POST") {
             const b = await request.json();
+            const workflowKeys=["reimbursement_workflow_preset","expense_approval_enabled","accounting_review_enabled","line_workflow_notify_enabled"];
+            if(access.role!=="owner"&&workflowKeys.some((field)=>Object.prototype.hasOwnProperty.call(b||{},field))){
+              return cors(json({ok:false,error:"owner_only_workflow",message:"เฉพาะ Owner เท่านั้นที่เปลี่ยน Workflow เบิกจ่ายได้"},403));
+            }
             const beforeSettings=await readSettings(env,sheetId,token).catch(()=>({}));
             const saved = await writeSettings(env, sheetId, b, token);
             await ensureTenantDriveFolders(env, key, token, {
@@ -1414,7 +1418,8 @@ export default {
 
         /* ใบเบิกหลัก — รวมหลายรายการย่อยของผู้เบิกเป็นไฟล์เดียว */
         if (url.pathname === "/api/batches") {
-          return cors(json(await getBatchDashboard(env, sheetId, token)));
+          const dashboard = await getBatchDashboard(env, sheetId, token);
+          return cors(json({ ...dashboard, currentAccessRole: access.role, currentAccessName: access.name || "" }));
         }
 
         if (url.pathname === "/api/batch-close" && request.method === "POST") {
@@ -1453,7 +1458,9 @@ export default {
 
         if (url.pathname === "/api/batch-workflow" && request.method === "POST") {
           const b = await request.json().catch(() => ({}));
-          const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token, { tenant: key });
+          const out = await updateReimbursementBatchWorkflow(env, sheetId, b.batchId, b.action, b.payload || {}, token, {
+            tenant: key, actorRole: access.role, actorName: access.name || "Dashboard"
+          });
           if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:`BATCH_${String(b.action||"WORKFLOW").toUpperCase()}`,entityType:"reimbursement_batch",entityId:b.batchId,summary:`ดำเนินการรอบเบิก: ${b.action||"workflow"}`,after:b.payload||{}});
           return cors(json(out, out.ok ? 200 : 400));
         }
@@ -1464,7 +1471,9 @@ export default {
           const b = await request.json().catch(() => ({}));
           const before=await getExpenseById(env,sheetId,b.expenseId,token);
           if(before)await assertPeriodOpen(env,sheetId,before.dateISO||before.dateText||new Date(),token);
-          const out = await updateExpenseReviewWorkflow(env, key, sheetId, b.expenseId, b.action, b.payload || {}, token);
+          const out = await updateExpenseReviewWorkflow(env, key, sheetId, b.expenseId, b.action, b.payload || {}, token, {
+            actorRole: access.role, actorName: access.name || "Dashboard"
+          });
           if(out.ok)await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:`EXPENSE_${String(b.action||"WORKFLOW").toUpperCase()}`,entityType:"expense",entityId:b.expenseId,summary:`ดำเนินการรายจ่าย: ${b.action||"workflow"}`,before,after:out});
           return cors(json(out, out.ok ? 200 : 400));
         }
@@ -1474,7 +1483,9 @@ export default {
           const batchId = String(form.get("batchId") || "");
           const paymentChannelId = String(form.get("paymentChannelId") || "");
           const file = form.get("file");
-          const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token, { paymentChannelId, tenant: key });
+          const out = await uploadReimbursementPaymentSlip(env, sheetId, batchId, file, token, {
+            paymentChannelId, tenant: key, actorRole: access.role, actorName: access.name || "Dashboard"
+          });
           if(out.ok){
             await postReimbursementPaymentJournal(env,sheetId,out.record||{id:batchId,batchId,total:out.total,paidAt:new Date().toISOString()},token,access.name||"Dashboard").catch(e=>console.warn("reimbursement payment journal",e.message));
             await writeAudit(env,sheetId,token,{actor:access.name||"Dashboard",action:"UPLOAD_PAYMENT_SLIP",entityType:"reimbursement_batch",entityId:batchId,summary:"อัปโหลดหลักฐานโอนเงินคืน",after:{paymentChannelId}});
@@ -2367,6 +2378,15 @@ ${r.customer || pending.record?.transferor || "ลูกค้าทั่วไ
       batchDocId: "",
       batchClaimPdfUrl: "",
     };
+    const workflowInit = await initializeNewExpenseWorkflow(env, key, pending.sheetId, [rec], token)
+      .catch((error) => ({ ok:false, status:"รอตรวจเอกสาร", reason:String(error?.message || error).slice(0,180) }));
+    if (workflowInit?.status) {
+      rec = { ...rec, status: workflowInit.status, batchStatus: workflowInit.status };
+    }
+    if (workflowInit?.ok === false) {
+      console.warn("initialize reimbursement workflow", workflowInit.reason || workflowInit.message || "failed");
+    }
+
     await postExpenseJournal(env,pending.sheetId,rec,token,pending.sender||"LINE").catch(e=>console.warn("line expense journal",e.message));
     await writeAudit(env,pending.sheetId,token,{actor:pending.sender||"LINE",action:"CREATE_EXPENSE",entityType:"expense",entityId:rowId,summary:`บันทึกรายจ่ายจาก LINE ${rec.vendor||""} ${rec.amount||0}`,after:rec,source:"LINE"});
 

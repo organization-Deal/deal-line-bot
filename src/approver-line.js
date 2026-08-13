@@ -7,11 +7,13 @@
 import { push } from "./line.js";
 import { readSettings } from "./sheets.js";
 import { getUserToken } from "./oauth.js";
+import { reimbursementWorkflowConfig } from "./workflow-config.js";
 
-const VERSION = "LINE_APPROVER_NOTIFY_V7_31_COMPANY_CONTEXT_20260812";
+const VERSION = "LINE_WORKFLOW_NOTIFY_V7_33_FLEXIBLE_20260813";
 const LINE_API = "https://api.line.me/v2/bot";
 const MEMBER_PREFIX = "linemember:v1:";
 const NOTIFY_PREFIX = "approvernotify:v1:";
+const WORKFLOW_NOTIFY_PREFIX = "workflownotify:v2:";
 
 function clean(value, max = 160) {
   return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
@@ -393,7 +395,9 @@ export async function bindApproverLine(env, tenant, accessToken, lineUserId) {
   const key = `daccess:${tenant}:${accessToken}`;
   const rec = await env.KV.get(key, "json").catch(() => null);
   if (!rec || rec.active === false) return { ok: false, reason: "access_not_found" };
-  if (rec.role !== "approver") return { ok: false, reason: "approver_only" };
+  if (!["approver", "accountant"].includes(String(rec.role || ""))) {
+    return { ok: false, reason: "workflow_role_only" };
+  }
 
   const member = await readMember(env, tenant, lineUserId);
   const next = {
@@ -406,7 +410,8 @@ export async function bindApproverLine(env, tenant, accessToken, lineUserId) {
   return { ok: true, record: { ...next, token: accessToken } };
 }
 
-async function approverAccessRows(env, tenant) {
+async function workflowAccessRows(env, tenant, role = "approver") {
+  const wantedRole = ["approver", "accountant"].includes(String(role || "")) ? String(role) : "approver";
   const rows = [];
   let cursor;
   do {
@@ -417,7 +422,7 @@ async function approverAccessRows(env, tenant) {
     });
     for (const entry of page.keys || []) {
       const rec = await env.KV.get(entry.name, "json").catch(() => null);
-      if (!rec || rec.active === false || rec.role !== "approver" || !validUserId(rec.lineUserId)) continue;
+      if (!rec || rec.active === false || rec.role !== wantedRole || !validUserId(rec.lineUserId)) continue;
       rows.push({
         ...rec,
         token: entry.name.slice(accessPrefix(tenant).length),
@@ -432,6 +437,10 @@ async function approverAccessRows(env, tenant) {
     if (!byUser.has(row.lineUserId)) byUser.set(row.lineUserId, row);
   }
   return [...byUser.values()];
+}
+
+async function approverAccessRows(env, tenant) {
+  return workflowAccessRows(env, tenant, "approver");
 }
 
 function batchSummary(output = {}, kind = "") {
@@ -525,6 +534,73 @@ function approverCard(name, summary, dashboardUrl, context = {}) {
   };
 }
 
+
+function workflowTaskCard(name, role, summary, dashboardUrl, context = {}) {
+  const companyName = clean(context.companyName || context.businessName || "", 100);
+  const groupName = clean(context.lineGroupName || "", 100);
+  const isApproval = role === "approver";
+  const kicker = isApproval ? "รออนุมัติค่าใช้จ่าย" : "รอตรวจเอกสาร";
+  const title = isApproval
+    ? `มีรายการเบิกใหม่รอให้ ${clean(name || "ผู้อนุมัติ", 40)} อนุมัติ`
+    : `มีรายการเบิกรอให้ ${clean(name || "ฝ่ายบัญชี", 40)} ตรวจเอกสาร`;
+  const actionLabel = isApproval ? "เปิดหน้าอนุมัติ" : "เปิดหน้าตรวจเอกสาร";
+  const roleNote = isApproval
+    ? "ตรวจว่าเป็นค่าใช้จ่ายที่บริษัทอนุญาตให้เบิกได้หรือไม่"
+    : "ตรวจหลักฐาน ใบเสร็จ ภาษี และความถูกต้องก่อนเข้าสู่ขั้นโอนเงิน";
+  const payerText = Array.isArray(summary.payerNames) && summary.payerNames.length
+    ? summary.payerNames.slice(0, 3).join(", ") + (summary.payerNames.length > 3 ? " …" : "")
+    : clean(summary.payerName || "", 100);
+
+  return {
+    type: "flex",
+    altText: `${kicker} · ${companyName || "บริษัท"}`,
+    contents: {
+      type: "bubble",
+      size: "mega",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        paddingAll: "20px",
+        contents: [
+          { type: "text", text: kicker, size: "xs", weight: "bold", color: isApproval ? "#C2410C" : "#2563EB" },
+          { type: "text", text: title, size: "xl", weight: "bold", color: "#111111", wrap: true },
+          ...(companyName ? [{ type: "text", text: `บริษัท · ${companyName}`, size: "sm", color: "#3A3A3C", wrap: true, margin: "xs" }] : []),
+          ...(groupName ? [{ type: "text", text: `LINE กลุ่ม · ${groupName}`, size: "xs", color: "#6E6E73", wrap: true }] : []),
+          {
+            type: "box",
+            layout: "vertical",
+            backgroundColor: "#F5F5F7",
+            cornerRadius: "14px",
+            paddingAll: "14px",
+            margin: "md",
+            spacing: "xs",
+            contents: [
+              ...(payerText ? [{ type: "text", text: `ผู้เบิก · ${payerText}`, size: "sm", color: "#3A3A3C", wrap: true }] : []),
+              { type: "text", text: `${Number(summary.itemCount || 0)} รายการ`, size: "sm", color: "#3A3A3C" },
+              { type: "text", text: `รวม ฿${money(summary.total)}`, size: "lg", weight: "bold", color: "#111111" },
+            ],
+          },
+          { type: "text", text: roleNote, size: "xs", color: "#6E6E73", wrap: true, margin: "sm" },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        paddingAll: "14px",
+        contents: [{
+          type: "button",
+          style: "primary",
+          color: "#111111",
+          height: "sm",
+          action: { type: "uri", label: actionLabel, uri: dashboardUrl },
+        }],
+      },
+      styles: { body: { backgroundColor: "#FFFFFF" }, footer: { backgroundColor: "#FFFFFF" } },
+    },
+  };
+}
+
 function personalDashboardUrl(env, tenant, accessToken) {
   const base = String(env.DASHBOARD_URL || "").replace(/\/$/, "");
   if (!base || !tenant || !accessToken) return "";
@@ -607,8 +683,9 @@ function lineFailureReason(result = {}) {
 }
 
 export async function notifyApproverAssignment(env, tenant, record) {
-  if (record?.role !== "approver" || !validUserId(record?.lineUserId) || !record?.token) {
-    return { ok: false, skipped: true, reason: "approver_line_not_linked" };
+  const role = String(record?.role || "");
+  if (!["approver", "accountant"].includes(role) || !validUserId(record?.lineUserId) || !record?.token) {
+    return { ok: false, skipped: true, reason: "workflow_line_not_linked" };
   }
 
   const url = personalDashboardUrl(env, tenant, record.token);
@@ -617,221 +694,202 @@ export async function notifyApproverAssignment(env, tenant, record) {
   const companyName = await resolvedCompanyName(env, tenant, record.companyName || record.businessName || "");
   await rememberCompanyOnAccess(env, tenant, record, companyName).catch(() => {});
   const groupName = clean(record.lineGroupName || record.workspaceName || "", 120);
-  const approverName = clean(record.name || record.lineDisplayName || "ผู้อนุมัติ", 80);
+  const personName = clean(record.name || record.lineDisplayName || (role === "approver" ? "ผู้อนุมัติ" : "ฝ่ายบัญชี"), 80);
   const fallbackTarget = clean(record.lineGroupTenant || "", 120);
+  const roleLabel = role === "approver" ? "ผู้อนุมัติค่าใช้จ่าย" : "บัญชี / ตรวจเอกสาร";
+  const roleAction = role === "approver" ? "อนุมัติหรือไม่อนุมัติค่าใช้จ่าย" : "ตรวจเอกสาร ตีกลับ และดำเนินการบัญชี";
 
-  // สำคัญ: userId ที่ดึงจากสมาชิกในกลุ่ม ไม่ได้แปลว่า OA ส่งข้อความส่วนตัวหาได้เสมอ
-  // GET /profile จะผ่านเมื่อผู้ใช้เป็นเพื่อน OA หรือเคยทัก OA แบบ 1:1 และไม่ได้บล็อก
   const profile = await directLineProfileCheck(env, record.lineUserId);
   if (!profile.ok) {
     let fallbackGroupSent = false;
     if (/^(C|R)/i.test(fallbackTarget)) {
       const fallbackText = [
-        `แจ้ง ${approverName}`,
-        `ระบบสร้างสิทธิ์ผู้อนุมัติของ ${companyName} แล้ว`,
+        `แจ้ง ${personName}`,
+        `ระบบสร้างสิทธิ์ ${roleLabel} ของ ${companyName} แล้ว`,
         "แต่ LINE ส่วนตัวยังไม่พร้อมรับข้อความจาก OA นี้",
-        "ให้ผู้อนุมัติเปิดแชทกับ LINE OA แล้วส่งคำว่า “เชื่อม” 1 ข้อความ จากนั้น Owner กด “ส่ง LINE ใหม่”",
+        "ให้เปิดแชทกับ LINE OA แล้วส่งคำว่า “เชื่อม” 1 ข้อความ จากนั้น Owner กด “ส่ง LINE ใหม่”",
       ].join("\n");
       fallbackGroupSent = (await pushLineDetailed(env, fallbackTarget, { type: "text", text: fallbackText })).ok;
     }
     return {
-      ok: false,
-      attempted: true,
-      accepted: false,
-      sent: false,
-      fallbackGroupSent,
-      lineUserId: record.lineUserId,
-      companyName,
-      lineGroupName: groupName,
-      reason: profile.reason || "line_profile_unreachable",
-      httpStatus: profile.status || 0,
-      lineError: profile.data?.message || profile.text || "",
-      lineRequestId: profile.requestId || "",
+      ok: false, attempted: true, accepted: false, sent: false, fallbackGroupSent,
+      lineUserId: record.lineUserId, companyName, lineGroupName: groupName,
+      reason: profile.reason || "line_profile_unreachable", httpStatus: profile.status || 0,
+      lineError: profile.data?.message || profile.text || "", lineRequestId: profile.requestId || "",
       profileReachable: false,
     };
   }
 
   const message = {
     type: "flex",
-    altText: `สิทธิ์ผู้อนุมัติ · ${companyName}${groupName ? ` · ${groupName}` : ""}`,
+    altText: `สิทธิ์ ${roleLabel} · ${companyName}${groupName ? ` · ${groupName}` : ""}`,
     contents: {
-      type: "bubble",
-      size: "mega",
+      type: "bubble", size: "mega",
       body: {
-        type: "box",
-        layout: "vertical",
-        paddingAll: "20px",
-        spacing: "sm",
+        type: "box", layout: "vertical", paddingAll: "20px", spacing: "sm",
         contents: [
           { type: "text", text: "สิทธิ์ใหม่", size: "xs", weight: "bold", color: "#147A36" },
-          { type: "text", text: "คุณได้รับสิทธิ์ผู้อนุมัติแล้ว", size: "xl", weight: "bold", color: "#111111", wrap: true },
-          { type: "text", text: approverName, size: "sm", color: "#6E6E73", wrap: true },
+          { type: "text", text: `คุณได้รับสิทธิ์ ${roleLabel} แล้ว`, size: "xl", weight: "bold", color: "#111111", wrap: true },
+          { type: "text", text: personName, size: "sm", color: "#6E6E73", wrap: true },
           {
-            type: "box",
-            layout: "vertical",
-            backgroundColor: "#F5F5F7",
-            cornerRadius: "14px",
-            paddingAll: "14px",
-            margin: "md",
-            spacing: "xs",
+            type: "box", layout: "vertical", backgroundColor: "#F5F5F7", cornerRadius: "14px", paddingAll: "14px", margin: "md", spacing: "xs",
             contents: [
-              { type: "text", text: "บริษัทที่คุณมีสิทธิ์อนุมัติ", size: "xs", color: "#86868B", wrap: true },
+              { type: "text", text: "บริษัทที่คุณได้รับสิทธิ์", size: "xs", color: "#86868B", wrap: true },
               { type: "text", text: companyName, size: "md", weight: "bold", color: "#111111", wrap: true },
               ...(groupName ? [{ type: "text", text: `LINE กลุ่ม · ${groupName}`, size: "sm", color: "#3A3A3C", wrap: true, margin: "sm" }] : []),
-              { type: "text", text: "สิทธิ์ · ผู้อนุมัติ", size: "sm", color: "#3A3A3C", wrap: true },
+              { type: "text", text: `สิทธิ์ · ${roleLabel}`, size: "sm", color: "#3A3A3C", wrap: true },
             ],
           },
-          {
-            type: "text",
-            text: "เมื่อมีใบเบิกรอตรวจ ระบบจะส่งแจ้งเตือนมาที่ LINE ส่วนตัวนี้ พร้อมปุ่มเปิดหน้าอนุมัติ",
-            size: "sm",
-            color: "#6E6E73",
-            wrap: true,
-            margin: "md",
-          },
-          {
-            type: "text",
-            text: "สิทธิ์นี้อนุมัติหรือตีกลับเอกสารได้ แต่ไม่สามารถตั้งโอนหรือจัดการสิทธิ์ทีม",
-            size: "xs",
-            color: "#86868B",
-            wrap: true,
-          },
+          { type: "text", text: `เมื่อมีงานถึงขั้นของคุณ ระบบจะส่ง LINE ส่วนตัวพร้อมปุ่มเปิด Dashboard`, size: "sm", color: "#6E6E73", wrap: true, margin: "md" },
+          { type: "text", text: `สิทธิ์นี้ใช้สำหรับ ${roleAction}`, size: "xs", color: "#86868B", wrap: true },
         ],
       },
       footer: {
-        type: "box",
-        layout: "vertical",
-        paddingAll: "14px",
-        contents: [{
-          type: "button",
-          style: "primary",
-          color: "#111111",
-          height: "sm",
-          action: { type: "uri", label: "เปิดหน้าอนุมัติ", uri: url },
-        }],
+        type: "box", layout: "vertical", paddingAll: "14px",
+        contents: [{ type: "button", style: "primary", color: "#111111", height: "sm", action: { type: "uri", label: role === "approver" ? "เปิดหน้าอนุมัติ" : "เปิด Dashboard บัญชี", uri: url } }],
       },
-      styles: {
-        body: { backgroundColor: "#FFFFFF" },
-        footer: { backgroundColor: "#FFFFFF" },
-      },
+      styles: { body: { backgroundColor: "#FFFFFF" }, footer: { backgroundColor: "#FFFFFF" } },
     },
   };
 
   let delivery = await pushLineDetailed(env, record.lineUserId, message);
   let usedTextFallback = false;
   let validation = null;
-
-  // ถ้า Flex ถูก LINE ปฏิเสธ ให้ตรวจ payload และลองข้อความธรรมดาแทนทันที
-  // อย่างน้อยผู้อนุมัติจะยังได้รับลิงก์ ไม่ต้องรอแก้หน้าการ์ดก่อน
   if (!delivery.ok && delivery.status === 400) {
     validation = await validatePushMessages(env, message);
     const plainText = [
-      `คุณได้รับสิทธิ์ผู้อนุมัติ · ${companyName}`,
+      `คุณได้รับสิทธิ์ ${roleLabel} · ${companyName}`,
       groupName ? `กลุ่ม LINE: ${groupName}` : "",
-      `ผู้อนุมัติ: ${approverName}`,
-      "เปิดหน้าอนุมัติ:",
-      url,
+      `ชื่อ: ${personName}`,
+      "เปิด Dashboard:", url,
     ].filter(Boolean).join("\n");
     const textDelivery = await pushLineDetailed(env, record.lineUserId, { type: "text", text: plainText });
-    if (textDelivery.ok) {
-      delivery = textDelivery;
-      usedTextFallback = true;
-    }
+    if (textDelivery.ok) { delivery = textDelivery; usedTextFallback = true; }
   }
 
   const accepted = delivery.ok;
   let fallbackGroupSent = false;
   if (!accepted && /^(C|R)/i.test(fallbackTarget)) {
     const fallbackText = [
-      `แจ้ง ${approverName}`,
-      `ระบบสร้างสิทธิ์ผู้อนุมัติของ ${companyName} แล้ว`,
+      `แจ้ง ${personName}`,
+      `ระบบสร้างสิทธิ์ ${roleLabel} ของ ${companyName} แล้ว`,
       "แต่ส่งข้อความเข้า LINE ส่วนตัวไม่สำเร็จ",
-      "ให้ผู้อนุมัติเปิดแชทกับ LINE OA แล้วส่งคำว่า “เชื่อม” 1 ข้อความ จากนั้น Owner กด “ส่ง LINE ใหม่”",
+      "ให้เปิดแชทกับ LINE OA แล้วส่งคำว่า “เชื่อม” 1 ข้อความ จากนั้น Owner กด “ส่ง LINE ใหม่”",
     ].join("\n");
     fallbackGroupSent = (await pushLineDetailed(env, fallbackTarget, { type: "text", text: fallbackText })).ok;
   }
 
   return {
-    ok: accepted,
-    attempted: true,
-    accepted,
-    sent: accepted,
-    fallbackGroupSent,
-    lineUserId: record.lineUserId,
-    companyName,
-    lineGroupName: groupName,
-    reason: accepted ? "" : lineFailureReason(delivery),
-    httpStatus: delivery.status || 0,
-    lineError: delivery.data?.message || delivery.text || "",
-    lineRequestId: delivery.requestId || "",
-    profileReachable: true,
-    usedTextFallback,
+    ok: accepted, attempted: true, accepted, sent: accepted, fallbackGroupSent,
+    lineUserId: record.lineUserId, companyName, lineGroupName: groupName,
+    role, reason: accepted ? "" : lineFailureReason(delivery), httpStatus: delivery.status || 0,
+    lineError: delivery.data?.message || delivery.text || "", lineRequestId: delivery.requestId || "",
+    profileReachable: true, usedTextFallback,
     messageValidationOk: validation ? validation.ok : true,
     messageValidationError: validation && !validation.ok ? (validation.data?.message || validation.text || "") : "",
   };
 }
 
-export async function notifyApproversForBatchOutput(env, tenant, output, { kind = "batch" } = {}) {
-  if (!output?.ok) return { ok: true, skipped: true, reason: "batch_not_ok" };
+function workflowSummaryEventKey(summary = {}) {
+  if (summary.eventKey) return clean(summary.eventKey, 180);
+  const ids = Array.isArray(summary.itemIds) ? summary.itemIds.map(String).filter(Boolean).sort() : [];
+  if (ids.length) return clean(`items:${ids.join("_")}`, 180);
+  return clean(summary.docId || summary.runNo || `${Date.now()}`, 180);
+}
 
-  const summary = batchSummary(output, kind);
-  if (!summary.itemCount && !summary.batchCount) {
-    return { ok: true, skipped: true, reason: "no_new_batch" };
-  }
+export async function notifyWorkflowStage(env, tenant, {
+  role = "approver",
+  stage = "",
+  eventKey = "",
+  itemIds = [],
+  itemCount = 0,
+  total = 0,
+  payerName = "",
+  payerNames = [],
+  docId = "",
+  runNo = "",
+} = {}) {
+  try {
+    const sheetId = (await env.KV.get(`tenant:${tenant}`)) || env.DEFAULT_SHEET_ID || "";
+    if (sheetId) {
+      const token = await getUserToken(env, tenant).catch(() => null);
+      const settings = await readSettings(env, sheetId, token).catch(() => ({}));
+      if (!reimbursementWorkflowConfig(settings).lineNotifyEnabled) {
+        return { ok:true, skipped:true, reason:"line_workflow_notify_disabled", count:0 };
+      }
+    }
+  } catch {}
+  const wantedRole = role === "accountant" ? "accountant" : "approver";
+  const recipients = await workflowAccessRows(env, tenant, wantedRole);
+  if (!recipients.length) return { ok: true, skipped: true, reason: `no_linked_${wantedRole}`, count: 0 };
 
-  const approvers = await approverAccessRows(env, tenant);
-  if (!approvers.length) {
-    return { ok: true, skipped: true, reason: "no_linked_approver", count: 0 };
-  }
-
+  const summary = {
+    eventKey: eventKey || workflowSummaryEventKey({ itemIds, docId, runNo }),
+    itemIds,
+    itemCount: Number(itemCount || itemIds.length || 0),
+    total: Number(total || 0),
+    payerName: clean(payerName, 120),
+    payerNames: (Array.isArray(payerNames) ? payerNames : []).map((x) => clean(x, 120)).filter(Boolean),
+    docId: clean(docId, 100),
+    runNo: clean(runNo, 100),
+  };
+  const stageKey = clean(stage || (wantedRole === "approver" ? "approval" : "review"), 40);
   const results = [];
-  for (const approver of approvers) {
-    const dedupeKey = `${NOTIFY_PREFIX}${tenant}:${summary.eventKey}:${approver.lineUserId}`;
+
+  for (const recipient of recipients) {
+    const dedupeKey = `${WORKFLOW_NOTIFY_PREFIX}${tenant}:${stageKey}:${summary.eventKey}:${recipient.lineUserId}`;
     if (await env.KV.get(dedupeKey)) {
-      results.push({ userId: approver.lineUserId, skipped: true, reason: "duplicate_notification" });
+      results.push({ userId: recipient.lineUserId, skipped: true, reason: "duplicate_notification" });
       continue;
     }
-
-    const url = personalDashboardUrl(env, tenant, approver.token);
-    if (!url) {
-      results.push({ userId: approver.lineUserId, ok: false, reason: "dashboard_url_missing" });
-      continue;
-    }
-
-    const companyName = await resolvedCompanyName(env, tenant, approver.companyName || approver.businessName || "");
-    await rememberCompanyOnAccess(env, tenant, approver, companyName).catch(() => {});
-    const notificationContext = { ...approver, companyName };
-
-    const accepted = await push(
-      env,
-      approver.lineUserId,
-      approverCard(
-        approver.name || approver.lineDisplayName || "ผู้อนุมัติ",
-        summary,
-        url,
-        notificationContext
-      )
-    ).catch(() => false);
-
-    if (accepted) {
-      await env.KV.put(dedupeKey, "1", { expirationTtl: 86400 * 7 });
-    }
-
-    results.push({
-      userId: approver.lineUserId,
-      name: approver.name || "",
-      accepted,
-      ok: accepted,
-    });
+    const url = personalDashboardUrl(env, tenant, recipient.token);
+    if (!url) { results.push({ userId: recipient.lineUserId, ok: false, reason: "dashboard_url_missing" }); continue; }
+    const companyName = await resolvedCompanyName(env, tenant, recipient.companyName || recipient.businessName || "");
+    await rememberCompanyOnAccess(env, tenant, recipient, companyName).catch(() => {});
+    const accepted = await push(env, recipient.lineUserId, workflowTaskCard(
+      recipient.name || recipient.lineDisplayName || (wantedRole === "approver" ? "ผู้อนุมัติ" : "ฝ่ายบัญชี"),
+      wantedRole,
+      summary,
+      url,
+      { ...recipient, companyName }
+    )).catch(() => false);
+    if (accepted) await env.KV.put(dedupeKey, "1", { expirationTtl: 86400 * 14 });
+    results.push({ userId: recipient.lineUserId, name: recipient.name || "", accepted, ok: accepted });
   }
 
   return {
     ok: true,
-    approvers: approvers.length,
+    role: wantedRole,
+    stage: stageKey,
+    recipients: recipients.length,
     accepted: results.filter((r) => r.accepted).length,
     results,
-    note: "LINE API accepted does not guarantee delivery if the user has not added the OA as a friend or has blocked it.",
   };
+}
+
+export async function notifyApproversForBatchOutput(env, tenant, output, { kind = "batch" } = {}) {
+  if (!output?.ok) return { ok: true, skipped: true, reason: "batch_not_ok" };
+  const summary = batchSummary(output, kind);
+  if (!summary.itemCount && !summary.batchCount) return { ok: true, skipped: true, reason: "no_new_batch" };
+  const batches = Array.isArray(output.batches) ? output.batches : [];
+  const statuses = batches.map((b) => String(b.status || "")).filter(Boolean);
+  const itemIds = [...new Set(batches.flatMap((b) => Array.isArray(b.itemIds) ? b.itemIds.map(String) : []))];
+  const hasApproval = statuses.some((s) => s === "รออนุมัติค่าใช้จ่าย");
+  const hasReview = statuses.some((s) => ["รอตรวจเอกสาร", "รออนุมัติ", "รวมรอบแล้ว"].includes(s));
+  if (!hasApproval && !hasReview) return { ok:true, skipped:true, reason:"no_human_workflow_stage", count:0 };
+  const role = hasApproval ? "approver" : "accountant";
+  const stage = hasApproval ? "approval" : "review";
+  return notifyWorkflowStage(env, tenant, {
+    role,
+    stage,
+    eventKey: itemIds.length ? `items:${itemIds.sort().join("_")}` : summary.eventKey,
+    itemIds,
+    itemCount: summary.itemCount,
+    total: summary.total,
+    docId: summary.docId,
+    runNo: summary.runNo,
+    payerNames: [...new Set(batches.map((b) => b.payerName).filter(Boolean))],
+  });
 }
 
 export { VERSION as LINE_APPROVER_NOTIFY_VERSION };
