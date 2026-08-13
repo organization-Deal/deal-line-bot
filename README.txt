@@ -1,26 +1,34 @@
-LINE Card + Document Review Fix v7.6
+V7.34 — LINE WORKSPACE REGISTRY
+แก้ปัญหา Dashboard เห็นแค่กลุ่ม LINE เก่า ทั้งที่ Bot อยู่/เชื่อมกลุ่มใหม่แล้ว
 
-แก้ 2 ปัญหา:
-1) การ์ด LINE เชื่อม Google/เชื่อมธุรกิจยังใช้สีเขียวเป็น brand color
-   -> เปลี่ยน primary action + heading เป็นดำ/ขาว/เทา
-   -> สีเขียวยังเก็บไว้เฉพาะ semantic status เช่น รายรับ/พร้อม เท่านั้น
+สาเหตุ:
+/api/line-groups เดิมอ่านจาก businessaccount.businesses ทำให้ "ธุรกิจ" กับ "กลุ่ม LINE" ถูกใช้เป็นสารบัญเดียวกัน
+กลุ่มใหม่บางกรณีมี tenant/Sheet/Google ครบ แต่ไม่โผล่ในตัวเลือกกลุ่ม LINE
 
-2) หน้า “ตรวจและยืนยัน” เปิดแล้วค้าง กำลังโหลด / 0 เอกสาร
-   ROOT CAUSE: JavaScript ที่ reviewPage() generate มี quote escaping ผิดใน renderGroups()
-   ทำให้ browser parse <script> ไม่ผ่านทั้งก้อน และ reload() ไม่ถูกเรียกเลย
-   -> แก้ quote escaping
-   -> เพิ่ม retry + persistent load status ถ้า API ล้มจริง
-   -> เปลี่ยนปุ่ม LINE เป็น “ยืนยันและบันทึก” / “ตรวจ / แก้ไขก่อน” ให้ flow ชัดขึ้น
+วิธีลง:
+1) อัปไฟล์ apply-v734-line-workspace-registry.mjs ไปที่ ROOT ของ repo deal-line-bot
+   อยู่ระดับเดียวกับ package.json / wrangler.toml / apply-line-card-review-fix.mjs
 
-ไฟล์ที่แก้เท่านั้น:
-- src/index.js
-- src/oauth.js
-- src/multi-expense.js
+2) Cloudflare > Build settings > Deploy command เปลี่ยนเป็น:
+node apply-line-card-review-fix.mjs && node apply-v734-line-workspace-registry.mjs && npx wrangler deploy
 
-วิธีใช้กับ repo ล่าสุด (ปลอดภัยกว่าเอาไฟล์เก่าทับ):
-1. วาง apply-line-card-review-fix.mjs ที่ root ของ deal-line-bot
-2. รัน: node apply-line-card-review-fix.mjs
-3. ถ้าขึ้น ✅ แปลว่า syntax + generated review script ผ่าน
-4. commit/push แล้ว deploy Worker
+3) Commit แล้วรอ Build เขียว
+Log ต้องเห็น:
+✅ LINE_WORKSPACE_REGISTRY_V7_34_20260813 ready
 
-สคริปต์มี anchor guards: ถ้า source ไม่ตรงเวอร์ชันที่ตรวจ จะหยุดทันที ไม่แก้มั่ว
+4) กลับ Dashboard หน้าเบิกจ่าย กด "อัปเดตกลุ่ม"
+   ระบบ refresh=1 จะ recovery กลุ่มเดิมที่ accountroot ชี้เข้าบัญชีนี้
+
+5) ต่อไปทุกกลุ่มใหม่: แค่ Bot ได้ webhook จากกลุ่ม (join/message/memberJoined) ระบบจะจำ groupId/groupName อัตโนมัติ
+
+สิ่งที่แก้:
+- สร้าง LINE Workspace Registry ใน KV แยกจาก Business Account
+- /api/line-groups อ่าน Registry แทน business list
+- เก็บ groupId / groupName / rootTenant / sheetId / businessName / lastSeenAt
+- ทุก webhook ของกลุ่มจะ register อัตโนมัติ
+- refresh=1 scan tenant mappings เพื่อกู้กลุ่มเก่าที่เชื่อมก่อนมี Registry
+- ไม่เอากลุ่ม LINE ใหม่ไปเพิ่ม business count มั่ว ๆ
+- /api/line-members ยังตรวจว่ากลุ่มอยู่ใน account นี้ก่อนดึงสมาชิก
+
+หมายเหตุ:
+สคริปต์ idempotent รันซ้ำได้ทุก Build โดยไม่แทรก function ซ้ำ
