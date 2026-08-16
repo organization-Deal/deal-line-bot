@@ -4,7 +4,7 @@ compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
 [build]
-command = "node apply-v740-team-auto-onboarding.mjs && node apply-v751-production-google-auth.mjs && node apply-v7511-google-status-route-fix.mjs && node apply-v756-admin-ops-route.mjs && node apply-v757-admin-pin-session.mjs && node apply-v761-readonly-connection-status.mjs && node apply-v768-workflow-line-notify-role-fix.mjs && node apply-v769-auto-cash-position.mjs && node apply-v7692-cash-balance-stability.mjs && node apply-v770-multi-image-no-silent-loss.mjs && node apply-v77011-review-build-node24-fix.mjs && node apply-v7701-review-state-rescue.mjs"
+command = "node apply-v740-team-auto-onboarding.mjs && node apply-v751-production-google-auth.mjs && node apply-v7511-google-status-route-fix.mjs && node apply-v756-admin-ops-route.mjs && node apply-v757-admin-pin-session.mjs && node apply-v761-readonly-connection-status.mjs && node apply-v768-workflow-line-notify-role-fix.mjs && node apply-v769-auto-cash-position.mjs && node apply-v7692-cash-balance-stability.mjs && node apply-v770-multi-image-no-silent-loss.mjs && node apply-v77011-review-build-node24-fix.mjs && node apply-v77012-review-inline-handler-escape-fix.mjs && node apply-v7701-review-state-rescue.mjs"
 
 [vars]
 DEFAULT_SHEET_ID = ""
