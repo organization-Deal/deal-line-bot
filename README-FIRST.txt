@@ -1,30 +1,17 @@
-V7.70.1 — REVIEW STATE RESCUE
+V7.70.1.1 — Review Build Node 24 Fix
 
-Upload to organization-Deal/deal-line-bot ROOT:
-1. apply-v7701-review-state-rescue.mjs
-2. wrangler.toml (replace)
+UPLOAD ไปที่ root ของ organization-Deal/deal-line-bot
+1) apply-v77011-review-build-node24-fix.mjs
+2) wrangler.toml (Replace ของเดิม)
 
-Keep apply-v770-multi-image-no-silent-loss.mjs in the repo.
-Dashboard does not need a deploy.
+จากนั้น New deployment อีกครั้ง
 
-This fixes the Review page that opens but stays at:
-฿—
-กำลังโหลด
-พร้อม 0
-0 เอกสาร
-
-After this:
-- Successful state load shows the real amount/items.
-- Failed state load shows a persistent error instead of silently staying blank.
-- Old and v7.70 session shapes both work.
-- Save is blocked while images are still processing or failed.
-- Cloudflare build now generates the REAL Review HTML, extracts its browser JS, and runs node --check on it.
-
-Build log must contain:
+Log ที่ต้องเห็น:
+✅ CASH_POSITION_STABILITY_V7_69_2_20260817 ready
+✅ MULTI_IMAGE_NO_SILENT_LOSS_V7_70_20260816 ready
+✅ REVIEW_BROWSER_TEST_NODE24_COMPAT_V7_70_1_1_20260817 ready
+✅ generated Review HTML browser script extracted
 ✅ REVIEW_STATE_RESCUE_V7_70_1_20260816 ready
-✅ Review page no longer stays silently at ฿— / กำลังโหลด
-✅ old and v7.70 Durable Object state shapes are supported
-✅ received / processed / failed / inflight counts render safely
-✅ Save is blocked while images are incomplete
-✅ state API errors remain visible on screen
 ✅ generated Review HTML browser JavaScript passed node --check
+
+แล้วต้องไปต่อถึง Wrangler upload/deploy Success
