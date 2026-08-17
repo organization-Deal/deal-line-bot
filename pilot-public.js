@@ -1,5 +1,5 @@
 // Public Pilot request flow — isolated from LINE webhook signature validation.
-const PILOT_VERSION = "PUBLIC_PILOT_ROUTE_V7_71_20260817";
+const PILOT_VERSION = "PUBLIC_PILOT_ROUTE_V7_72_TRIAL_30D_1000_20260817";
 
 function esc(v) {
   return String(v ?? "")
@@ -56,7 +56,7 @@ button{width:100%;border:0;border-radius:15px;background:#1d1d1f;color:#fff;font
 <div class="eyebrow">PILOT PROGRAM</div>
 <h1>ขอทดลองใช้ระบบ</h1>
 <p>กรอกข้อมูลสั้น ๆ เพื่อให้ทีมงานเตรียมบัญชีทดลองและตั้งค่าระบบให้เหมาะกับธุรกิจของคุณ</p>
-<div class="trial"><b>ทดลองใช้แพ็กเกจ Business ฟรี 60 วัน</b><br>เริ่มนับเมื่อเริ่มใช้งานจริง · สูงสุด 1,500 รายการ/เดือน · สูงสุด 10 ธุรกิจ</div>
+<div class="trial"><b>ทดลองใช้แพ็กเกจ Business ฟรี 30 วัน</b><br>เริ่มนับเมื่อเริ่มใช้งานจริง · สูงสุด 1,000 รายการ/เดือน · AI อ่านเอกสารอัตโนมัติ 100 ใบ · ใช้ได้สูงสุด 2 บริษัท</div>
 ${message ? `<div class="msg">${esc(message)}</div>` : ""}
 <form method="post" action="${esc(worker)}/pilot/request">
 <div class="grid">
@@ -75,7 +75,7 @@ ${message ? `<div class="msg">${esc(message)}</div>` : ""}
 <label style="position:absolute;left:-9999px">Website<input name="website" tabindex="-1" autocomplete="off"></label>
 </div>
 <button type="submit">ส่งคำขอทดลองใช้</button>
-<div class="note">การส่งฟอร์มยังไม่เริ่มนับ 60 วัน ทีมงานจะเริ่ม Trial เมื่อเริ่มใช้งานระบบจริง</div>
+<div class="note">การส่งฟอร์มยังไม่เริ่มนับ 30 วัน ทีมงานจะเริ่ม Trial เมื่อเริ่มใช้งานระบบจริง</div>
 </form>
 </section></main>
 </body></html>`);
@@ -161,7 +161,7 @@ p{color:#6e6e73;line-height:1.65}
 <h1>รับคำขอแล้ว</h1>
 <p>ทีมงานได้รับคำขอของ <b>${esc(businessName)}</b> แล้ว และจะใช้บัญชี <b>${esc(email)}</b> สำหรับเตรียมระบบทดลอง</p>
 <div class="id">${esc(id)}</div>
-<p>60 วันจะเริ่มนับเมื่อเริ่มใช้งานระบบจริง ไม่ได้นับจากเวลาที่ส่งฟอร์ม</p>
+<p>30 วันจะเริ่มนับเมื่อเริ่มใช้งานระบบจริง ไม่ได้นับจากเวลาที่ส่งฟอร์ม</p>
 </section></body></html>`);
 }
 
