@@ -1,57 +1,53 @@
-V7.70.1.2 — REVIEW INLINE HANDLER ESCAPE FIX
+V7.71 — PUBLIC PILOT ROUTE FIX
 
-Build ล่าสุดยืนยันว่า:
-- V7.69.2 ผ่าน
-- V7.70 ผ่าน
-- V7.70.1.1 ผ่าน
-- Review HTML ถูก generate จริงแล้ว
+อาการ:
+กรอก Pilot form แล้วกด “ส่งคำขอ”
+Browser ไปที่:
+https://accoutingsuppor02.organization-23c.workers.dev/pilot/request
 
-จากนั้น browser-runtime test จับบั๊กจริงในหน้า Review:
-SyntaxError: missing ) after argument list
+แล้วเห็น:
+bad signature
 
-generated JavaScript ผิดเป็น:
-patchGroup(''+g.id+'',{...})
-changeRole(''+im.id+'',...)
-assign(''+im.id+'',...)
-deleteGroup(''+g.id+'')
+สาเหตุ:
+src/index.js ปัจจุบันไม่มี /pilot/request route
+POST จึงตกลงไปเข้า generic LINE webhook handler
+ซึ่งตรวจ x-line-signature และตอบ 401 bad signature
 
-ต้นเหตุ:
-reviewPage() เป็น server-side template literal
-renderGroups() มี backslash ก่อน single quote แค่ชั้นเดียว
-ตอน server generate HTML backslash ถูกกินไป
-ทำให้ browser ได้ JavaScript ผิด syntax
+migration เก่า apply-line-card-review-fix.mjs เคยมี Pilot route
+แต่ build ปัจจุบันขึ้น:
+v7.15 migration already present; skipping re-apply
+ทำให้ Pilot route ไม่ถูกใส่กลับมา
 
-V7.70.1.2:
-- เพิ่ม escape อีก 1 ชั้นเฉพาะ renderGroups()
-- ไม่แตะข้อมูลบัญชี
-- ไม่แตะ OCR
-- ไม่แตะ Cash Position
-- ไม่แตะ Durable Object
+V7.71 แยก Pilot ออกจาก migration เก่าเด็ดขาด
 
-UPLOAD ที่ ROOT:
+UPLOAD ไปที่ root ของ:
 organization-Deal/deal-line-bot
 
-1. apply-v77012-review-inline-handler-escape-fix.mjs
-2. wrangler.toml  (Replace)
+ไฟล์:
+1. pilot-public.js
+2. apply-v771-public-pilot-route.mjs
+3. wrangler.toml (Replace)
 
-เก็บไฟล์เดิมทั้งหมดไว้ โดยเฉพาะ:
-- apply-v77011-review-build-node24-fix.mjs
-- apply-v7701-review-state-rescue.mjs
-- apply-v770-multi-image-no-silent-loss.mjs
-- apply-v7692-cash-balance-stability.mjs
+ไม่ต้องแก้ deal-dashboard
 
-Build ใหม่ต้องเห็น:
-✅ CASH_POSITION_STABILITY_V7_69_2_20260817 ready
-✅ MULTI_IMAGE_NO_SILENT_LOSS_V7_70_20260816 ready
-✅ REVIEW_BROWSER_TEST_NODE24_COMPAT_V7_70_1_1_20260817 ready
-✅ REVIEW_INLINE_HANDLER_ESCAPE_V7_70_1_2_20260817 ready
-✅ renderGroups inline onclick/onchange quotes now survive server-side template rendering
-✅ generated Review HTML browser script extracted
-✅ REVIEW_STATE_RESCUE_V7_70_1_20260816 ready
-✅ generated Review HTML browser JavaScript passed node --check
+Build ต้องเห็น:
+✅ PUBLIC_PILOT_ROUTE_V7_71_20260817 ready
+✅ POST /pilot/request is handled before LINE webhook signature validation
+✅ pilot submissions are stored in KV pilotreq:v1:*
+✅ current Dashboard pilot form fields are accepted
+✅ GET /pilot/health added for production verification
 
-จากนั้นต้องไปต่อจน:
+และต้อง Deploy สำเร็จถึง:
 Uploaded accoutingsuppor02
 Deployed accoutingsuppor02 triggers
 Success: Deploy command completed
 Success! Build completed
+
+หลัง Deploy:
+1. เปิด /pilot/health
+   ต้องได้ JSON ok:true
+2. เปิด Dashboard /pilot.html
+3. กรอก TEST PILOT 771
+4. กดส่ง
+5. ต้องเห็นหน้า “รับคำขอแล้ว” + PILOT-...
+6. Internal Ops > Pilot Requests ต้องเห็นรายการใหม่
