@@ -189,7 +189,14 @@ fs.writeFileSync(gmailFile,gmail);
 syntax(gmailFile);
 
 let index=fs.readFileSync(indexFile,"utf8");
-if(!index.includes(MARK)){
+// V7.73.1: source files may already contain the later v7.51.1/v7.61 routing
+// when a changed-only package was uploaded. In that case v7.51 must not try
+// to replace the old import anchor again.
+const indexAlreadyMigrated =
+  index.includes("getGoogleConnectionStatus") &&
+  (index.includes("GOOGLE_STATUS_ROUTE_FIX_V7_51_1_20260815") ||
+   index.includes("CONNECTION_STATUS_READONLY_V7_61_20260816"));
+if(!index.includes(MARK) && !indexAlreadyMigrated){
   index=mustReplace(
     index,
     'import { buildConnectUrl, handleCallback, getUserToken, createUserSheet } from "./oauth.js";',
@@ -248,6 +255,9 @@ if(!index.includes(MARK)){
             }`,
     "settings name persistence"
   );
+}
+if(indexAlreadyMigrated){
+  console.log("ℹ️ v7.51 index routing already migrated; keeping current production routing");
 }
 fs.writeFileSync(indexFile,index);
 syntax(indexFile);
