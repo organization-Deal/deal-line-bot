@@ -2,6 +2,7 @@
 
 import { parseEmail, bytesToBase64 } from "./email-mime.js";
 import { analyzeEmailDocument } from "./email-ocr.js";
+import { getAiQuotaState, consumeAiDocument, readAiDocumentCache, writeAiDocumentCache, unwrapAiDocumentCache } from "./ai-quota.js";
 import {
   ensureEmailInboxTab, appendEmailInbox, readEmailInbox, getEmailInboxById,
   updateEmailInbox, findEmailDuplicate, buildSubscriptions,
@@ -87,6 +88,14 @@ function looksAccounting(subject = "", text = "") {
   return /(invoice|receipt|tax invoice|billing|payment|ใบเสร็จ|ใบกำกับ|ใบแจ้งหนี้|ชำระเงิน|subscription|renewal)/i.test(`${subject}\n${text}`);
 }
 
+function manualEmailAnalysis(message = "โควตาอ่านเอกสารอัตโนมัติครบแล้ว กรุณากรอกข้อมูลเอง") {
+  return {
+    isAccountingDocument: true, docType: "ใบแจ้งหนี้", vendor: "", taxId: "", invoiceNo: "", date: "", dueDate: "", servicePeriod: "",
+    subtotal: 0, vatAmount: 0, vatRate: 0, amount: 0, currency: "THB", category: "อื่น ๆ", note: "",
+    isSubscription: false, subscriptionName: "", flag: message, confidence: 0,
+  };
+}
+
 async function dashboardUrl(env, tenant, page = "email") {
   const base = String(env.DASHBOARD_URL || "").replace(/\/$/, "");
   const k = await env.KV.get(`dtoken:${tenant}`);
@@ -127,14 +136,24 @@ async function processOne(env, tenant, sheetId, token, base, item) {
     { category: "email", publicRead: false, transactionDate: base.receivedAt || new Date().toISOString() }
   );
 
-  const analysis = await analyzeEmailDocument(env, {
-    base64: bytesToBase64(item.content),
-    mediaType,
-    filename: item.filename,
-    subject: base.subject,
-    bodyText: bodyPreview,
-    sender: base.from,
-  });
+  let analysis = unwrapAiDocumentCache(await readAiDocumentCache(env, tenant, "email-document", fileHash));
+  if (!analysis) {
+    const aiQuota = await getAiQuotaState(env, tenant);
+    if (aiQuota.blocked) {
+      analysis = manualEmailAnalysis(`ใช้จำนวนอ่านเอกสารอัตโนมัติครบ ${aiQuota.limit} ใบแล้ว · ไฟล์ถูกเก็บไว้ กรุณากรอกข้อมูลเองหรือเพิ่มจำนวนอ่านเอกสาร`);
+    } else {
+      analysis = await analyzeEmailDocument(env, {
+        base64: bytesToBase64(item.content),
+        mediaType,
+        filename: item.filename,
+        subject: base.subject,
+        bodyText: bodyPreview,
+        sender: base.from,
+      });
+      await consumeAiDocument(env, tenant, 1);
+      await writeAiDocumentCache(env, tenant, "email-document", fileHash, analysis).catch(() => {});
+    }
+  }
 
   const candidate = {
     receivedAt: base.receivedAt || new Date().toISOString(),
@@ -175,17 +194,28 @@ async function processOne(env, tenant, sheetId, token, base, item) {
 
 async function processTextOnly(env, tenant, sheetId, token, base) {
   const text = String(base.text || "").trim();
-  const analysis = await analyzeEmailDocument(env, {
-    subject: base.subject,
-    bodyText: text.slice(0, 12000),
-    sender: base.from,
-    filename: "เนื้อหาอีเมล",
-  });
   const bytes = new TextEncoder().encode(`${base.subject}\n\n${text}`);
+  const textHash = await sha256(bytes);
+  let analysis = unwrapAiDocumentCache(await readAiDocumentCache(env, tenant, "email-text", textHash));
+  if (!analysis) {
+    const aiQuota = await getAiQuotaState(env, tenant);
+    if (aiQuota.blocked) {
+      analysis = manualEmailAnalysis(`ใช้จำนวนอ่านเอกสารอัตโนมัติครบ ${aiQuota.limit} ใบแล้ว · อีเมลถูกเก็บไว้ กรุณากรอกข้อมูลเองหรือเพิ่มจำนวนอ่านเอกสาร`);
+    } else {
+      analysis = await analyzeEmailDocument(env, {
+        subject: base.subject,
+        bodyText: text.slice(0, 12000),
+        sender: base.from,
+        filename: "เนื้อหาอีเมล",
+      });
+      await consumeAiDocument(env, tenant, 1);
+      await writeAiDocumentCache(env, tenant, "email-text", textHash, analysis).catch(() => {});
+    }
+  }
   const candidate = {
     receivedAt: base.receivedAt || new Date().toISOString(), messageId: base.messageId, from: base.from,
     subject: base.subject, filename: "เนื้อหาอีเมล", mimeType: "text/plain",
-    fileHash: await sha256(bytes), docType: analysis.docType, vendor: analysis.vendor,
+    fileHash: textHash, docType: analysis.docType, vendor: analysis.vendor,
     taxId: analysis.taxId, invoiceNo: analysis.invoiceNo, documentDate: analysis.date,
     dueDate: analysis.dueDate, servicePeriod: analysis.servicePeriod, subtotal: analysis.subtotal,
     vatAmount: analysis.vatAmount, amount: analysis.amount, currency: analysis.currency,

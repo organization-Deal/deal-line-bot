@@ -2,15 +2,18 @@ import { readSettings, readExpenses } from "./sheets.js";
 import { getUserToken } from "./oauth.js";
 import { getGmailStatus, syncGmailAccount } from "./gmail.js";
 import { getBatchDashboard } from "./batches.js";
+import { AI_DOCUMENT_LIMITS, getAiQuotaState } from "./ai-quota.js";
 
 const PLAN_CATALOG = Object.freeze({
-  free:     { id: "free",     name: "ฟรี",     monthly: 0,   annual: 0,    documentLimit: 10,   businessLimit: 1 },
-  starter:  { id: "starter",  name: "Starter", monthly: 199, annual: 1990, documentLimit: 50,   businessLimit: 1 },
-  pro:      { id: "pro",      name: "Pro",     monthly: 399, annual: 3990, documentLimit: 300,  businessLimit: 3 },
-  business: { id: "business", name: "Business",monthly: 990, annual: 9900, documentLimit: 1500, businessLimit: 10 },
+  free:     { id: "free",     name: "ฟรี",     monthly: 0,    annual: 0,     documentLimit: 20,   aiDocumentLimit: AI_DOCUMENT_LIMITS.free,     businessLimit: 1 },
+  starter:  { id: "starter",  name: "Lite",    monthly: 199,  annual: 1990,  documentLimit: 200,  aiDocumentLimit: AI_DOCUMENT_LIMITS.starter,  businessLimit: 1 },
+  pro:      { id: "pro",      name: "Pro",     monthly: 399,  annual: 3990,  documentLimit: 1000, aiDocumentLimit: AI_DOCUMENT_LIMITS.pro,      businessLimit: 1 },
+  business: { id: "business", name: "Business",monthly: 1290, annual: 12900, documentLimit: 3000, aiDocumentLimit: AI_DOCUMENT_LIMITS.business, businessLimit: 2 },
 });
 
-const TRIAL_DAYS = 60;
+const TRIAL_DAYS = 30;
+const TRIAL_DOCUMENT_LIMIT = 1000;
+const TRIAL_AI_DOCUMENT_LIMIT = 100;
 const ERROR_TTL = 60 * 60 * 24 * 14;
 const AUDIT_TTL = 60 * 60 * 24 * 365;
 
@@ -37,6 +40,72 @@ function json(data, status = 200, env = null) {
   return new Response(JSON.stringify(data, null, 2), { status, headers });
 }
 function adminOk(env, url) { return !!env.ADMIN_KEY && clean(url.searchParams.get("key"), 300) === clean(env.ADMIN_KEY, 300); }
+
+// ADMIN_PIN_SESSION_V7_57_20260816
+const ADMIN_SESSION_TTL = 60 * 60 * 8;
+const ADMIN_PIN_WINDOW = 60 * 15;
+const ADMIN_PIN_MAX_ATTEMPTS = 8;
+
+function safeTextEqual(a,b){
+  a=String(a??""); b=String(b??"");
+  if(a.length!==b.length)return false;
+  let diff=0;
+  for(let i=0;i<a.length;i++)diff|=a.charCodeAt(i)^b.charCodeAt(i);
+  return diff===0;
+}
+function adminSessionToken(request){
+  const auth=String(request.headers.get("authorization")||"").trim();
+  if(!auth.toLowerCase().startsWith("bearer "))return "";
+  return clean(auth.slice(7),180);
+}
+async function adminSessionOk(env,request){
+  const token=adminSessionToken(request);
+  if(!token)return false;
+  const rec=await env.KV.get(`adminsession:v1:${token}`,"json").catch(()=>null);
+  return !!rec?.active;
+}
+async function adminRateKey(request){
+  const ip=String(request.headers.get("CF-Connecting-IP")||"unknown").trim().slice(0,120);
+  const bytes=new TextEncoder().encode(ip);
+  const hash=await crypto.subtle.digest("SHA-256",bytes);
+  const hex=[...new Uint8Array(hash)].slice(0,12).map(b=>b.toString(16).padStart(2,"0")).join("");
+  return `adminpin:fail:v1:${hex}`;
+}
+async function adminPinLogin(request,env){
+  const expected=String(env.ADMIN_PIN||"").trim();
+  if(!/^\d{6}$/.test(expected)){
+    return json({ok:false,error:"admin_pin_not_configured",message:"ยังไม่ได้ตั้ง ADMIN_PIN 6 หลักใน Cloudflare Runtime Secret"},503,env);
+  }
+
+  const rateKey=await adminRateKey(request);
+  const attempts=Number(await env.KV.get(rateKey))||0;
+  if(attempts>=ADMIN_PIN_MAX_ATTEMPTS){
+    return json({ok:false,error:"too_many_attempts",message:"ลองรหัสผิดหลายครั้ง กรุณารอ 15 นาที"},429,env);
+  }
+
+  let body={};
+  try{body=await request.json();}catch{}
+  const pin=String(body?.pin||"").replace(/\D/g,"").slice(0,6);
+  if(!/^\d{6}$/.test(pin)||!safeTextEqual(pin,expected)){
+    await env.KV.put(rateKey,String(attempts+1),{expirationTtl:ADMIN_PIN_WINDOW});
+    return json({ok:false,error:"invalid_pin",message:"รหัส 6 หลักไม่ถูกต้อง"},401,env);
+  }
+
+  await env.KV.delete(rateKey).catch(()=>{});
+  const session=(crypto.randomUUID()+crypto.randomUUID()).replace(/-/g,"");
+  await env.KV.put(`adminsession:v1:${session}`,JSON.stringify({
+    active:true,
+    createdAt:nowIso(),
+    userAgent:clean(request.headers.get("user-agent"),220),
+  }),{expirationTtl:ADMIN_SESSION_TTL});
+
+  return json({ok:true,session,expiresIn:ADMIN_SESSION_TTL},200,env);
+}
+async function adminPinLogout(request,env){
+  const token=adminSessionToken(request);
+  if(token)await env.KV.delete(`adminsession:v1:${token}`).catch(()=>{});
+  return json({ok:true},200,env);
+}
 
 async function listAllKeys(env, prefix, max = 5000) {
   const out = [];
@@ -111,7 +180,7 @@ async function rawSubscription(env, root, { normalize = true } = {}) {
     if (rec.plan !== "business") patch.plan = "business";
     if (expectedEnd && rec.trialEndsAt !== expectedEnd) patch.trialEndsAt = expectedEnd;
     if (Object.keys(patch).length) {
-      rec = { ...rec, ...patch, trialMode: "business_60d", updatedAt: nowIso() };
+      rec = { ...rec, ...patch, trialMode: "business_30d", updatedAt: nowIso() };
       await env.KV.put(`subscription:v1:${root}`, JSON.stringify(rec));
     }
     if (Number.isFinite(endMs) && endMs <= now) {
@@ -134,7 +203,8 @@ async function rawSubscription(env, root, { normalize = true } = {}) {
     trialStartedAt: rec.trialStartedAt || rec.createdAt || "",
     trialEndsAt: rec.trialEndsAt || "",
     daysRemaining: betaActive ? Math.max(1, Math.ceil((endMs - now) / 86400000)) : 0,
-    documentLimit: plan.documentLimit,
+    documentLimit: betaActive ? TRIAL_DOCUMENT_LIMIT : plan.documentLimit,
+    aiDocumentLimit: betaActive ? TRIAL_AI_DOCUMENT_LIMIT : plan.aiDocumentLimit,
     businessLimit: plan.businessLimit,
     priceMonthly: plan.monthly,
     priceAnnual: plan.annual,
@@ -203,8 +273,11 @@ async function customerSummary(env, root, { deep = false, refresh = false } = {}
   const gmail = await getGmailStatus(env, root).catch(() => ({ connected: false, reconnectRequired: false, lastError: "" }));
   const subscription = await rawSubscription(env, root);
   const usage = refresh ? await refreshUsage(env, root, account) : await cachedUsage(env, root);
+  const aiQuota = await getAiQuotaState(env, root);
   const limit = Number(subscription.documentLimit || 0);
   const percent = limit ? Math.min(999, Math.round((usage.documents / limit) * 100)) : 0;
+  const aiLimit = Number(subscription.aiDocumentLimit || aiQuota.limit || 0);
+  const aiPercent = aiLimit ? Math.min(999, Math.round((Number(aiQuota.used || 0) / aiLimit) * 100)) : 0;
 
   let settings = {};
   let workflow = null;
@@ -248,6 +321,7 @@ async function customerSummary(env, root, { deep = false, refresh = false } = {}
     },
     subscription,
     usage: { ...usage, percent },
+    aiUsage: { month: aiQuota.month, documents: Number(aiQuota.used || 0), limit: aiLimit, percent: aiPercent, remaining: Math.max(0, aiLimit - Number(aiQuota.used || 0)) },
     setup,
     workflow,
     attention,
@@ -410,7 +484,7 @@ async function action(env, body) {
     const current = await kvJson(env, `subscription:v1:${root}`, {});
     const baseMs = Math.max(Date.now(), Date.parse(current.trialEndsAt || "") || 0);
     const start = current.trialStartedAt || current.createdAt || nowIso();
-    const next = { ...current, schema: "SUBSCRIPTION_V1_20260807", status: "beta", plan: "business", trialMode: "business_60d", trialStartedAt: start, trialEndsAt: new Date(baseMs + days * 86400000).toISOString(), updatedAt: nowIso() };
+    const next = { ...current, schema: "SUBSCRIPTION_V1_20260807", status: "beta", plan: "business", trialMode: "business_30d", trialStartedAt: start, trialEndsAt: new Date(baseMs + days * 86400000).toISOString(), updatedAt: nowIso() };
     if (!next.createdAt) next.createdAt = start;
     await env.KV.put(`subscription:v1:${root}`, JSON.stringify(next));
     await writeAdminAudit(env, "EXTEND_TRIAL", root, { days, trialEndsAt: next.trialEndsAt });
@@ -451,9 +525,22 @@ async function action(env, body) {
 }
 
 export async function handleAdminOps(request, env, url) {
-  if (!adminOk(env, url)) return json({ ok: false, error: "unauthorized" }, 401, env);
+  const path = url.pathname;
+
+  if (request.method === "POST" && path === "/admin/ops/login") {
+    return adminPinLogin(request, env);
+  }
+  if (request.method === "POST" && path === "/admin/ops/logout") {
+    return adminPinLogout(request, env);
+  }
+
+  const sessionOk = await adminSessionOk(env, request);
+  const legacyKeyOk = adminOk(env, url);
+  if (!sessionOk && !legacyKeyOk) {
+    return json({ ok: false, error: "unauthorized", message: "Admin session หมดอายุหรือยังไม่ได้เข้าสู่ระบบ" }, 401, env);
+  }
+
   try {
-    const path = url.pathname;
     if (request.method === "GET" && path === "/admin/ops/overview") return json(await overview(env), 200, env);
     if (request.method === "GET" && path === "/admin/ops/customers") {
       const deep = url.searchParams.get("deep") === "1";

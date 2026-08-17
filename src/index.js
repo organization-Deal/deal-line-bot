@@ -7,7 +7,9 @@
 //   • ล้าง flag ทั้งแบบเก่าและแบบผูก sheetId ตอนบันทึกตั้งค่า / migrate
 
 import { verifySignature, getMessageContent, reply, push, textMsg, confirmCard, savedCard, moreCard } from "./line.js";
+import { pilotPage, savePilotRequest, pilotHealth } from "./pilot-public.js"; // PUBLIC_PILOT_ROUTE_V7_71_20260817
 import { ocrReceipt, EXPENSE_CATEGORIES, INCOME_CATEGORIES } from "./ocr.js";
+import { AI_DOCUMENT_LIMITS, getAiQuotaState, consumeAiDocument, readAiDocumentCache, writeAiDocumentCache, unwrapAiDocumentCache } from "./ai-quota.js";
 import {
   appendExpense, readExpenses, getExpenseById, updateExpenseById,
   togglePaid, toggleNeedSlip, softDeleteById, listForSlip, normalizeDate,
@@ -24,7 +26,7 @@ import {
   listSubscriptions, approveEmailDocument, patchEmailDocument,
 } from "./email.js";
 import { ensureEmailInboxTab } from "./email-sheets.js";
-import { buildConnectUrl, handleCallback, getUserToken, createUserSheet } from "./oauth.js";
+import { buildConnectUrl, handleCallback, getUserToken, getGoogleConnectionStatus, createUserSheet } from "./oauth.js";
 import {
   buildGmailConnectUrl, handleGmailCallback, getGmailStatus,
   syncGmailAccount, syncConnectedGmailAccounts, disconnectGmail,
@@ -70,6 +72,9 @@ import {
   getTaxCenter, getAudit, getLedger, getTodayWork, searchAccounting, getBackup,
   writeAudit, postJournal, postExpenseJournal, postIncomeInvoiceJournal, postIncomePaymentJournal, postReimbursementPaymentJournal,
 } from "./accounting-suite.js";
+import { getCashPosition } from "./cash-position.js"; // AUTO_CASH_POSITION_V7_69_20260816
+
+import { handleAdminOps } from "./admin-ops.js"; // ADMIN_OPS_ROUTE_V7_56_20260816
 
 export { MultiExpenseSession } from "./multi-expense.js";
 
@@ -405,6 +410,180 @@ async function listBusinessWorkspaces(env, currentTenant) {
   };
 }
 
+// TEAM_AUTO_ONBOARDING_V7_40_20260814
+function parseTeamMembersV740(raw) {
+  if (Array.isArray(raw)) return raw.filter(Boolean);
+  if (!raw) return [];
+  try { const x = JSON.parse(raw); return Array.isArray(x) ? x.filter(Boolean) : []; }
+  catch { return []; }
+}
+function validLineUserV740(value) {
+  return /^U[0-9a-f]{32}$/i.test(String(value || "").trim());
+}
+function memberRegistrationGroupCardV740(companyName = "บริษัทนี้") {
+  return {
+    type:"flex",
+    altText:`ลงทะเบียนข้อมูลรับเงิน · ${companyName}`,
+    contents:{
+      type:"bubble",
+      body:{type:"box",layout:"vertical",paddingAll:"20px",spacing:"sm",contents:[
+        {type:"text",text:"เริ่มใช้งานครั้งแรก",size:"xs",weight:"bold",color:"#248A3D"},
+        {type:"text",text:"ลงทะเบียนข้อมูลรับเงินก่อนเบิก",size:"xl",weight:"bold",color:"#111111",wrap:true},
+        {type:"text",text:`สำหรับ ${companyName} · กรอกครั้งเดียว แล้วส่งบิล/ตั้งเบิกได้เลย`,size:"sm",color:"#6E6E73",wrap:true},
+        {type:"box",layout:"vertical",backgroundColor:"#F5F5F7",cornerRadius:"14px",paddingAll:"12px",margin:"md",contents:[
+          {type:"text",text:"ข้อมูลที่ใช้",size:"xs",weight:"bold",color:"#111111"},
+          {type:"text",text:"ชื่อ–นามสกุล · ธนาคาร · เลขบัญชี · ชื่อบัญชี",size:"xs",color:"#6E6E73",wrap:true,margin:"xs"}
+        ]}
+      ]},
+      footer:{type:"box",layout:"vertical",paddingAll:"14px",contents:[
+        {type:"button",style:"primary",color:"#111111",action:{type:"postback",label:"ลงทะเบียนข้อมูลของฉัน",data:"act=member_register",displayText:"ลงทะเบียนข้อมูลของฉัน"}}
+      ]}
+    }
+  };
+}
+function memberRegistrationPrivateCardV740(profileUrl, companyName = "บริษัทนี้") {
+  return {
+    type:"flex",
+    altText:`ตั้งค่าบัญชีรับเงิน · ${companyName}`,
+    contents:{
+      type:"bubble",
+      body:{type:"box",layout:"vertical",paddingAll:"20px",spacing:"sm",contents:[
+        {type:"text",text:"ข้อมูลส่วนตัว",size:"xs",weight:"bold",color:"#248A3D"},
+        {type:"text",text:"ตั้งค่าบัญชีรับเงินครั้งแรก",size:"xl",weight:"bold",color:"#111111",wrap:true},
+        {type:"text",text:`ใช้สำหรับ ${companyName} · กรอกครั้งเดียว ระบบจะจำข้อมูลให้ทุกครั้งที่เบิก`,size:"sm",color:"#6E6E73",wrap:true},
+        {type:"text",text:"ลิงก์นี้เป็นลิงก์ส่วนตัวของคุณและมีอายุจำกัด",size:"xs",color:"#9A4A00",wrap:true,margin:"md"}
+      ]},
+      footer:{type:"box",layout:"vertical",paddingAll:"14px",contents:[
+        {type:"button",style:"primary",color:"#111111",action:{type:"uri",label:"กรอกข้อมูลรับเงิน",uri:profileUrl}}
+      ]}
+    }
+  };
+}
+async function companyNameForV740(env, tenant) {
+  try {
+    const sheetId = String((await env.KV.get(`tenant:${tenant}`)) || env.DEFAULT_SHEET_ID || "").trim();
+    if (!sheetId) return "บริษัทนี้";
+    const token = await getUserToken(env, tenant).catch(() => null);
+    if (!token) return "บริษัทนี้";
+    const s = await readSettings(env, sheetId, token).catch(() => ({}));
+    return settingValue(s, "company_name") || "บริษัทนี้";
+  } catch { return "บริษัทนี้"; }
+}
+async function deliverMemberRegistrationV740(env, event, businessTenant, { pendingId = "" } = {}) {
+  const userId = String(event?.source?.userId || "").trim();
+  if (!validLineUserV740(userId)) return { ok:false, reason:"line_user_missing" };
+  const companyName = await companyNameForV740(env, businessTenant);
+  const profileUrl = await createMemberOnboardingUrl(env, {
+    tenant: businessTenant,
+    lineUserId: userId,
+    displayName: "",
+    pendingId,
+  });
+  const card = memberRegistrationPrivateCardV740(profileUrl, companyName);
+  const inGroup = Boolean(event?.source?.groupId || event?.source?.roomId);
+  if (!inGroup) return { ok:true, privateSent:false, replyCard:card, companyName };
+  const sent = await push(env, userId, card).catch(() => false);
+  return { ok:true, privateSent:sent, companyName };
+}
+async function teamDirectoryV740(env, businessTenant, { refresh = false } = {}) {
+  const sheetId = String((await env.KV.get(`tenant:${businessTenant}`)) || env.DEFAULT_SHEET_ID || "").trim();
+  const token = sheetId ? await getUserToken(env, businessTenant).catch(() => null) : null;
+  const settings = sheetId && token ? await readSettings(env, sheetId, token).catch(() => ({})) : {};
+  const saved = parseTeamMembersV740(settings.team_members);
+  const savedByLine = new Map();
+  saved.forEach((m, i) => {
+    const id = String(m?.lineUserId || m?.payerId || "").trim();
+    if (id) savedByLine.set(id, { ...m, savedIndex:i });
+  });
+
+  const groupData = await getLineGroupsOverview(env, businessTenant, { refresh:false });
+  const merged = new Map();
+  const groupSummaries = [];
+  for (const group of groupData.rows || []) {
+    const groupTenant = String(group.tenant || group.groupId || "").trim();
+    if (!/^C|^R/i.test(groupTenant)) continue;
+    const groupSheetId = String((await env.KV.get(`tenant:${groupTenant}`)) || sheetId || "").trim();
+    const groupToken = (await getUserToken(env, groupTenant).catch(() => null)) || token;
+    const out = await listLineWorkspaceMembers(env, groupTenant, {
+      sheetId: groupSheetId,
+      token: groupToken,
+      refresh,
+    }).catch(() => ({ ok:false, members:[], workspaceName:group.groupName || "", directoryMode:"known-members" }));
+    groupSummaries.push({
+      tenant:groupTenant,
+      name:out.workspaceName || group.groupName || "กลุ่ม LINE",
+      count:Number(out.activeCount || out.count || 0),
+      directoryMode:out.directoryMode || "known-members",
+    });
+    for (const m of out.members || []) {
+      if (m.active === false || !validLineUserV740(m.userId)) continue;
+      const current = merged.get(m.userId) || {
+        lineUserId:m.userId,
+        displayName:m.displayName || "",
+        pictureUrl:m.pictureUrl || "",
+        groups:[],
+        lastSeenAt:m.lastSeenAt || "",
+      };
+      current.displayName = current.displayName || m.displayName || "";
+      current.pictureUrl = current.pictureUrl || m.pictureUrl || "";
+      current.lastSeenAt = [current.lastSeenAt, m.lastSeenAt || ""].sort().at(-1) || "";
+      if (!current.groups.some((g) => g.tenant === groupTenant)) current.groups.push({ tenant:groupTenant, name:out.workspaceName || group.groupName || "กลุ่ม LINE" });
+      merged.set(m.userId,current);
+    }
+  }
+
+  const rows = [];
+  for (const item of merged.values()) {
+    const profile = savedByLine.get(item.lineUserId) || null;
+    rows.push({
+      ...item,
+      name:String(profile?.name || item.displayName || "สมาชิก LINE"),
+      nickname:String(profile?.nickname || ""),
+      role:String(profile?.role || "พนักงาน"),
+      bank:String(profile?.bank || ""),
+      accountNo:String(profile?.accountNo || ""),
+      accountName:String(profile?.accountName || ""),
+      savedIndex:Number.isInteger(profile?.savedIndex) ? profile.savedIndex : -1,
+      registered:Boolean(profile),
+      profileComplete:memberProfileComplete(profile || {}),
+      missing:missingMemberFields(profile || {}),
+    });
+  }
+  saved.forEach((profile, savedIndex) => {
+    const id = String(profile?.lineUserId || profile?.payerId || "").trim();
+    if (id && merged.has(id)) return;
+    rows.push({
+      lineUserId:id,
+      displayName:String(profile?.name || ""),
+      name:String(profile?.name || "สมาชิก"),
+      nickname:String(profile?.nickname || ""),
+      role:String(profile?.role || "พนักงาน"),
+      bank:String(profile?.bank || ""),
+      accountNo:String(profile?.accountNo || ""),
+      accountName:String(profile?.accountName || ""),
+      groups:[],
+      lastSeenAt:"",
+      savedIndex,
+      registered:true,
+      profileComplete:memberProfileComplete(profile || {}),
+      missing:missingMemberFields(profile || {}),
+    });
+  });
+  rows.sort((a,b) => Number(b.profileComplete)-Number(a.profileComplete) || String(a.name||a.displayName).localeCompare(String(b.name||b.displayName),"th"));
+  return {
+    ok:true,
+    businessTenant,
+    companyName:await companyNameForV740(env,businessTenant),
+    rows,
+    groups:groupSummaries,
+    total:rows.length,
+    ready:rows.filter((x)=>x.profileComplete).length,
+    waiting:rows.filter((x)=>!x.profileComplete).length,
+    refreshedAt:new Date().toISOString(),
+    version:"TEAM_AUTO_ONBOARDING_V7_40_20260814",
+  };
+}
+
 async function createLineWorkspaceInvite(env, currentTenant) {
   const businessTenant = await operationalTenantKey(env, currentTenant);
   const account = await ensureBusinessAccount(env, businessTenant);
@@ -494,6 +673,10 @@ async function linkLineWorkspaceFromInvite(env, event, codeRaw) {
     console.warn("refresh LINE workspace after link", rawTenant, e?.message || e)
   );
 
+  // TEAM_AUTO_ONBOARDING_V7_40_20260814: หลังเชื่อมกลุ่มสำเร็จ เชิญทุกคนลงทะเบียนแบบ self-service
+  await push(env, rawTenant, memberRegistrationGroupCardV740(String(invite.companyName || "บริษัทนี้")))
+    .catch((e) => console.warn("team onboarding invite after LINE link", rawTenant, e?.message || e));
+
   return {
     ok:true,
     groupTenant:rawTenant,
@@ -511,7 +694,7 @@ async function createBusinessInvite(env, currentTenant) {
     return {
       ok: false,
       reason: "business_limit",
-      message: info.businessLimit <= 1 ? "เพิ่มธุรกิจได้ตั้งแต่แพ็กเกจ Pro" : `แพ็กเกจนี้รองรับสูงสุด ${info.businessLimit} ธุรกิจ`,
+      message: info.businessLimit <= 1 ? "เพิ่มบริษัทได้ตั้งแต่แพ็กเกจ Business" : `แพ็กเกจนี้รองรับสูงสุด ${info.businessLimit} บริษัท`,
       ...info,
     };
   }
@@ -604,7 +787,7 @@ async function linkBusinessFromInvite(env, event, currentTenant, codeRaw) {
   const account = await ensureBusinessAccount(env, rootTenant);
   const limit = Number(subscription.businessLimit || 1);
   if (!account.businesses.includes(currentTenant) && account.businesses.length >= limit) {
-    return { ok: false, reason: "business_limit", message: limit <= 1 ? "เพิ่มธุรกิจได้ตั้งแต่แพ็กเกจ Pro" : `สิทธิ์ปัจจุบันเพิ่มได้สูงสุด ${limit} ธุรกิจ` };
+    return { ok: false, reason: "business_limit", message: limit <= 1 ? "เพิ่มบริษัทได้ตั้งแต่แพ็กเกจ Business" : `สิทธิ์ปัจจุบันเพิ่มได้สูงสุด ${limit} บริษัท` };
   }
 
   const groupName = (await tenantTitle(env, event.source)) || `ธุรกิจ ${account.businesses.length + 1}`;
@@ -656,10 +839,10 @@ async function linkBusinessFromInvite(env, event, currentTenant, codeRaw) {
 /* ══════════════ Subscription / Beta access ══════════════ */
 const SUBSCRIPTION_SCHEMA = "SUBSCRIPTION_V1_20260807";
 const SUBSCRIPTION_PLANS = Object.freeze({
-  free:     { id: "free",     name: "ฟรี",      monthly: 0,   annual: 0,    documentLimit: 10,   businessLimit: 1 },
-  starter:  { id: "starter",  name: "Starter",  monthly: 199, annual: 1990, documentLimit: 50,   businessLimit: 1 },
-  pro:      { id: "pro",      name: "Pro",      monthly: 399, annual: 3990, documentLimit: 300,  businessLimit: 3 },
-  business: { id: "business", name: "Business", monthly: 990, annual: 9900, documentLimit: 1500, businessLimit: 10 },
+  free:     { id: "free",     name: "ฟรี",     monthly: 0,    annual: 0,     documentLimit: 20,   aiDocumentLimit: AI_DOCUMENT_LIMITS.free,     businessLimit: 1 },
+  starter:  { id: "starter",  name: "Lite",    monthly: 199,  annual: 1990,  documentLimit: 200,  aiDocumentLimit: AI_DOCUMENT_LIMITS.starter,  businessLimit: 1 },
+  pro:      { id: "pro",      name: "Pro",     monthly: 399,  annual: 3990,  documentLimit: 1000, aiDocumentLimit: AI_DOCUMENT_LIMITS.pro,      businessLimit: 1 },
+  business: { id: "business", name: "Business",monthly: 1290, annual: 12900, documentLimit: 3000, aiDocumentLimit: AI_DOCUMENT_LIMITS.business, businessLimit: 2 },
 });
 
 function subscriptionMonthKey(value = new Date()) {
@@ -684,13 +867,13 @@ function subscriptionEnforcementEnabled(env) {
 }
 
 function configuredBetaEnd(env, startedAt = Date.now()) {
-  const fixed = String(env.BETA_FREE_UNTIL || "").trim();
-  if (fixed) {
-    const parsed = Date.parse(fixed);
-    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
-  }
-  const days = Math.max(1, Number(env.BETA_TRIAL_DAYS || 60));
+  // TRIAL_POLICY_30D_1000_V7_72_20260817: automatic Trial is exactly 30 days from the account's real start.
+  const days = Math.max(1, Number(env.BETA_TRIAL_DAYS || 30));
   return new Date(Number(startedAt) + days * 86400000).toISOString();
+}
+function configuredTrialDocumentLimit(env) {
+  // Trial quota only. Paid Business package remains unchanged.
+  return Math.max(1, Number(env.BETA_TRIAL_DOCUMENT_LIMIT || 1000));
 }
 
 async function getSubscriptionRecord(env, key) {
@@ -704,7 +887,7 @@ async function getSubscriptionRecord(env, key) {
     rec = {
       schema: SUBSCRIPTION_SCHEMA,
       status: "beta",
-      plan: "pro",
+      plan: "business",
       cycle: "monthly",
       createdAt: startedAt,
       trialStartedAt: startedAt,
@@ -720,6 +903,25 @@ async function getSubscriptionRecord(env, key) {
     }
     await env.KV.put(storageKey, JSON.stringify(rec));
     return rec;
+  }
+
+  // TRIAL_POLICY_30D_1000_V7_72_20260817: normalize every legacy Trial to the new 30-day policy.
+  if (rec.status === "beta") {
+    const startMs = Date.parse(rec.trialStartedAt || rec.createdAt || "");
+    if (Number.isFinite(startMs)) {
+      const expectedEnd = configuredBetaEnd(env, startMs);
+      if (rec.trialEndsAt !== expectedEnd || rec.plan !== "business" || rec.trialMode !== "business_30d") {
+        rec = {
+          ...rec,
+          plan: "business",
+          trialEndsAt: expectedEnd,
+          trialMode: "business_30d",
+          trialPolicyVersion: "TRIAL_POLICY_30D_1000_V7_72_20260817",
+          trialMigratedAt: new Date(now).toISOString(),
+        };
+        await env.KV.put(storageKey, JSON.stringify(rec));
+      }
+    }
   }
 
   // Beta จบแล้วและยังไม่ได้เปิดแพ็กเสียเงิน → กลับ Free อัตโนมัติ
@@ -799,10 +1001,13 @@ async function getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage 
   const betaActive = rec.status === "beta" && Number.isFinite(trialEndMs) && trialEndMs > now;
   const requestedPlan = SUBSCRIPTION_PLANS[rec.requestedPlan] ? rec.requestedPlan : "";
   const requestedCycle = rec.requestedCycle === "annual" ? "annual" : rec.requestedCycle === "monthly" ? "monthly" : "";
-  const effectivePlan = betaActive ? "pro" : (rec.status === "active" && SUBSCRIPTION_PLANS[rec.plan] ? rec.plan : "free");
+  const effectivePlan = betaActive ? "business" : (rec.status === "active" && SUBSCRIPTION_PLANS[rec.plan] ? rec.plan : "free");
   const plan = SUBSCRIPTION_PLANS[effectivePlan] || SUBSCRIPTION_PLANS.free;
   const usage = await getSubscriptionUsage(env, key, sheetId, token, { refresh: refreshUsage });
-  const limit = betaActive ? null : plan.documentLimit;
+  const limit = betaActive ? configuredTrialDocumentLimit(env) : plan.documentLimit;
+  const aiState = await getAiQuotaState(env, key);
+  const aiLimit = Number(aiState.limit || (betaActive ? 100 : plan.aiDocumentLimit) || 0);
+  const aiPercent = aiLimit ? Math.min(999, Math.round((Number(aiState.used || 0) / aiLimit) * 100)) : 0;
   const percent = limit ? Math.min(999, Math.round((usage.documents / limit) * 100)) : 0;
   let threshold = "ok";
   if (limit && percent >= 100) threshold = "limit";
@@ -813,8 +1018,8 @@ async function getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage 
   const businessLimit = Number(plan.businessLimit || 1);
   const businessCount = account.businesses.length;
   const businessIndex = Math.max(0, account.businesses.indexOf(key));
-  const businessAccessAllowed = betaActive || businessIndex < businessLimit;
-  const documentBlocked = Boolean(enforcement && !betaActive && limit && usage.documents >= limit);
+  const businessAccessAllowed = businessIndex < businessLimit;
+  const documentBlocked = Boolean(enforcement && limit && usage.documents >= limit);
   const businessBlocked = Boolean(enforcement && !businessAccessAllowed);
   return {
     ok: true,
@@ -826,11 +1031,14 @@ async function getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage 
     daysRemaining: betaActive ? Math.max(1, Math.ceil((trialEndMs - now) / 86400000)) : 0,
     plan: betaActive ? "beta" : effectivePlan,
     effectivePlan,
-    planName: betaActive ? "Beta ฟรี · สิทธิ์ Pro" : plan.name,
+    planName: betaActive ? "ทดลองใช้ Business ฟรี" : plan.name,
     cycle: rec.cycle === "annual" ? "annual" : "monthly",
     priceMonthly: plan.monthly,
     priceAnnual: plan.annual,
     documentLimit: limit,
+    aiDocumentLimit: aiLimit,
+    aiUsage: { month: aiState.month, documents: Number(aiState.used || 0), percent: aiPercent, remaining: Math.max(0, aiLimit - Number(aiState.used || 0)) },
+    aiBlocked: Boolean(aiState.blocked),
     businessLimit,
     businessCount,
     canAddBusiness: businessCount < businessLimit,
@@ -867,7 +1075,7 @@ async function subscriptionQuotaMessage(env, key, snapshot) {
   const upgradeUrl = `${base}${base.includes("?") ? "&" : "?"}page=billing`;
   if (snapshot?.blockedReason === "business_limit") {
     return textMsg(`ธุรกิจนี้อยู่นอกสิทธิ์แพ็กเกจปัจจุบัน
-แพ็กเกจ Pro รองรับสูงสุด 3 ธุรกิจ
+แพ็กเกจปัจจุบันรองรับจำนวนบริษัทตามที่แสดงในหน้าแพ็กเกจ
 ข้อมูลเดิมยังเปิดดูและจัดการได้ แต่การรับเอกสารใหม่ของธุรกิจนี้ถูกพักไว้
 
 อัปเกรดแพ็กเกจ:
@@ -886,6 +1094,23 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") return cors(new Response(null, { status: 204 }));
+
+    // PUBLIC_PILOT_ROUTE_V7_71_20260817
+    // Public website form: NEVER send this through LINE webhook signature validation.
+    if (url.pathname === "/pilot" && request.method === "GET") {
+      return pilotPage(env);
+    }
+    if (url.pathname === "/pilot/request" && request.method === "POST") {
+      return savePilotRequest(env, request);
+    }
+    if (url.pathname === "/pilot/health" && request.method === "GET") {
+      return cors(json(pilotHealth()));
+    }
+
+    // ADMIN_OPS_ROUTE_V7_56_20260816
+    if (url.pathname.startsWith("/admin/ops/")) {
+      return await handleAdminOps(request, env, url);
+    }
 
     if (url.pathname === "/oauth/connect") {
       const key = url.searchParams.get("tenant");
@@ -954,6 +1179,7 @@ export default {
       if (!sheetId) return json({ error: "no sheet for tenant" }, 404);
       try {
         const token = await getUserToken(env, key);
+
         const b = await request.json().catch(() => ({}));
         const plan = String(b.plan || "free").trim().toLowerCase();
         if (!SUBSCRIPTION_PLANS[plan]) return json({ error: "invalid plan" }, 400);
@@ -1005,6 +1231,19 @@ export default {
       if (!access.ok) {
         return cors(json({error:"unauthorized",hint:'ลิงก์ไม่ถูกต้องหรือถูกยกเลิกแล้ว — พิมพ์ "แดชบอร์ด" ในกลุ่ม LINE เพื่อขอลิงก์ใหม่'},401));
       }
+
+      // GOOGLE_STATUS_ROUTE_FIX_V7_51_1_20260815
+      if(url.pathname==="/api/google-status"&&request.method==="GET"){
+        try{
+          return cors(json(await getGoogleConnectionStatus(env,key,{validate:false})));
+        }catch(error){
+          console.error("[google-status]",error);
+          return cors(json({
+            ok:false,connected:false,reconnectRequired:false,
+            reason:"status_unavailable",message:"ตรวจสถานะ Google ไม่สำเร็จชั่วคราว"
+          },503));
+        }
+      }
       if(!accessCan(access,url.pathname,request.method)){
         return cors(json({error:"forbidden",message:`สิทธิ์ ${DASH_ROLES[access.role]||access.role} ไม่สามารถทำรายการนี้ได้`},403));
       }
@@ -1013,7 +1252,41 @@ export default {
       if (!sheetId) return cors(json({ error: "no sheet for tenant" }, 404));
 
       try {
-        const token = await getUserToken(env, key);
+        // CONNECTION_STATUS_READONLY_V7_61_20260816
+        // Read-only / KV / LINE / Gmail-management endpoints ต้องไม่แตะ Core Google token.
+        const noCoreGoogleRequired=new Set([
+          "/api/businesses",
+          "/api/businesses/invite",
+          "/api/gmail-status",
+          "/api/gmail-disconnect",
+          "/api/accounting/whoami",
+          "/api/line-groups",
+          "/api/line-workspaces/invite",
+          "/api/line-groups/invite"
+        ]);
+        const needsCoreGoogle=!noCoreGoogleRequired.has(url.pathname);
+        const token=needsCoreGoogle?await getUserToken(env,key):null;
+
+        // token=null มี 2 ความหมายที่ต้องแยก:
+        // A) refresh token ถูก revoke/expired จริง -> 401 และให้เชื่อมใหม่
+        // B) Google/network ตอบพลาดชั่วคราว -> 503 ห้ามหลอกว่า OAuth หลุด
+        if(needsCoreGoogle&&!token){
+          const google=await getGoogleConnectionStatus(env,key,{validate:false});
+          if(google.reconnectRequired===true){
+            return cors(json({
+              ok:false,
+              error:"google_reconnect_required",
+              message:"สิทธิ์ Google Sheet / Drive หมดอายุหรือถูกยกเลิก กรุณาเชื่อมใหม่ ข้อมูลเดิมยังอยู่",
+              google,
+            },401));
+          }
+          return cors(json({
+            ok:false,
+            error:"google_temporarily_unavailable",
+            message:"Google ตอบกลับไม่สำเร็จชั่วคราว การเชื่อมต่อเดิมยังไม่ถูกยกเลิก กรุณาลองใหม่",
+            google,
+          },503));
+        }
 
         if (url.pathname === "/api/subscription") {
           return cors(json(await getSubscriptionSnapshot(env, key, sheetId, token, { refreshUsage: true })));
@@ -1047,12 +1320,13 @@ export default {
 
         if (url.pathname === "/api/businesses") {
           const info=await listBusinessWorkspaces(env,key);
+          const google=await getGoogleConnectionStatus(env,key,{validate:false});
           if(access.role!=="owner"){
             const current=(info.businesses||[]).find(b=>b.isCurrent)||(info.businesses||[])[0];
             const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
-            return cors(json({...info,businesses:current?[{...current,dashboardUrl:`${base}?tenant=${encodeURIComponent(key)}&k=${encodeURIComponent(url.searchParams.get("k")||"")}`}]:[],businessCount:1,businessLimit:1,canAddBusiness:false,restrictedByRole:true}));
+            return cors(json({...info,google,businesses:current?[{...current,dashboardUrl:`${base}?tenant=${encodeURIComponent(key)}&k=${encodeURIComponent(url.searchParams.get("k")||"")}`}]:[],businessCount:1,businessLimit:1,canAddBusiness:false,restrictedByRole:true}));
           }
-          return cors(json(info));
+          return cors(json({...info,google}));
         }
 
         if (url.pathname === "/api/businesses/invite" && request.method === "POST") {
@@ -1155,6 +1429,13 @@ export default {
           return cors(json({ ok:true, url:link }));
         }
 
+        // AUTO_CASH_POSITION_V7_69_20260816
+        // Manual finance_balances is a baseline snapshot; real transactions after that
+        // automatically move the effective balance by selected paymentChannelId.
+        if (url.pathname === "/api/cash-position" && request.method === "GET") {
+          return cors(json(await getCashPosition(env, key, sheetId, token)));
+        }
+
         /* Accounting Suite v7 — migration / AP / close / tax / audit / ledger */
         if (url.pathname === "/api/accounting/bootstrap") {
           await ensureAccountingSuiteTabs(env, sheetId, token);
@@ -1168,7 +1449,8 @@ export default {
             const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
             let record={...rec,url:`${base}?tenant=${encodeURIComponent(key)}&k=${rec.token}`};
             let lineNotification={attempted:false,sent:false,accepted:false};
-            if(rec.role==="approver"&&rec.lineUserId){
+            // WORKFLOW_LINE_NOTIFY_ROLE_FIX_V7_68_20260816
+            if(["approver","accountant"].includes(rec.role)&&rec.lineUserId){
               lineNotification=await notifyApproverAssignment(env,key,record)
                 .catch(e=>({ok:false,attempted:true,sent:false,accepted:false,reason:String(e?.message||e).slice(0,180)}));
               const saved=await patchDashAccessRecord(env,key,rec.token,lineNotificationPatch(lineNotification));
@@ -1188,7 +1470,11 @@ export default {
           const accessToken=String(b.token||"").trim();
           const current=await readDashAccessRecord(env,key,accessToken);
           if(!current||current.active===false)return cors(json({ok:false,error:"access_not_found",message:"ไม่พบสิทธิ์ผู้ใช้งานนี้"},404));
-          if(current.role!=="approver"||!current.lineUserId)return cors(json({ok:false,error:"approver_line_not_linked",message:"สิทธิ์นี้ยังไม่ได้ผูก LINE ผู้อนุมัติ"},400));
+          if(!["approver","accountant"].includes(current.role)||!current.lineUserId)return cors(json({
+            ok:false,
+            error:"workflow_line_not_linked",
+            message:"สิทธิ์นี้ยังไม่ได้ผูก LINE สำหรับ Workflow กรุณาเลือกพนักงานจากกลุ่ม LINE ก่อน"
+          },400));
           const base=(env.DASHBOARD_URL||"").replace(/\/$/,"");
           const record={...current,token:accessToken,url:`${base}?tenant=${encodeURIComponent(key)}&k=${accessToken}`};
           const lineNotification=await notifyApproverAssignment(env,key,record)
@@ -1196,9 +1482,55 @@ export default {
           const saved=await patchDashAccessRecord(env,key,accessToken,lineNotificationPatch(lineNotification));
           return cors(json({
             ok:true,
+            delivered:lineNotification?.sent===true||lineNotification?.accepted===true,
+            fallbackGroupSent:lineNotification?.fallbackGroupSent===true,
+            message:(lineNotification?.sent===true||lineNotification?.accepted===true)
+              ?"ส่ง LINE ส่วนตัวสำเร็จ"
+              :(lineNotification?.fallbackGroupSent===true
+                ?"ส่งคำแนะนำเข้า LINE กลุ่มแล้ว ให้ผู้ใช้เปิดแชท LINE OA และพิมพ์ “เชื่อม” แล้วกดส่ง LINE ใหม่อีกครั้ง"
+                :"ยังส่ง LINE ส่วนตัวไม่ได้ ให้ผู้ใช้เปิดแชท LINE OA และพิมพ์ “เชื่อม” 1 ครั้ง แล้วลองส่งใหม่"),
             lineNotification,
             record:saved?{...saved,url:record.url}:record,
           }));
+        }
+
+        // TEAM_AUTO_ONBOARDING_V7_40_20260814: ทีมจาก LINE + การเชิญลงทะเบียน
+        if (url.pathname === "/api/team-directory") {
+          if (access.role !== "owner") return cors(json({ok:false,error:"owner_only"},403));
+          const out = await teamDirectoryV740(env, key, { refresh:url.searchParams.get("refresh")==="1" });
+          return cors(json(out));
+        }
+
+        if (url.pathname === "/api/team-invite-group" && request.method === "POST") {
+          if (access.role !== "owner") return cors(json({ok:false,error:"owner_only"},403));
+          const b = await request.json().catch(()=>({}));
+          const groups = await getLineGroupsOverview(env,key,{refresh:false});
+          const requested = String(b.groupTenant || "").trim();
+          const group = (groups.rows || []).find((x) => String(x.tenant || x.groupId || "") === requested)
+            || (groups.rows || []).find((x) => /^C|^R/i.test(String(x.tenant || x.groupId || "")));
+          if (!group) return cors(json({ok:false,error:"no_line_group",message:"ยังไม่มีกลุ่ม LINE ที่เชื่อมกับบริษัทนี้"},404));
+          const groupTenant = String(group.tenant || group.groupId || "").trim();
+          const companyName = await companyNameForV740(env,key);
+          const sent = await push(env, groupTenant, memberRegistrationGroupCardV740(companyName)).catch(()=>false);
+          return cors(json({ok:sent,sent,groupTenant,groupName:group.groupName||"",message:sent?"ส่งคำเชิญลงทะเบียนในกลุ่มแล้ว":"ส่งเข้า LINE ไม่สำเร็จ"},sent?200:400));
+        }
+
+        if (url.pathname === "/api/team-invite-user" && request.method === "POST") {
+          if (access.role !== "owner") return cors(json({ok:false,error:"owner_only"},403));
+          const b = await request.json().catch(()=>({}));
+          const lineUserId = String(b.lineUserId || "").trim();
+          if (!validLineUserV740(lineUserId)) return cors(json({ok:false,error:"invalid_line_user"},400));
+          const directory = await teamDirectoryV740(env,key,{refresh:false});
+          const known = (directory.rows || []).some((x)=>String(x.lineUserId||"")===lineUserId);
+          if (!known) return cors(json({ok:false,error:"user_not_in_team",message:"ไม่พบสมาชิก LINE คนนี้ในบริษัท"},404));
+          const profileUrl = await createMemberOnboardingUrl(env,{
+            tenant:key,lineUserId,displayName:"",pendingId:""
+          });
+          const sent = await push(env,lineUserId,memberRegistrationPrivateCardV740(profileUrl,directory.companyName||"บริษัทนี้")).catch(()=>false);
+          return cors(json({
+            ok:sent,sent,
+            message:sent?"ส่งลิงก์ลงทะเบียนส่วนตัวแล้ว":"ยังส่งส่วนตัวไม่ได้ ให้สมาชิกเพิ่ม LINE OA เป็นเพื่อนก่อน"
+          },sent?200:400));
         }
 
         if (url.pathname === "/api/line-members") {
@@ -1403,6 +1735,9 @@ export default {
             const b = await request.json();
             const beforeSettings=await readSettings(env,sheetId,token).catch(()=>({}));
             const saved = await writeSettings(env, sheetId, b, token);
+            if(String(saved?.company_name||"").trim()){
+              await saveBusinessMeta(env,key,{name:String(saved.company_name).trim(),sheetId});
+            }
             await ensureTenantDriveFolders(env, key, token, {
               companyName: b.company_name || saved.company_name || "พื้นที่บริษัท",
               sheetId,
@@ -1418,7 +1753,7 @@ export default {
 
         /* Gmail OAuth — เชื่อมโดยตรงสำหรับ Beta */
         if (url.pathname === "/api/gmail-status") {
-          return cors(json(await getGmailStatus(env, key, { validate: true })));
+          return cors(json(await getGmailStatus(env, key, { validate: false })));
         }
 
         if (url.pathname === "/api/gmail-sync" && request.method === "POST") {
@@ -1735,6 +2070,28 @@ export default {
       const postbackAct = event.type === "postback" ? new URLSearchParams(event.postback?.data || "").get("act") : "";
       const isConfirm = postbackAct === "confirm" || postbackAct === "confirm_force" || postbackAct === "multi_confirm";
 
+      // TEAM_AUTO_ONBOARDING_V7_40_20260814: สมาชิกกดจากการ์ดในกลุ่ม หรือพิมพ์คำสั่งเอง
+      const memberRegisterText = event.type === "message" && event.message?.type === "text"
+        ? String(event.message.text || "").trim()
+        : "";
+      const memberRegisterRequested =
+        postbackAct === "member_register" ||
+        /^(ลงทะเบียนผู้เบิก|ลงทะเบียนข้อมูลของฉัน|ลงทะเบียนรับเงิน|ตั้งค่าบัญชีรับเงิน)$/i.test(memberRegisterText);
+
+      if (memberRegisterRequested) {
+        const delivery = await deliverMemberRegistrationV740(env, event, key);
+        if (!delivery.ok) {
+          await reply(env, event.replyToken, textMsg("ยังระบุตัวตน LINE ของคุณไม่ได้ กรุณาลองพิมพ์ “ลงทะเบียนผู้เบิก” อีกครั้ง"));
+        } else if (delivery.replyCard) {
+          await reply(env, event.replyToken, delivery.replyCard);
+        } else if (delivery.privateSent) {
+          await reply(env, event.replyToken, textMsg("ส่งลิงก์ลงทะเบียนไปที่แชทส่วนตัวของคุณแล้ว ✅"));
+        } else {
+          await reply(env, event.replyToken, textMsg("ยังส่งลิงก์ส่วนตัวไม่ได้ กรุณาเพิ่ม LINE OA นี้เป็นเพื่อน แล้วพิมพ์ “ลงทะเบียนผู้เบิก” ในแชทส่วนตัว"));
+        }
+        continue;
+      }
+
       if (isImage) {
         // Session ต่อผู้ส่ง 1 คนในแต่ละบริษัท รองรับส่งรูปหลายใบพร้อมกันโดยไม่ตอบสแปมทุกภาพ
         const userId = event.source?.userId || key;
@@ -1755,6 +2112,7 @@ export default {
             tenant: key,
             userId,
             targetId: lineTarget(event.source),
+            lineMessageId: event.message?.id || "",
           });
         } catch (e) {
           console.warn("multi touch", e.message);
@@ -2215,43 +2573,73 @@ async function handleImage(event, env, key, mode = "reply") {
   let record;
   let ocrFailed = false;
   let ocrError = "";
-  try {
-    record = await ocrReceipt(env, base64, mediaType);
-  } catch (e) {
-    ocrFailed = true;
-    ocrError = String(e?.message || e).slice(0, 500);
-    console.error(`[multi-ocr-failed] tenant=${key} messageId=${event.message.id || ""}`, e);
-    record = {
-      amount: 0,
-      vendor: "",
-      transferor: "",
-      fromAccountNumber: "",
-      toAccountNumber: "",
-      fromBank: "",
-      toBank: "",
-      date: "",
-      category: "อื่น ๆ",
-      note: "AI อ่านรูปไม่สำเร็จ — กรุณาจัดรูปและกรอกข้อมูลเอง",
-      docType: "อื่น ๆ",
-      role: "OTHER",
-      taxId: "",
-      invoiceNo: "",
-      referenceNo: "",
-      matchHint: "AI อ่านไม่สำเร็จ",
-      type: "รายจ่าย",
-      vat: false,
-      vatRate: 0,
-      whtRate: 0,
-      flag: "AI อ่านรูปไม่สำเร็จ กรุณาตรวจและจัดรูปด้วยตนเอง",
-      confidence: {
+  const cachedAi = unwrapAiDocumentCache(await readAiDocumentCache(env, key, "line-receipt", imageHash));
+  if (cachedAi) {
+    record = cachedAi;
+  } else {
+    const aiQuota = await getAiQuotaState(env, key);
+    if (aiQuota.blocked) {
+      ocrFailed = true;
+      ocrError = `AI_QUOTA_REACHED ${aiQuota.used}/${aiQuota.limit}`;
+      record = {
         amount: 0,
-        vendor: 0,
-        transferor: 0,
-        date: 0,
-        category: 0,
-        note: 0,
-      },
-    };
+        vendor: "",
+        transferor: "",
+        fromAccountNumber: "",
+        toAccountNumber: "",
+        fromBank: "",
+        toBank: "",
+        date: "",
+        category: "อื่น ๆ",
+        note: `ใช้จำนวนอ่านเอกสารอัตโนมัติครบ ${aiQuota.limit} ใบแล้ว — รูปยังถูกเก็บไว้และกรอกข้อมูลเองได้`,
+        docType: "อื่น ๆ",
+        role: "OTHER",
+        taxId: "",
+        invoiceNo: "",
+        referenceNo: "",
+        matchHint: "โควตาอ่านเอกสารอัตโนมัติครบแล้ว",
+        type: "รายจ่าย",
+        vat: false,
+        vatRate: 0,
+        whtRate: 0,
+        flag: "โควตาอ่านเอกสารอัตโนมัติครบแล้ว กรุณากรอกข้อมูลเองหรือเพิ่มจำนวนอ่านเอกสาร",
+        confidence: { amount: 0, vendor: 0, transferor: 0, date: 0, category: 0, note: 0 },
+      };
+    } else {
+      try {
+        record = await ocrReceipt(env, base64, mediaType);
+        await consumeAiDocument(env, key, 1);
+        await writeAiDocumentCache(env, key, "line-receipt", imageHash, record).catch(() => {});
+      } catch (e) {
+        ocrFailed = true;
+        ocrError = String(e?.message || e).slice(0, 500);
+        console.error(`[multi-ocr-failed] tenant=${key} messageId=${event.message.id || ""}`, e);
+        record = {
+          amount: 0,
+          vendor: "",
+          transferor: "",
+          fromAccountNumber: "",
+          toAccountNumber: "",
+          fromBank: "",
+          toBank: "",
+          date: "",
+          category: "อื่น ๆ",
+          note: "AI อ่านรูปไม่สำเร็จ — กรุณาจัดรูปและกรอกข้อมูลเอง",
+          docType: "อื่น ๆ",
+          role: "OTHER",
+          taxId: "",
+          invoiceNo: "",
+          referenceNo: "",
+          matchHint: "AI อ่านไม่สำเร็จ",
+          type: "รายจ่าย",
+          vat: false,
+          vatRate: 0,
+          whtRate: 0,
+          flag: "AI อ่านรูปไม่สำเร็จ กรุณาตรวจและจัดรูปด้วยตนเอง",
+          confidence: { amount: 0, vendor: 0, transferor: 0, date: 0, category: 0, note: 0 },
+        };
+      }
+    }
   }
 
   // Source of truth หลักสำหรับสลิป: เทียบผู้โอน/ผู้รับกับ Master บัญชีบริษัท
