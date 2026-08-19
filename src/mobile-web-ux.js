@@ -1,6 +1,49 @@
 // Shared mobile web UX for LINE in-app pages.
 // Adds visible waiting feedback for async actions and a reliable return-to-LINE action.
 
+const BRAND_THEME = String.raw`
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style id="rubjai-unified-brand-v786">
+:root{
+  --rubjai-navy:#111827;
+  --rubjai-indigo:#4f46e5;
+  --rubjai-indigo-hover:#4338ca;
+  --rubjai-indigo-soft:#eef2ff;
+  --rubjai-bg:#f7f8fc;
+  --rubjai-text:#111827;
+  --rubjai-muted:#667085;
+  --rubjai-border:#e4e7ec;
+  --rubjai-green:#16a34a;
+  --rubjai-orange:#d97706;
+  --rubjai-red:#dc2626;
+}
+html,body,button,input,select,textarea,a,label,p,span,div,section,article,
+h1,h2,h3,h4,h5,h6,strong,small{
+  font-family:"IBM Plex Sans Thai","Noto Sans Thai","Leelawadee UI",sans-serif!important;
+}
+body{background:var(--rubjai-bg);color:var(--rubjai-text);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+button,input,select,textarea{font:inherit!important}
+h1,h2,h3,h4,h5,h6{font-weight:600!important;letter-spacing:-.025em!important}
+::selection{background:#c7d2fe;color:var(--rubjai-navy)}
+:focus-visible{outline:2px solid var(--rubjai-indigo)!important;outline-offset:2px!important}
+button[type="submit"],input[type="submit"],.primary,.btn-primary,
+.deal-auto-line-button,#dealMobileBusy .deal-line-link,#dealLineCloseGuide .deal-close-confirm{
+  background:var(--rubjai-indigo)!important;
+  border-color:var(--rubjai-indigo)!important;
+  color:#fff!important;
+}
+button[type="submit"]:hover,.primary:hover,.btn-primary:hover{
+  background:var(--rubjai-indigo-hover)!important;
+}
+.summary,.summary-card,.total-card{
+  background:var(--rubjai-navy)!important;
+  color:#fff!important;
+}
+</style>
+`; // RUBJAI_UNIFIED_BRAND_V786
+
 const STYLE = String.raw`<style id="deal-mobile-web-ux-style">
 #dealMobileBusy{position:fixed;inset:0;z-index:2147483000;display:none;place-items:center;padding:22px;background:rgba(245,245,247,.92);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans Thai",sans-serif;color:#1d1d1f}
 #dealMobileBusy.is-visible{display:grid}
@@ -296,7 +339,7 @@ export async function enhanceMobileWebResponse(response, options = {}) {
   }
 
   const script = SCRIPT.replace("__DEAL_LIFF_ID__", JSON.stringify(String(options.liffId || "")));
-  const injection = STYLE + script;
+  const injection = STYLE + BRAND_THEME + script;
   let body;
   if (/<\/body>/i.test(source)) body = source.replace(/<\/body>/i, `${injection}</body>`);
   else if (/<\/html>/i.test(source)) body = source.replace(/<\/html>/i, `${injection}</html>`);
