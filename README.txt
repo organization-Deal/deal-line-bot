@@ -1,20 +1,21 @@
-LINE BOT v7.85.1 — CI AUDIT HOTFIX
+deal-line-bot v7.85.2 — generated mobile-web-ux syntax hotfix
 
-ปัญหาจาก Build Log:
-Error: v7.85 CI audit failed: approverIndigo
+สาเหตุของ deploy fail ล่าสุด:
+apply-v785-ci-unified.mjs สร้าง src/mobile-web-ux.js เป็น:
+  const CI_THEME_V785 = String.raw\`
+ซึ่งมี backslash หน้า backtick และเป็น JavaScript ที่ parse ไม่ได้
 
-สาเหตุ:
-src/approver-line.js ไม่มีความจำเป็นต้องมี literal #4F46E5 เสมอ
-แต่ audit เดิมบังคับ approver.includes("#4F46E5") ทำให้ build fail
-แม้ไฟล์นั้นจะไม่มี primary button ที่ผิด CI
+v7.85.2:
+- เปลี่ยน generator เป็น array.join("\n")
+- output ที่ได้เป็น:
+  const CI_THEME_V785 = String.raw`
+- เก็บ semantic approver audit จาก v7.85.1 ไว้
+- ทดสอบ node --check ตัว patcher
+- จำลองรัน patcher end-to-end
+- ทดสอบ node --check ไฟล์ mobile-web-ux.js ที่ถูก generate แล้ว
 
 วิธีใช้:
-1. วาง apply-v785-ci-unified.mjs ทับไฟล์ชื่อเดิมที่ root ของ deal-line-bot
-2. ไม่ต้องแก้ wrangler.toml
-3. Commit / Upload
-4. Deploy ใหม่
-
-Audit ใหม่:
-- ไม่บังคับว่า approver-line.js ต้องมี #4F46E5
-- จะ fail เฉพาะเมื่อพบ primary button ที่ยังใช้ legacy dark/green/orange
-- node --check ผ่านแล้ว
+1) วาง apply-v785-ci-unified.mjs ทับไฟล์เดิมที่ root repo deal-line-bot
+2) ไม่ต้องแก้ wrangler.toml
+3) Commit / Upload
+4) Deploy ใหม่

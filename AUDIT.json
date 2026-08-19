@@ -1,11 +1,15 @@
 {
   "result": "PASS",
   "checks": {
-    "node_check": true,
-    "new_marker": true,
-    "semantic_helper": true,
-    "false_positive_removed": true,
-    "approver_semantic_audit": true,
-    "same_filename": true
-  }
+    "patcher_node_check": true,
+    "end_to_end_patch_run": true,
+    "generated_mobile_node_check": true,
+    "no_backslash_before_template_backtick": true,
+    "valid_theme_declaration": true,
+    "valid_theme_close": true,
+    "theme_in_injection": true,
+    "semantic_approver_audit_kept": true,
+    "v7852_marker": true
+  },
+  "simulated_stdout": "✅ RUBJAI_CI_UNIFIED_V7_85_2_20260820\n✅ LINE Flex primary actions = Indigo\n✅ Success = muted sage, warning/danger semantic only\n✅ LINE web pages = IBM Plex + white/gray + Indigo\n✅ Busy/return-to-LINE UI no longer uses black panels/buttons\n✅ v7.85.2 semantic CI audit: {\"cardIndigo\":true,\"cardPaidActionIndigo\":true,\"cardIncomeNeutral\":true,\"approverCI\":true,\"batchesIndigo\":true,\"oauthIndigo\":true,\"indexIndigo\":true,\"multiNoDarkNumber\":true,\"memberIndigo\":true,\"mobileFinalTheme\":true}\n"
 }

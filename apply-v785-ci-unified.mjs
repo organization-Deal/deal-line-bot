@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 const root = process.cwd();
-const MARK = "RUBJAI_CI_UNIFIED_V7_85_1_20260820";
+const MARK = "RUBJAI_CI_UNIFIED_V7_85_2_20260820";
 const files = {
   card: path.join(root, "src", "card.js"),
   approver: path.join(root, "src", "approver-line.js"),
@@ -16,7 +16,7 @@ const files = {
 };
 
 for (const [name,file] of Object.entries(files)) {
-  if (!fs.existsSync(file)) throw new Error(`v7.85 missing ${name}: ${path.relative(root,file)}`);
+  if (!fs.existsSync(file)) throw new Error(`v7.85.2 missing ${name}: ${path.relative(root,file)}`);
 }
 
 const palette = new Map([
@@ -199,126 +199,126 @@ const mobile = write("mobile", (src) => {
     const anchor = "const SCRIPT = String.raw`<script id=\"deal-mobile-web-ux-script\">";
     if (!src.includes(anchor)) throw new Error("v7.85 mobile theme anchor missing");
 
-    const theme = String.raw`
-const CI_THEME_V785 = String.raw\`
-<style id="rubjai-ci-web-theme-v785">
-:root{
-  --rubjai-navy:#101828;
-  --rubjai-indigo:#4f46e5;
-  --rubjai-indigo-hover:#4338ca;
-  --rubjai-indigo-soft:#eef2ff;
-  --rubjai-bg:#f7f8fc;
-  --rubjai-text:#101828;
-  --rubjai-muted:#667085;
-  --rubjai-border:#e4e7ec;
-  --rubjai-green:#39705a;
-  --rubjai-green-soft:#f1f6f3;
-  --rubjai-orange:#b45309;
-  --rubjai-orange-soft:#fff7ed;
-  --rubjai-red:#b42318;
-  --rubjai-red-soft:#fff2f1;
-}
-html,body{background:var(--rubjai-bg)!important;color:var(--rubjai-text)!important}
-body,button,input,select,textarea,a,label,p,span,div,section,article,h1,h2,h3,h4,h5,h6,strong,small{
-  font-family:"IBM Plex Sans Thai","Noto Sans Thai","Leelawadee UI",sans-serif!important;
-}
-h1,h2,h3,h4,h5,h6{color:var(--rubjai-text)!important;font-weight:600!important}
-input[type="checkbox"],input[type="radio"]{accent-color:var(--rubjai-indigo)!important}
-input:focus,select:focus,textarea:focus{
-  border-color:var(--rubjai-indigo)!important;
-  box-shadow:0 0 0 3px rgba(79,70,229,.10)!important;
-  outline:none!important;
-}
-
-/* Page CTA hierarchy */
-button[type="submit"],input[type="submit"],.primary,.btn-primary,
-.btn:not(.secondary):not(.ghost):not(.outline),
-.deal-auto-line-button,#dealMobileBusy .deal-line-link,#dealLineCloseGuide .deal-close-confirm{
-  background:var(--rubjai-indigo)!important;
-  border-color:var(--rubjai-indigo)!important;
-  color:#fff!important;
-  box-shadow:none!important;
-}
-button[type="submit"]:hover,.primary:hover,.btn-primary:hover,
-.btn:not(.secondary):not(.ghost):not(.outline):hover{
-  background:var(--rubjai-indigo-hover)!important;
-}
-.btn.secondary,.secondary,.ghost,.outline{
-  background:#fff!important;
-  color:#344054!important;
-  border-color:#d0d5dd!important;
-}
-
-/* Totals / summaries must not become black panels */
-.summary,.summary-card,.total-card,.simple7792-total{
-  background:#fff!important;
-  color:var(--rubjai-text)!important;
-  border:1px solid var(--rubjai-border)!important;
-  box-shadow:none!important;
-}
-
-/* Global async feedback */
-#dealMobileBusy{
-  background:rgba(247,248,252,.90)!important;
-  color:var(--rubjai-text)!important;
-  -webkit-backdrop-filter:blur(14px)!important;
-  backdrop-filter:blur(14px)!important;
-}
-#dealMobileBusy .deal-busy-card{
-  background:#fff!important;
-  border:1px solid var(--rubjai-border)!important;
-  border-radius:22px!important;
-  box-shadow:0 24px 60px rgba(16,24,40,.10)!important;
-}
-#dealMobileBusy .deal-spinner{
-  border-color:#e9eaf0!important;
-  border-top-color:var(--rubjai-indigo)!important;
-  border-right-color:#c7d2fe!important;
-}
-#dealMobileBusy .deal-progress{background:#eef0f4!important}
-#dealMobileBusy .deal-progress i{background:var(--rubjai-indigo)!important}
-#dealMobileBusy p{color:var(--rubjai-muted)!important}
-
-/* LINE close/return guide */
-#dealLineCloseGuide{
-  background:rgba(247,248,252,.94)!important;
-  color:var(--rubjai-text)!important;
-}
-#dealLineCloseGuide .deal-close-card{
-  background:#fff!important;
-  border:1px solid var(--rubjai-border)!important;
-  box-shadow:0 24px 60px rgba(16,24,40,.10)!important;
-}
-#dealLineCloseGuide .deal-close-arrow-text{
-  background:var(--rubjai-indigo-soft)!important;
-  color:var(--rubjai-indigo)!important;
-  box-shadow:none!important;
-}
-#dealLineCloseGuide .deal-close-arrow-icon{color:var(--rubjai-indigo)!important}
-#dealLineCloseGuide .deal-close-check{
-  background:var(--rubjai-green-soft)!important;
-  color:var(--rubjai-green)!important;
-}
-#dealLineCloseGuide .deal-close-main{color:#344054!important}
-#dealLineCloseGuide .deal-close-note{
-  background:#f8fafc!important;
-  color:var(--rubjai-muted)!important;
-}
-
-/* Success/error language */
-.check{
-  background:var(--rubjai-green-soft)!important;
-  color:var(--rubjai-green)!important;
-}
-.error{
-  background:var(--rubjai-red-soft)!important;
-  color:var(--rubjai-red)!important;
-}
-
-/* RUBJAI_CI_WEB_THEME_V785 */
-</style>
-\`;
-`;
+    const theme = [
+      "const CI_THEME_V785 = String.raw`",
+      "<style id=\"rubjai-ci-web-theme-v785\">",
+      ":root{",
+      "  --rubjai-navy:#101828;",
+      "  --rubjai-indigo:#4f46e5;",
+      "  --rubjai-indigo-hover:#4338ca;",
+      "  --rubjai-indigo-soft:#eef2ff;",
+      "  --rubjai-bg:#f7f8fc;",
+      "  --rubjai-text:#101828;",
+      "  --rubjai-muted:#667085;",
+      "  --rubjai-border:#e4e7ec;",
+      "  --rubjai-green:#39705a;",
+      "  --rubjai-green-soft:#f1f6f3;",
+      "  --rubjai-orange:#b45309;",
+      "  --rubjai-orange-soft:#fff7ed;",
+      "  --rubjai-red:#b42318;",
+      "  --rubjai-red-soft:#fff2f1;",
+      "}",
+      "html,body{background:var(--rubjai-bg)!important;color:var(--rubjai-text)!important}",
+      "body,button,input,select,textarea,a,label,p,span,div,section,article,h1,h2,h3,h4,h5,h6,strong,small{",
+      "  font-family:\"IBM Plex Sans Thai\",\"Noto Sans Thai\",\"Leelawadee UI\",sans-serif!important;",
+      "}",
+      "h1,h2,h3,h4,h5,h6{color:var(--rubjai-text)!important;font-weight:600!important}",
+      "input[type=\"checkbox\"],input[type=\"radio\"]{accent-color:var(--rubjai-indigo)!important}",
+      "input:focus,select:focus,textarea:focus{",
+      "  border-color:var(--rubjai-indigo)!important;",
+      "  box-shadow:0 0 0 3px rgba(79,70,229,.10)!important;",
+      "  outline:none!important;",
+      "}",
+      "",
+      "/* Page CTA hierarchy */",
+      "button[type=\"submit\"],input[type=\"submit\"],.primary,.btn-primary,",
+      ".btn:not(.secondary):not(.ghost):not(.outline),",
+      ".deal-auto-line-button,#dealMobileBusy .deal-line-link,#dealLineCloseGuide .deal-close-confirm{",
+      "  background:var(--rubjai-indigo)!important;",
+      "  border-color:var(--rubjai-indigo)!important;",
+      "  color:#fff!important;",
+      "  box-shadow:none!important;",
+      "}",
+      "button[type=\"submit\"]:hover,.primary:hover,.btn-primary:hover,",
+      ".btn:not(.secondary):not(.ghost):not(.outline):hover{",
+      "  background:var(--rubjai-indigo-hover)!important;",
+      "}",
+      ".btn.secondary,.secondary,.ghost,.outline{",
+      "  background:#fff!important;",
+      "  color:#344054!important;",
+      "  border-color:#d0d5dd!important;",
+      "}",
+      "",
+      "/* Totals / summaries must not become black panels */",
+      ".summary,.summary-card,.total-card,.simple7792-total{",
+      "  background:#fff!important;",
+      "  color:var(--rubjai-text)!important;",
+      "  border:1px solid var(--rubjai-border)!important;",
+      "  box-shadow:none!important;",
+      "}",
+      "",
+      "/* Global async feedback */",
+      "#dealMobileBusy{",
+      "  background:rgba(247,248,252,.90)!important;",
+      "  color:var(--rubjai-text)!important;",
+      "  -webkit-backdrop-filter:blur(14px)!important;",
+      "  backdrop-filter:blur(14px)!important;",
+      "}",
+      "#dealMobileBusy .deal-busy-card{",
+      "  background:#fff!important;",
+      "  border:1px solid var(--rubjai-border)!important;",
+      "  border-radius:22px!important;",
+      "  box-shadow:0 24px 60px rgba(16,24,40,.10)!important;",
+      "}",
+      "#dealMobileBusy .deal-spinner{",
+      "  border-color:#e9eaf0!important;",
+      "  border-top-color:var(--rubjai-indigo)!important;",
+      "  border-right-color:#c7d2fe!important;",
+      "}",
+      "#dealMobileBusy .deal-progress{background:#eef0f4!important}",
+      "#dealMobileBusy .deal-progress i{background:var(--rubjai-indigo)!important}",
+      "#dealMobileBusy p{color:var(--rubjai-muted)!important}",
+      "",
+      "/* LINE close/return guide */",
+      "#dealLineCloseGuide{",
+      "  background:rgba(247,248,252,.94)!important;",
+      "  color:var(--rubjai-text)!important;",
+      "}",
+      "#dealLineCloseGuide .deal-close-card{",
+      "  background:#fff!important;",
+      "  border:1px solid var(--rubjai-border)!important;",
+      "  box-shadow:0 24px 60px rgba(16,24,40,.10)!important;",
+      "}",
+      "#dealLineCloseGuide .deal-close-arrow-text{",
+      "  background:var(--rubjai-indigo-soft)!important;",
+      "  color:var(--rubjai-indigo)!important;",
+      "  box-shadow:none!important;",
+      "}",
+      "#dealLineCloseGuide .deal-close-arrow-icon{color:var(--rubjai-indigo)!important}",
+      "#dealLineCloseGuide .deal-close-check{",
+      "  background:var(--rubjai-green-soft)!important;",
+      "  color:var(--rubjai-green)!important;",
+      "}",
+      "#dealLineCloseGuide .deal-close-main{color:#344054!important}",
+      "#dealLineCloseGuide .deal-close-note{",
+      "  background:#f8fafc!important;",
+      "  color:var(--rubjai-muted)!important;",
+      "}",
+      "",
+      "/* Success/error language */",
+      ".check{",
+      "  background:var(--rubjai-green-soft)!important;",
+      "  color:var(--rubjai-green)!important;",
+      "}",
+      ".error{",
+      "  background:var(--rubjai-red-soft)!important;",
+      "  color:var(--rubjai-red)!important;",
+      "}",
+      "",
+      "/* RUBJAI_CI_WEB_THEME_V785 */",
+      "</style>",
+      "`;"
+    ].join("\n");
     src = src.replace(anchor, theme + "\n" + anchor);
     src = src.replace(
       "const injection = STYLE + BRAND_THEME + script;",
@@ -355,7 +355,7 @@ const results = {
   mobileFinalTheme: mobile.includes("RUBJAI_CI_WEB_THEME_V785") && mobile.includes("CI_THEME_V785 + script"),
 };
 const failed = Object.entries(results).filter(([,ok]) => !ok).map(([k]) => k);
-if (failed.length) throw new Error(`v7.85.1 CI audit failed: ${failed.join(", ")}`);
+if (failed.length) throw new Error(`v7.85.2 CI audit failed: ${failed.join(", ")}`);
 
 for (const file of Object.values(files)) {
   execFileSync(process.execPath, ["--check", file], { stdio: "inherit" });
@@ -366,4 +366,4 @@ console.log("✅ LINE Flex primary actions = Indigo");
 console.log("✅ Success = muted sage, warning/danger semantic only");
 console.log("✅ LINE web pages = IBM Plex + white/gray + Indigo");
 console.log("✅ Busy/return-to-LINE UI no longer uses black panels/buttons");
-console.log("✅ v7.85.1 semantic CI audit:", JSON.stringify(results));
+console.log("✅ v7.85.2 semantic CI audit:", JSON.stringify(results));
