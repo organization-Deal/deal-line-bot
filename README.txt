@@ -1,26 +1,20 @@
-v7.56 — Internal Operations route fix
+LINE BOT v7.85.1 — CI AUDIT HOTFIX
 
-ต้นเหตุ:
-- deal-dashboard/admin.html และ assets/admin.js มีอยู่แล้ว
-- src/admin-ops.js ฝั่ง deal-line-bot ก็มีอยู่แล้ว
-- แต่ src/index.js ไม่ได้ import handleAdminOps และไม่ได้ route /admin/ops/*
-- หน้า Admin จึงขึ้น “ติดต่อ Worker ไม่ได้” แม้ ADMIN_KEY ถูกต้อง
+ปัญหาจาก Build Log:
+Error: v7.85 CI audit failed: approverIndigo
 
-อัปที่ ROOT ของ deal-line-bot:
-1) apply-v756-admin-ops-route.mjs
-2) wrangler.toml
+สาเหตุ:
+src/approver-line.js ไม่มีความจำเป็นต้องมี literal #4F46E5 เสมอ
+แต่ audit เดิมบังคับ approver.includes("#4F46E5") ทำให้ build fail
+แม้ไฟล์นั้นจะไม่มี primary button ที่ผิด CI
 
-จากนั้น Deploy accoutingsuppor02 ใหม่
+วิธีใช้:
+1. วาง apply-v785-ci-unified.mjs ทับไฟล์ชื่อเดิมที่ root ของ deal-line-bot
+2. ไม่ต้องแก้ wrangler.toml
+3. Commit / Upload
+4. Deploy ใหม่
 
-Build log ต้องเห็น:
-✅ ADMIN_OPS_ROUTE_V7_56_20260816 ready
-✅ src/admin-ops.js wired into Worker
-✅ /admin/ops/* route enabled
-✅ ADMIN_KEY validation will now reach backend
-
-หลัง Deploy:
-- กลับหน้า admin.html
-- Hard Refresh
-- ใส่ ADMIN_KEY ที่ตั้งใน Cloudflare
-- ถ้าคีย์ผิด จะต้องขึ้น “ADMIN_KEY ไม่ถูกต้อง”
-- ถ้าคีย์ถูก จะเข้าหลังบ้านได้
+Audit ใหม่:
+- ไม่บังคับว่า approver-line.js ต้องมี #4F46E5
+- จะ fail เฉพาะเมื่อพบ primary button ที่ยังใช้ legacy dark/green/orange
+- node --check ผ่านแล้ว

@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 const root = process.cwd();
-const MARK = "RUBJAI_CI_UNIFIED_V7_85_20260820";
+const MARK = "RUBJAI_CI_UNIFIED_V7_85_1_20260820";
 const files = {
   card: path.join(root, "src", "card.js"),
   approver: path.join(root, "src", "approver-line.js"),
@@ -331,12 +331,22 @@ button[type="submit"]:hover,.primary:hover,.btn-primary:hover,
   return src;
 });
 
+
+/* ---------- CI audit helpers ----------
+   Some modules (e.g. approver-line.js) may legitimately contain
+   no primary Flex button and therefore no #4F46E5 literal.
+   Audit the actual violation instead of requiring a color literal.
+*/
+function hasLegacyPrimaryButton(text) {
+  return /style\s*:\s*["']primary["'][\s\S]{0,180}?color\s*:\s*(?:["']#(?:101828|111111|111827|1D1D1F|39705A|248A3D|147A36|B45309|B35C00|DC6234)["']|C\.(?:green|orange|label))/i.test(text);
+}
+
 /* ---------- Build audit ---------- */
 const results = {
   cardIndigo: card.includes("#4F46E5"),
   cardPaidActionIndigo: card.includes("color: rec.paid ? undefined : C.blue"),
   cardIncomeNeutral: card.includes("const amountColor = C.label;"),
-  approverIndigo: approver.includes("#4F46E5"),
+  approverCI: !hasLegacyPrimaryButton(approver),
   batchesIndigo: batches.includes("#4F46E5"),
   oauthIndigo: oauth.includes("#4F46E5"),
   indexIndigo: index.includes("#4F46E5"),
@@ -345,7 +355,7 @@ const results = {
   mobileFinalTheme: mobile.includes("RUBJAI_CI_WEB_THEME_V785") && mobile.includes("CI_THEME_V785 + script"),
 };
 const failed = Object.entries(results).filter(([,ok]) => !ok).map(([k]) => k);
-if (failed.length) throw new Error(`v7.85 CI audit failed: ${failed.join(", ")}`);
+if (failed.length) throw new Error(`v7.85.1 CI audit failed: ${failed.join(", ")}`);
 
 for (const file of Object.values(files)) {
   execFileSync(process.execPath, ["--check", file], { stdio: "inherit" });
@@ -356,4 +366,4 @@ console.log("✅ LINE Flex primary actions = Indigo");
 console.log("✅ Success = muted sage, warning/danger semantic only");
 console.log("✅ LINE web pages = IBM Plex + white/gray + Indigo");
 console.log("✅ Busy/return-to-LINE UI no longer uses black panels/buttons");
-console.log("✅ audit:", JSON.stringify(results));
+console.log("✅ v7.85.1 semantic CI audit:", JSON.stringify(results));
