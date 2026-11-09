@@ -1,0 +1,29 @@
+{
+  "release": "NAKNA-ACCOUNTING-PERFORMANCE-1.2.0",
+  "date": "2026-11-09",
+  "unit_test_count": 51,
+  "passed": 51,
+  "failed": 0,
+  "test_environment": "Node 22; vm/mocked API and KV, not production",
+  "frontend_build_fixture": "PASS: prepare, repeated build, brand preservation, guard ordering and hashed cache version",
+  "full_repository_wrangler_build": "NOT RUN - no full local repository available",
+  "production_api_timing": "NOT MEASURED - no authenticated browser access",
+  "deployed": false,
+  "source_refs": {
+    "dashboard_core": "855b82f484c738de8ca0894d006123e072f7ba2f",
+    "dashboard_prepare_1_1": "85f7992f266e93e6e7948f5717d37be912d0cb9c",
+    "backend_index": "85a93c540bfb1e0b860ec690fba511c2f5693276",
+    "backend_v784_build": "b8a5c8a5c4c4d59e1e404649cadf02060d418c88"
+  },
+  "checks": [
+    "primary independent of optional requests",
+    "optional concurrency <= 2",
+    "metadata-only plan leaves PLAN_INFO unchanged",
+    "auth 401/403 retained",
+    "full billing preserved",
+    "KV account reads zero writes when normalized",
+    "in-flight token isolation by tenant and environment",
+    "retryable failures",
+    "idempotent patch and config installer"
+  ]
+}

@@ -1,0 +1,316 @@
+TAP version 13
+# Subtest: summary free plan derives real plan, with no usage/permission flags
+ok 1 - summary free plan derives real plan, with no usage/permission flags
+  ---
+  duration_ms: 1.986697
+  type: 'test'
+  ...
+# Subtest: active plan summary matches metadata
+ok 2 - active plan summary matches metadata
+  ---
+  duration_ms: 0.210528
+  type: 'test'
+  ...
+# Subtest: unexpired trial summary is Business
+ok 3 - unexpired trial summary is Business
+  ---
+  duration_ms: 1.357356
+  type: 'test'
+  ...
+# Subtest: expired trial is not claimed active
+ok 4 - expired trial is not claimed active
+  ---
+  duration_ms: 0.276787
+  type: 'test'
+  ...
+# Subtest: invalid plan falls back to server free catalog
+ok 5 - invalid plan falls back to server free catalog
+  ---
+  duration_ms: 0.21865
+  type: 'test'
+  ...
+# Subtest: unknown metadata fails instead of fabricating plan
+ok 6 - unknown metadata fails instead of fabricating plan
+  ---
+  duration_ms: 12.260553
+  type: 'test'
+  ...
+# Subtest: patch idempotent
+ok 7 - patch idempotent
+  ---
+  duration_ms: 5.404664
+  type: 'test'
+  ...
+# Subtest: missing expected build fails closed
+ok 8 - missing expected build fails closed
+  ---
+  duration_ms: 1.528413
+  type: 'test'
+  ...
+# Subtest: summary stays behind access control
+ok 9 - summary stays behind access control
+  ---
+  duration_ms: 5.704395
+  type: 'test'
+  ...
+# Subtest: unauthorized summary cannot read metadata
+ok 10 - unauthorized summary cannot read metadata
+  ---
+  duration_ms: 3.779848
+  type: 'test'
+  ...
+# Subtest: forbidden role retains 403
+ok 11 - forbidden role retains 403
+  ---
+  duration_ms: 9.254254
+  type: 'test'
+  ...
+# Subtest: normal billing continues through full Google/data branch
+ok 12 - normal billing continues through full Google/data branch
+  ---
+  duration_ms: 4.753322
+  type: 'test'
+  ...
+# Subtest: POST never uses read-only summary shortcut
+ok 13 - POST never uses read-only summary shortcut
+  ---
+  duration_ms: 4.060952
+  type: 'test'
+  ...
+# Subtest: healthy registry read performs ZERO writes
+ok 14 - healthy registry read performs ZERO writes
+  ---
+  duration_ms: 4.449421
+  type: 'test'
+  ...
+# Subtest: new registry is created once and second read is read-only
+ok 15 - new registry is created once and second read is read-only
+  ---
+  duration_ms: 7.229919
+  type: 'test'
+  ...
+# Subtest: registry failure does not overwrite existing account
+ok 16 - registry failure does not overwrite existing account
+  ---
+  duration_ms: 6.484917
+  type: 'test'
+  ...
+# Subtest: account normalization retains other account fields
+ok 17 - account normalization retains other account fields
+  ---
+  duration_ms: 5.299873
+  type: 'test'
+  ...
+# Subtest: OAuth patch idempotent
+ok 18 - OAuth patch idempotent
+  ---
+  duration_ms: 0.541352
+  type: 'test'
+  ...
+# Subtest: same environment and tenant shares only in-flight OAuth
+ok 19 - same environment and tenant shares only in-flight OAuth
+  ---
+  duration_ms: 4.856273
+  type: 'test'
+  ...
+# Subtest: different tenants never share OAuth result
+ok 20 - different tenants never share OAuth result
+  ---
+  duration_ms: 3.461897
+  type: 'test'
+  ...
+# Subtest: different environments never share OAuth result
+ok 21 - different environments never share OAuth result
+  ---
+  duration_ms: 1.256805
+  type: 'test'
+  ...
+# Subtest: OAuth revocation/null not converted to success or cached
+ok 22 - OAuth revocation/null not converted to success or cached
+  ---
+  duration_ms: 2.523801
+  type: 'test'
+  ...
+# Subtest: OAuth failure is retryable and remains a rejection
+ok 23 - OAuth failure is retryable and remains a rejection
+  ---
+  duration_ms: 1.486365
+  type: 'test'
+  ...
+# Subtest: config installer preserves vars/bindings and is repeatable
+ok 24 - config installer preserves vars/bindings and is repeatable
+  ---
+  duration_ms: 5.469601
+  type: 'test'
+  ...
+# Subtest: wrong repo installer refuses mutation
+ok 25 - wrong repo installer refuses mutation
+  ---
+  duration_ms: 1.060336
+  type: 'test'
+  ...
+# Subtest: patch works with original and 1.1 load anchors
+ok 26 - patch works with original and 1.1 load anchors
+  ---
+  duration_ms: 3.625783
+  type: 'test'
+  ...
+# Subtest: source patch idempotent
+ok 27 - source patch idempotent
+  ---
+  duration_ms: 1.102
+  type: 'test'
+  ...
+# Subtest: unsupported source fails closed
+ok 28 - unsupported source fails closed
+  ---
+  duration_ms: 1.762247
+  type: 'test'
+  ...
+# Subtest: duplicate function definition stops build
+ok 29 - duplicate function definition stops build
+  ---
+  duration_ms: 0.477746
+  type: 'test'
+  ...
+# Subtest: slow settings and optional APIs do not hold boot
+ok 30 - slow settings and optional APIs do not hold boot
+  ---
+  duration_ms: 5.099248
+  type: 'test'
+  ...
+# Subtest: primary starts before optional metadata
+ok 31 - primary starts before optional metadata
+  ---
+  duration_ms: 14.453076
+  type: 'test'
+  ...
+# Subtest: overview does not eagerly probe Gmail or Google or unopened ledgers
+ok 32 - overview does not eagerly probe Gmail or Google or unopened ledgers
+  ---
+  duration_ms: 1.81715
+  type: 'test'
+  ...
+# Subtest: secondary concurrency bounded at two
+ok 33 - secondary concurrency bounded at two
+  ---
+  duration_ms: 7.955186
+  type: 'test'
+  ...
+# Subtest: settings controls still get health checks
+ok 34 - settings controls still get health checks
+  ---
+  duration_ms: 2.589164
+  type: 'test'
+  ...
+# Subtest: missing credentials makes no data request
+ok 35 - missing credentials makes no data request
+  ---
+  duration_ms: 3.279411
+  type: 'test'
+  ...
+# Subtest: 401 blocking state remains blocked with no retry/fanout
+ok 36 - 401 blocking state remains blocked with no retry/fanout
+  ---
+  duration_ms: 2.222718
+  type: 'test'
+  ...
+# Subtest: primary exception leaves boot and reports error
+ok 37 - primary exception leaves boot and reports error
+  ---
+  duration_ms: 1.989468
+  type: 'test'
+  ...
+# Subtest: failed settings never force setup wizard
+ok 38 - failed settings never force setup wizard
+  ---
+  duration_ms: 2.412748
+  type: 'test'
+  ...
+# Subtest: batches route only reads its primary endpoint
+ok 39 - batches route only reads its primary endpoint
+  ---
+  duration_ms: 1.561081
+  type: 'test'
+  ...
+# Subtest: income route only reads income
+ok 40 - income route only reads income
+  ---
+  duration_ms: 1.579471
+  type: 'test'
+  ...
+# Subtest: existing OAuth return is preserved
+ok 41 - existing OAuth return is preserved
+  ---
+  duration_ms: 4.240599
+  type: 'test'
+  ...
+# Subtest: overview requests metadata-only, not full quota
+ok 42 - overview requests metadata-only, not full quota
+  ---
+  duration_ms: 4.302786
+  type: 'test'
+  ...
+# Subtest: summary never overwrites full PLAN_INFO or calls billing renderer
+ok 43 - summary never overwrites full PLAN_INFO or calls billing renderer
+  ---
+  duration_ms: 3.530988
+  type: 'test'
+  ...
+# Subtest: summary contains actual plan name on banner
+ok 44 - summary contains actual plan name on banner
+  ---
+  duration_ms: 2.00254
+  type: 'test'
+  ...
+# Subtest: billing requests full data and keeps quota renderer
+ok 45 - billing requests full data and keeps quota renderer
+  ---
+  duration_ms: 2.802857
+  type: 'test'
+  ...
+# Subtest: billing rejects summary instead of displaying false zero
+ok 46 - billing rejects summary instead of displaying false zero
+  ---
+  duration_ms: 1.867502
+  type: 'test'
+  ...
+# Subtest: plan failure exits loading even when quiet
+ok 47 - plan failure exits loading even when quiet
+  ---
+  duration_ms: 1.629526
+  type: 'test'
+  ...
+# Subtest: simultaneous plan reads share in-flight work
+ok 48 - simultaneous plan reads share in-flight work
+  ---
+  duration_ms: 1.877997
+  type: 'test'
+  ...
+# Subtest: failed plan request is retryable and not cached
+ok 49 - failed plan request is retryable and not cached
+  ---
+  duration_ms: 1.534208
+  type: 'test'
+  ...
+# Subtest: return from full billing cannot be overwritten by late summary
+ok 50 - return from full billing cannot be overwritten by late summary
+  ---
+  duration_ms: 1.790521
+  type: 'test'
+  ...
+# Subtest: no observer/persistent record cache/authorization shortcuts introduced
+ok 51 - no observer/persistent record cache/authorization shortcuts introduced
+  ---
+  duration_ms: 0.294067
+  type: 'test'
+  ...
+1..51
+# tests 51
+# suites 0
+# pass 51
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 276.540942
