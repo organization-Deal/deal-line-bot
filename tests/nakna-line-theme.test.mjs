@@ -1,0 +1,22 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {naknaAccountingMessages} from '../branding/nakna-line-theme.mjs';
+import {patchLineSender} from '../scripts/prepare-nakna-line-brand.mjs';
+const message={type:'flex',altText:'สรุปบัญชีของคุณ',contents:{type:'bubble',body:{type:'box',layout:'vertical',contents:[{type:'text',text:'บริษัท ตัวอย่าง จำกัด',color:'#11162E'},{type:'text',text:'฿612',color:'#B42318'},{type:'text',text:'ข้อมูลรอง',color:'#667085'}]},footer:{type:'box',layout:'vertical',contents:[{type:'button',style:'primary',color:'#11162E',action:{type:'uri',label:'เปิดแดชบอร์ด',uri:'https://example.com/?tenant=A&k=not-a-real-secret'}}]}}};
+test('primary button teal; text same Nakna palette',()=>{const r=naknaAccountingMessages(message)[0];assert.equal(r.contents.footer.contents[0].color,'#04878A');assert.equal(r.contents.body.contents[0].color,'#153C45');assert.equal(r.contents.body.contents[2].color,'#5C7178');});
+test('tenant name, financial amounts, and danger semantics preserved',()=>{const r=naknaAccountingMessages(message)[0];assert.equal(r.contents.body.contents[0].text,'บริษัท ตัวอย่าง จำกัด');assert.equal(r.contents.body.contents[1].text,'฿612');assert.equal(r.contents.body.contents[1].color,'#B42318');});
+test('signed action remains byte-equivalent data',()=>{const r=naknaAccountingMessages(message)[0];assert.deepEqual(r.contents.footer.contents[0].action,message.contents.footer.contents[0].action);});
+test('adds product header without removing content',()=>{const r=naknaAccountingMessages(message)[0];assert.equal(r.contents.header.contents[0].text,'นากนะ บัญชี');assert.equal(r.contents.body.contents.length,3);});
+test('does not mutate original',()=>{const before=JSON.stringify(message);naknaAccountingMessages(message);assert.equal(JSON.stringify(message),before);});
+test('repeated transformation does not duplicate headers or prefixes',()=>{const a=naknaAccountingMessages(message);assert.deepEqual(naknaAccountingMessages(a),a);});
+test('non-Flex text/file/image messages untouched',()=>{const a={type:'text',text:'รับจ่ายได้หมด is a company field'};assert.equal(naknaAccountingMessages(a)[0],a);});
+test('carousel bubbles supported',()=>{const r=naknaAccountingMessages({type:'flex',altText:'test',contents:{type:'carousel',contents:[message.contents,message.contents]}})[0];assert.equal(r.contents.contents[1].header.contents[0].text,'นากนะ บัญชี');});
+test('existing custom headers retained',()=>{const m=structuredClone(message);m.contents.header={type:'text',text:'existing'};assert.equal(naknaAccountingMessages(m)[0].contents.header.text,'existing');});
+test('destructive primary action distinguished',()=>{const m=structuredClone(message);m.contents.footer.contents[0].action.label='ไม่อนุมัติ';assert.equal(naknaAccountingMessages(m)[0].contents.footer.contents[0].color,'#B43E40');});
+test('alt text bounded',()=>{const m=structuredClone(message);m.altText='ก'.repeat(500);assert.equal(naknaAccountingMessages(m)[0].altText.length,400);});
+test('no unsupported font-family property emitted',()=>{const r=naknaAccountingMessages(message);assert(!JSON.stringify(r).includes('fontFamily'));});
+const sender=`export async function reply(env,replyToken,messages){
+ const res=await fetch("https://api.line.me/v2/bot/message/reply",{method:"POST",headers:{Authorization:env.LINE_ACCESS_TOKEN},body:JSON.stringify({replyToken,messages: Array.isArray(messages) ? messages : [messages]})});
+}`;
+test('sender preserves auth and transport, changes only messages serialization',()=>{const {out,count}=patchLineSender(sender,'line.js');assert.equal(count,1);assert(out.includes('Authorization:env.LINE_ACCESS_TOKEN'));assert(out.includes('replyToken,messages: naknaAccountingMessages(messages)'));});
+test('sender patch idempotent',()=>{const a=patchLineSender(sender,'x').out;assert.equal(patchLineSender(a,'x').out,a);});
+test('unknown sender fails closed',()=>assert.throws(()=>patchLineSender('function foo(){}','x')));

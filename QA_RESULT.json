@@ -1,0 +1,58 @@
+{
+  "release": "1.1.0",
+  "checked_date": "2026-11-09",
+  "scope": "accounting dashboard + LINE Flex sender repair",
+  "automated_tests": {
+    "dashboard_pass": 20,
+    "line_pass": 15,
+    "total_pass": 35
+  },
+  "browser_fixture": [
+    {
+      "width": 390,
+      "assertions": {
+        "primary": "rgb(4, 135, 138)",
+        "hero": "rgb(232, 245, 245)",
+        "heading": "rgb(21, 60, 69)",
+        "font": "\"IBM Plex Sans Thai\", \"IBM Plex Sans\", \"Noto Sans Thai\", \"Leelawadee UI\", system-ui, sans-serif",
+        "danger": "rgb(180, 62, 64)",
+        "overflow": false
+      },
+      "timeoutNotice": true,
+      "javascriptErrors": [],
+      "type": "synthetic regression fixture, not production"
+    },
+    {
+      "width": 768,
+      "assertions": {
+        "primary": "rgb(4, 135, 138)",
+        "hero": "rgb(232, 245, 245)",
+        "heading": "rgb(21, 60, 69)",
+        "font": "\"IBM Plex Sans Thai\", \"IBM Plex Sans\", \"Noto Sans Thai\", \"Leelawadee UI\", system-ui, sans-serif",
+        "danger": "rgb(180, 62, 64)",
+        "overflow": false
+      },
+      "timeoutNotice": true,
+      "javascriptErrors": [],
+      "type": "synthetic regression fixture, not production"
+    },
+    {
+      "width": 1440,
+      "assertions": {
+        "primary": "rgb(4, 135, 138)",
+        "hero": "rgb(232, 245, 245)",
+        "heading": "rgb(21, 60, 69)",
+        "font": "\"IBM Plex Sans Thai\", \"IBM Plex Sans\", \"Noto Sans Thai\", \"Leelawadee UI\", system-ui, sans-serif",
+        "danger": "rgb(180, 62, 64)",
+        "overflow": false
+      },
+      "timeoutNotice": true,
+      "javascriptErrors": [],
+      "type": "synthetic regression fixture, not production"
+    }
+  ],
+  "production_deployed": false,
+  "production_authenticated_latency_measured": false,
+  "full_legacy_build_executed": false,
+  "line_send_or_validate_api_called": false
+}

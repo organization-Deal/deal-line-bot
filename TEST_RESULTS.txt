@@ -1,0 +1,100 @@
+TAP version 13
+# Subtest: primary button teal; text same Nakna palette
+ok 1 - primary button teal; text same Nakna palette
+  ---
+  duration_ms: 1.96419
+  type: 'test'
+  ...
+# Subtest: tenant name, financial amounts, and danger semantics preserved
+ok 2 - tenant name, financial amounts, and danger semantics preserved
+  ---
+  duration_ms: 0.396287
+  type: 'test'
+  ...
+# Subtest: signed action remains byte-equivalent data
+ok 3 - signed action remains byte-equivalent data
+  ---
+  duration_ms: 0.7829
+  type: 'test'
+  ...
+# Subtest: adds product header without removing content
+ok 4 - adds product header without removing content
+  ---
+  duration_ms: 0.22252
+  type: 'test'
+  ...
+# Subtest: does not mutate original
+ok 5 - does not mutate original
+  ---
+  duration_ms: 0.368726
+  type: 'test'
+  ...
+# Subtest: repeated transformation does not duplicate headers or prefixes
+ok 6 - repeated transformation does not duplicate headers or prefixes
+  ---
+  duration_ms: 0.490297
+  type: 'test'
+  ...
+# Subtest: non-Flex text/file/image messages untouched
+ok 7 - non-Flex text/file/image messages untouched
+  ---
+  duration_ms: 0.1553
+  type: 'test'
+  ...
+# Subtest: carousel bubbles supported
+ok 8 - carousel bubbles supported
+  ---
+  duration_ms: 0.400233
+  type: 'test'
+  ...
+# Subtest: existing custom headers retained
+ok 9 - existing custom headers retained
+  ---
+  duration_ms: 1.497739
+  type: 'test'
+  ...
+# Subtest: destructive primary action distinguished
+ok 10 - destructive primary action distinguished
+  ---
+  duration_ms: 0.563364
+  type: 'test'
+  ...
+# Subtest: alt text bounded
+ok 11 - alt text bounded
+  ---
+  duration_ms: 0.226846
+  type: 'test'
+  ...
+# Subtest: no unsupported font-family property emitted
+ok 12 - no unsupported font-family property emitted
+  ---
+  duration_ms: 0.200527
+  type: 'test'
+  ...
+# Subtest: sender preserves auth and transport, changes only messages serialization
+ok 13 - sender preserves auth and transport, changes only messages serialization
+  ---
+  duration_ms: 0.272614
+  type: 'test'
+  ...
+# Subtest: sender patch idempotent
+ok 14 - sender patch idempotent
+  ---
+  duration_ms: 0.082642
+  type: 'test'
+  ...
+# Subtest: unknown sender fails closed
+ok 15 - unknown sender fails closed
+  ---
+  duration_ms: 0.213746
+  type: 'test'
+  ...
+1..15
+# tests 15
+# suites 0
+# pass 15
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 98.374431
